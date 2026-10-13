@@ -1,4 +1,4 @@
-use yiterm::{diagnostics, paste, ssh};
+use yiterm::{mouse, paste, ssh};
 
 macro_rules! mouse_trace {
     ($($arg:tt)*) => {
@@ -70,7 +70,8 @@ struct PasteResult {
 struct TerminalApp {
     term: Term<Listener>,
     parser: Processor,
-    mouse_modes: diagnostics::MouseModes,
+    mouse_modes: mouse::MouseModes,
+    mouse_wheel: mouse::Wheel,
     output: mpsc::Receiver<Vec<u8>>,
     events: mpsc::Receiver<Event>,
     writer: Box<dyn Write + Send>,
@@ -145,7 +146,8 @@ impl TerminalApp {
         Ok(Self {
             term,
             parser: Processor::new(),
-            mouse_modes: diagnostics::MouseModes::default(),
+            mouse_modes: mouse::MouseModes::default(),
+            mouse_wheel: mouse::Wheel::default(),
             output,
             events,
             writer,
@@ -173,11 +175,11 @@ impl TerminalApp {
     }
     fn write_mouse(&mut self, report: &[u8]) {
         mouse_trace!(
-            "send mode={:?} cols={} rows={} hex={}",
-            self.term.mode(),
+            "send protocol={:?} cols={} rows={} hex={}",
+            self.mouse_modes.protocol(*self.term.mode(), cfg!(windows)),
             self.size.cols,
             self.size.rows,
-            diagnostics::hex(report)
+            mouse::hex(report)
         );
         match self
             .writer
@@ -324,11 +326,7 @@ impl eframe::App for TerminalApp {
                 break;
             };
             let previous_mode = *self.term.mode();
-            let requests = if cfg!(windows) {
-                self.mouse_modes.observe(&bytes)
-            } else {
-                Vec::new()
-            };
+            let requests = self.mouse_modes.observe(&bytes);
             self.parser.advance(&mut self.term, &bytes);
             for (mode, enabled) in requests {
                 mouse_trace!("request mode={mode} enabled={enabled}");
@@ -394,20 +392,25 @@ impl eframe::App for TerminalApp {
                 self.size = size;
             }
             let scroll = ctx.input(|i| i.smooth_scroll_delta.y);
-            let mouse_mode = *self.term.mode();
+            let mouse_protocol = self.mouse_modes.protocol(*self.term.mode(), cfg!(windows));
+            let mouse_mode = mouse_protocol.mode;
             let report_mouse = mouse_mode.intersects(TermMode::MOUSE_MODE)
                 && !ctx.input(|i| i.modifiers.shift)
                 && self.term.grid().display_offset() == 0;
+            if !report_mouse { self.mouse_wheel.reset(); }
             if scroll != 0.0 {
                 mouse_trace!("wheel delta={scroll} report={report_mouse} shift={} offset={} mode={mouse_mode:?}", ctx.input(|i| i.modifiers.shift), self.term.grid().display_offset());
                 if report_mouse {
                     if let Some(pos) = ctx.input(|i| i.pointer.hover_pos()).filter(|pos| rect.contains(*pos)) {
-                        let button = if scroll > 0.0 { 64 } else { 65 };
-                        for _ in 0..((scroll.abs() / cell.y).round() as usize).max(1) {
-                            if let Some(bytes) = mouse_bytes(mouse_mode, rect, cell, size, pos, (button, true), ctx.input(|i| i.modifiers)) {
+                        let steps = self.mouse_wheel.add(scroll, cell.y);
+                        let button = if steps > 0 { 64 } else { 65 };
+                        for _ in 0..steps.unsigned_abs() {
+                            if let Some(bytes) = mouse_bytes(mouse_protocol, rect, cell, size, pos, (button, true), ctx.input(|i| i.modifiers)) {
                                 self.write_mouse(&bytes);
                             }
                         }
+                    } else {
+                        self.mouse_wheel.reset();
                     }
                 } else {
                     self.term.scroll_display(Scroll::Delta((scroll / cell.y).round() as i32));
@@ -475,7 +478,7 @@ impl eframe::App for TerminalApp {
                         mouse_trace!("button={button:?} pressed={pressed} report={report_mouse} inside={} shift={} offset={} pos={pos:?} rect={rect:?} cell={cell:?} mode={mouse_mode:?}", rect.contains(pos), modifiers.shift, self.term.grid().display_offset());
                         if report_mouse && (rect.contains(pos) || (!pressed && tracked))
                             && let Some(code) = mouse_button_code(button) {
-                                if let Some(bytes) = mouse_bytes(mouse_mode, rect, cell, size, pos, (code, pressed), modifiers) {
+                                if let Some(bytes) = mouse_bytes(mouse_protocol, rect, cell, size, pos, (code, pressed), modifiers) {
                                     self.write_mouse(&bytes);
                                 }
                                 if pressed { self.mouse_button = Some(button); }
@@ -486,7 +489,7 @@ impl eframe::App for TerminalApp {
                         if rect.contains(pos) && (mouse_mode.contains(TermMode::MOUSE_MOTION)
                             || (mouse_mode.contains(TermMode::MOUSE_DRAG) && self.mouse_button.is_some())) {
                             let code = self.mouse_button.and_then(mouse_button_code).unwrap_or(3) + 32;
-                            if let Some(bytes) = mouse_bytes(mouse_mode, rect, cell, size, pos, (code, true), ctx.input(|i| i.modifiers)) {
+                            if let Some(bytes) = mouse_bytes(mouse_protocol, rect, cell, size, pos, (code, true), ctx.input(|i| i.modifiers)) {
                                 self.write(&bytes);
                             }
                         }
@@ -534,7 +537,7 @@ fn mouse_button_code(button: egui::PointerButton) -> Option<u8> {
 }
 
 fn mouse_bytes(
-    mode: TermMode,
+    protocol: mouse::Protocol,
     rect: Rect,
     cell: Vec2,
     size: Size,
@@ -542,6 +545,7 @@ fn mouse_bytes(
     action: (u8, bool),
     modifiers: egui::Modifiers,
 ) -> Option<Vec<u8>> {
+    let mode = protocol.mode;
     let (button, pressed) = action;
     let col = (((pos.x - rect.min.x) / cell.x).floor().max(0.0) as usize).min(size.cols - 1) + 1;
     let row = (((pos.y - rect.min.y) / cell.y).floor().max(0.0) as usize).min(size.rows - 1) + 1;
@@ -550,6 +554,9 @@ fn mouse_bytes(
     if mode.contains(TermMode::SGR_MOUSE) {
         let suffix = if pressed { 'M' } else { 'm' };
         Some(format!("\x1b[<{};{col};{row}{suffix}", button + modifiers).into_bytes())
+    } else if protocol.urxvt {
+        let code = if pressed { button } else { 3 };
+        Some(format!("\x1b[{};{col};{row}M", 32 + code + modifiers).into_bytes())
     } else {
         // The original X10 encoding cannot represent coordinates above 223.
         if col > 223 || row > 223 {
@@ -683,9 +690,9 @@ mod tests {
         let rect = Rect::from_min_size(egui::pos2(10.0, 20.0), Vec2::new(800.0, 500.0));
         let cell = Vec2::new(10.0, 20.0);
         let size = Size { cols: 80, rows: 25 };
-        let encode = |mode, pos, button, pressed| {
+        let encode = |mode: TermMode, pos, button, pressed| {
             mouse_bytes(
-                mode,
+                mode.into(),
                 rect,
                 cell,
                 size,
@@ -714,6 +721,34 @@ mod tests {
             encode(TermMode::SGR_MOUSE, rect.max, 64, true),
             Some(b"\x1b[<64;80;25M".to_vec())
         );
+    }
+    #[test]
+    fn urxvt_reports_preserve_large_coordinates_and_event_types() {
+        let protocol = mouse::Protocol {
+            mode: TermMode::MOUSE_DRAG,
+            urxvt: true,
+        };
+        let rect = Rect::from_min_size(egui::Pos2::ZERO, Vec2::new(4000.0, 500.0));
+        let encode = |button, pressed| {
+            mouse_bytes(
+                protocol,
+                rect,
+                Vec2::new(10.0, 20.0),
+                Size {
+                    cols: 400,
+                    rows: 25,
+                },
+                egui::pos2(2995.0, 10.0),
+                (button, pressed),
+                egui::Modifiers::NONE,
+            )
+            .unwrap()
+        };
+        assert_eq!(encode(0, true), b"\x1b[32;300;1M");
+        assert_eq!(encode(0, false), b"\x1b[35;300;1M");
+        assert_eq!(encode(32, true), b"\x1b[64;300;1M");
+        assert_eq!(encode(64, true), b"\x1b[96;300;1M");
+        assert_eq!(encode(65, true), b"\x1b[97;300;1M");
     }
     #[test]
     fn ime_reserves_composition_and_commit_keys() {

@@ -1,3 +1,3 @@
-pub mod diagnostics;
+pub mod mouse;
 pub mod paste;
 pub mod ssh;
