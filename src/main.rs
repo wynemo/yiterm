@@ -16,7 +16,7 @@ use portable_pty::{MasterPty, PtySize};
 use std::{
     io::{Read, Write},
     sync::mpsc,
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 #[derive(Parser)]
@@ -72,6 +72,7 @@ struct TerminalApp {
     paste_sender: mpsc::Sender<Result<PasteResult>>,
     paste_busy: bool,
     ime_preedit: String,
+    cursor_blink_started: Instant,
     status: String,
     size: Size,
 }
@@ -123,7 +124,9 @@ impl TerminalApp {
         });
         let (tx, events) = mpsc::channel();
         let size = Size { cols: 80, rows: 24 };
-        let term = Term::new(Config::default(), &size, Listener(tx));
+        let mut config = Config::default();
+        config.default_cursor_style.blinking = true;
+        let term = Term::new(config, &size, Listener(tx));
         let (paste_sender, paste_result) = mpsc::channel();
         Ok(Self {
             term,
@@ -138,6 +141,7 @@ impl TerminalApp {
             paste_sender,
             paste_busy: false,
             ime_preedit: String::new(),
+            cursor_blink_started: Instant::now(),
             status: "Ready · paste: Cmd+V / Ctrl+Shift+V".into(),
             size,
         })
@@ -264,11 +268,22 @@ fn color(color: Color, foreground: bool) -> Color32 {
 
 impl eframe::App for TerminalApp {
     fn update(&mut self, ctx: &egui::Context, _: &mut eframe::Frame) {
+        // Keep the cursor visible while typing and restart its blink on focus.
+        if ctx.input(|input| input.events.iter().any(|event| matches!(event,
+            egui::Event::Key { pressed: true, .. }
+                | egui::Event::Text(_)
+                | egui::Event::Paste(_)
+                | egui::Event::Ime(_)
+                | egui::Event::WindowFocused(true)
+        ))) {
+            self.cursor_blink_started = Instant::now();
+        }
         for _ in 0..128 {
             let Ok(bytes) = self.output.try_recv() else {
                 break;
             };
             self.parser.advance(&mut self.term, &bytes);
+            self.cursor_blink_started = Instant::now();
         }
         while let Ok(event) = self.events.try_recv() {
             match event {
@@ -362,7 +377,10 @@ impl eframe::App for TerminalApp {
                     }
                 }
             }
-            if offset == 0 && self.term.mode().contains(TermMode::SHOW_CURSOR) {
+            let blink_visible = !ctx.input(|input| input.focused)
+                || !self.term.cursor_style().blinking
+                || self.cursor_blink_started.elapsed().as_millis() % 1000 < 500;
+            if offset == 0 && self.term.mode().contains(TermMode::SHOW_CURSOR) && blink_visible {
                 let point = content.cursor.point;
                 let pos = rect.min + Vec2::new(point.column.0 as f32 * cell.x, point.line.0 as f32 * cell.y);
                 ui.painter().rect_stroke(Rect::from_min_size(pos, cell), 0.0, (1.0, Color32::LIGHT_GRAY), egui::StrokeKind::Inside);
