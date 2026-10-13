@@ -1,4 +1,12 @@
-use yiterm::{conpty, paste, ssh};
+use yiterm::{diagnostics, paste, ssh};
+
+macro_rules! mouse_trace {
+    ($($arg:tt)*) => {
+        if cfg!(windows) {
+            eprintln!("[yiterm mouse] {}", format_args!($($arg)*));
+        }
+    };
+}
 
 use alacritty_terminal::{
     Term,
@@ -62,7 +70,7 @@ struct PasteResult {
 struct TerminalApp {
     term: Term<Listener>,
     parser: Processor,
-    conpty_input: conpty::Input,
+    mouse_modes: diagnostics::MouseModes,
     output: mpsc::Receiver<Vec<u8>>,
     events: mpsc::Receiver<Event>,
     writer: Box<dyn Write + Send>,
@@ -80,6 +88,10 @@ struct TerminalApp {
 }
 impl TerminalApp {
     fn new(args: Args) -> Result<Self> {
+        mouse_trace!(
+            "build={} transport=raw_vt",
+            option_env!("YITERM_BUILD_REV").unwrap_or("local")
+        );
         let integration = ssh::Integration::new(&std::env::current_exe()?)?;
         if let Some(host) = &args.ssh {
             ssh::parse(std::slice::from_ref(host))?;
@@ -133,7 +145,7 @@ impl TerminalApp {
         Ok(Self {
             term,
             parser: Processor::new(),
-            conpty_input: conpty::Input::default(),
+            mouse_modes: diagnostics::MouseModes::default(),
             output,
             events,
             writer,
@@ -160,11 +172,23 @@ impl TerminalApp {
         }
     }
     fn write_mouse(&mut self, report: &[u8]) {
-        if cfg!(windows) {
-            let wire = self.conpty_input.mouse_report(report);
-            self.write(&wire);
-        } else {
-            self.write(report);
+        mouse_trace!(
+            "send mode={:?} cols={} rows={} hex={}",
+            self.term.mode(),
+            self.size.cols,
+            self.size.rows,
+            diagnostics::hex(report)
+        );
+        match self
+            .writer
+            .write_all(report)
+            .and_then(|_| self.writer.flush())
+        {
+            Ok(()) => mouse_trace!("write_ok"),
+            Err(error) => {
+                mouse_trace!("write_error={error}");
+                self.status = error.to_string();
+            }
         }
     }
     fn paste(&mut self) {
@@ -299,10 +323,19 @@ impl eframe::App for TerminalApp {
             let Ok(bytes) = self.output.try_recv() else {
                 break;
             };
-            if cfg!(windows) {
-                self.conpty_input.observe(&bytes);
-            }
+            let previous_mode = *self.term.mode();
+            let requests = if cfg!(windows) {
+                self.mouse_modes.observe(&bytes)
+            } else {
+                Vec::new()
+            };
             self.parser.advance(&mut self.term, &bytes);
+            for (mode, enabled) in requests {
+                mouse_trace!("request mode={mode} enabled={enabled}");
+            }
+            if previous_mode != *self.term.mode() {
+                mouse_trace!("state {:?}", self.term.mode());
+            }
             self.cursor_blink_started = Instant::now();
         }
         while let Ok(event) = self.events.try_recv() {
@@ -366,6 +399,7 @@ impl eframe::App for TerminalApp {
                 && !ctx.input(|i| i.modifiers.shift)
                 && self.term.grid().display_offset() == 0;
             if scroll != 0.0 {
+                mouse_trace!("wheel delta={scroll} report={report_mouse} shift={} offset={} mode={mouse_mode:?}", ctx.input(|i| i.modifiers.shift), self.term.grid().display_offset());
                 if report_mouse {
                     if let Some(pos) = ctx.input(|i| i.pointer.hover_pos()).filter(|pos| rect.contains(*pos)) {
                         let button = if scroll > 0.0 { 64 } else { 65 };
@@ -438,6 +472,7 @@ impl eframe::App for TerminalApp {
                 match event {
                     egui::Event::PointerButton { pos, button, pressed, modifiers } => {
                         let tracked = self.mouse_button == Some(button);
+                        mouse_trace!("button={button:?} pressed={pressed} report={report_mouse} inside={} shift={} offset={} pos={pos:?} rect={rect:?} cell={cell:?} mode={mouse_mode:?}", rect.contains(pos), modifiers.shift, self.term.grid().display_offset());
                         if report_mouse && (rect.contains(pos) || (!pressed && tracked))
                             && let Some(code) = mouse_button_code(button) {
                                 if let Some(bytes) = mouse_bytes(mouse_mode, rect, cell, size, pos, (code, pressed), modifiers) {
@@ -452,7 +487,7 @@ impl eframe::App for TerminalApp {
                             || (mouse_mode.contains(TermMode::MOUSE_DRAG) && self.mouse_button.is_some())) {
                             let code = self.mouse_button.and_then(mouse_button_code).unwrap_or(3) + 32;
                             if let Some(bytes) = mouse_bytes(mouse_mode, rect, cell, size, pos, (code, true), ctx.input(|i| i.modifiers)) {
-                                self.write_mouse(&bytes);
+                                self.write(&bytes);
                             }
                         }
                     },

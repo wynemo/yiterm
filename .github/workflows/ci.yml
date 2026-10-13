@@ -44,6 +44,8 @@ jobs:
           key: ${{ matrix.target }}
 
       - name: Build release
+        env:
+          YITERM_BUILD_REV: ${{ github.sha }}
         run: cargo build --locked --release --target ${{ matrix.target }}
 
       - uses: actions/setup-python@v7
