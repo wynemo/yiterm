@@ -1,4 +1,4 @@
-use yiterm::{paste, ssh};
+use yiterm::{conpty, paste, ssh};
 
 use alacritty_terminal::{
     Term,
@@ -62,6 +62,7 @@ struct PasteResult {
 struct TerminalApp {
     term: Term<Listener>,
     parser: Processor,
+    conpty_input: conpty::Input,
     output: mpsc::Receiver<Vec<u8>>,
     events: mpsc::Receiver<Event>,
     writer: Box<dyn Write + Send>,
@@ -132,6 +133,7 @@ impl TerminalApp {
         Ok(Self {
             term,
             parser: Processor::new(),
+            conpty_input: conpty::Input::default(),
             output,
             events,
             writer,
@@ -155,6 +157,14 @@ impl TerminalApp {
             .and_then(|_| self.writer.flush())
         {
             self.status = error.to_string();
+        }
+    }
+    fn write_mouse(&mut self, report: &[u8]) {
+        if cfg!(windows) {
+            let wire = self.conpty_input.mouse_report(report);
+            self.write(&wire);
+        } else {
+            self.write(report);
         }
     }
     fn paste(&mut self) {
@@ -289,6 +299,9 @@ impl eframe::App for TerminalApp {
             let Ok(bytes) = self.output.try_recv() else {
                 break;
             };
+            if cfg!(windows) {
+                self.conpty_input.observe(&bytes);
+            }
             self.parser.advance(&mut self.term, &bytes);
             self.cursor_blink_started = Instant::now();
         }
@@ -358,7 +371,7 @@ impl eframe::App for TerminalApp {
                         let button = if scroll > 0.0 { 64 } else { 65 };
                         for _ in 0..((scroll.abs() / cell.y).round() as usize).max(1) {
                             if let Some(bytes) = mouse_bytes(mouse_mode, rect, cell, size, pos, (button, true), ctx.input(|i| i.modifiers)) {
-                                self.write(&bytes);
+                                self.write_mouse(&bytes);
                             }
                         }
                     }
@@ -428,7 +441,7 @@ impl eframe::App for TerminalApp {
                         if report_mouse && (rect.contains(pos) || (!pressed && tracked))
                             && let Some(code) = mouse_button_code(button) {
                                 if let Some(bytes) = mouse_bytes(mouse_mode, rect, cell, size, pos, (code, pressed), modifiers) {
-                                    self.write(&bytes);
+                                    self.write_mouse(&bytes);
                                 }
                                 if pressed { self.mouse_button = Some(button); }
                         }
@@ -439,7 +452,7 @@ impl eframe::App for TerminalApp {
                             || (mouse_mode.contains(TermMode::MOUSE_DRAG) && self.mouse_button.is_some())) {
                             let code = self.mouse_button.and_then(mouse_button_code).unwrap_or(3) + 32;
                             if let Some(bytes) = mouse_bytes(mouse_mode, rect, cell, size, pos, (code, true), ctx.input(|i| i.modifiers)) {
-                                self.write(&bytes);
+                                self.write_mouse(&bytes);
                             }
                         }
                     },
