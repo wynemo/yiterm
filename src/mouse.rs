@@ -84,13 +84,15 @@ impl MouseModes {
 #[derive(Default)]
 pub struct Wheel {
     remainder: f32,
+    scale: f32,
 }
 
 impl Wheel {
     pub fn add(&mut self, delta: f32, cell_height: f32) -> i32 {
-        if self.remainder.signum() != delta.signum() {
+        if self.scale != cell_height || self.remainder.signum() != delta.signum() {
             self.remainder = 0.0;
         }
+        self.scale = cell_height;
         self.remainder += delta;
         let steps = (self.remainder / cell_height).trunc() as i32;
         self.remainder -= steps as f32 * cell_height;
@@ -148,5 +150,14 @@ mod tests {
         wheel.add(20.0, 21.0);
         wheel.reset();
         assert_eq!(wheel.add(1.0, 21.0), 0);
+    }
+
+    #[test]
+    fn a_native_line_tick_is_sent_without_font_height_or_smoothing() {
+        let mut wheel = Wheel::default();
+        assert_eq!(wheel.add(1.0, 1.0), 1);
+        assert_eq!(wheel.add(-1.0, 1.0), -1);
+        assert_eq!(wheel.add(20.0, 21.0), 0);
+        assert_eq!(wheel.add(1.0, 1.0), 1);
     }
 }

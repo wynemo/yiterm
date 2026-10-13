@@ -398,23 +398,8 @@ impl eframe::App for TerminalApp {
                 && !ctx.input(|i| i.modifiers.shift)
                 && self.term.grid().display_offset() == 0;
             if !report_mouse { self.mouse_wheel.reset(); }
-            if scroll != 0.0 {
-                mouse_trace!("wheel delta={scroll} report={report_mouse} shift={} offset={} mode={mouse_mode:?}", ctx.input(|i| i.modifiers.shift), self.term.grid().display_offset());
-                if report_mouse {
-                    if let Some(pos) = ctx.input(|i| i.pointer.hover_pos()).filter(|pos| rect.contains(*pos)) {
-                        let steps = self.mouse_wheel.add(scroll, cell.y);
-                        let button = if steps > 0 { 64 } else { 65 };
-                        for _ in 0..steps.unsigned_abs() {
-                            if let Some(bytes) = mouse_bytes(mouse_protocol, rect, cell, size, pos, (button, true), ctx.input(|i| i.modifiers)) {
-                                self.write_mouse(&bytes);
-                            }
-                        }
-                    } else {
-                        self.mouse_wheel.reset();
-                    }
-                } else {
-                    self.term.scroll_display(Scroll::Delta((scroll / cell.y).round() as i32));
-                }
+            if scroll != 0.0 && !report_mouse {
+                self.term.scroll_display(Scroll::Delta((scroll / cell.y).round() as i32));
             }
             let content = self.term.renderable_content();
             let offset = content.display_offset;
@@ -473,6 +458,26 @@ impl eframe::App for TerminalApp {
             if paste_shortcut { self.paste(); }
             for event in events {
                 match event {
+                    egui::Event::MouseWheel { unit, delta, modifiers } => {
+                        mouse_trace!("wheel unit={unit:?} delta={} report={report_mouse}", delta.y);
+                        if !report_mouse || modifiers.shift || delta.y == 0.0 { continue; }
+                        let Some(pos) = ctx.input(|i| i.pointer.hover_pos()).filter(|pos| rect.contains(*pos)) else {
+                            self.mouse_wheel.reset();
+                            continue;
+                        };
+                        let (units_per_step, multiplier) = match unit {
+                            egui::MouseWheelUnit::Line => (1.0, 1),
+                            egui::MouseWheelUnit::Point => (cell.y, 1),
+                            egui::MouseWheelUnit::Page => (1.0, size.rows as i32),
+                        };
+                        let steps = self.mouse_wheel.add(delta.y, units_per_step) * multiplier;
+                        let button = if steps > 0 { 64 } else { 65 };
+                        for _ in 0..steps.unsigned_abs() {
+                            if let Some(bytes) = mouse_bytes(mouse_protocol, rect, cell, size, pos, (button, true), modifiers) {
+                                self.write_mouse(&bytes);
+                            }
+                        }
+                    },
                     egui::Event::PointerButton { pos, button, pressed, modifiers } => {
                         let tracked = self.mouse_button == Some(button);
                         mouse_trace!("button={button:?} pressed={pressed} report={report_mouse} inside={} shift={} offset={} pos={pos:?} rect={rect:?} cell={cell:?} mode={mouse_mode:?}", rect.contains(pos), modifiers.shift, self.term.grid().display_offset());
