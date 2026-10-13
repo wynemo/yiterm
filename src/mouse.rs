@@ -72,7 +72,10 @@ impl MouseModes {
             && self.requests.fallback_allowed
             && !mode.intersects(TermMode::MOUSE_MODE)
         {
-            mode.insert(TermMode::MOUSE_DRAG);
+            // The usual capture request ends with 1015h then 1006h. ConPTY
+            // preserves the former but consumes the latter; restore the final
+            // SGR encoding, rather than selecting the intermediate URXVT one.
+            mode.insert(TermMode::MOUSE_DRAG | TermMode::SGR_MOUSE);
         }
         Protocol {
             mode,
@@ -125,7 +128,8 @@ mod tests {
         mouse.observe(b"5h");
         let protocol = mouse.protocol(shell, true);
         assert!(protocol.mode.contains(TermMode::MOUSE_DRAG));
-        assert!(protocol.urxvt);
+        assert!(protocol.mode.contains(TermMode::SGR_MOUSE));
+        assert!(!protocol.urxvt);
         assert_eq!(mouse.protocol(shell, false).mode, shell);
         let sgr = shell | TermMode::MOUSE_MOTION | TermMode::SGR_MOUSE;
         assert_eq!(mouse.protocol(sgr, true).mode, sgr);
