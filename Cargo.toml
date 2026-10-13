@@ -1,0 +1,27 @@
+[package]
+name = "yiterm"
+version = "0.0.1"
+edition = "2024"
+
+[dependencies]
+alacritty_terminal = "0.26"
+anyhow = "1"
+arboard = "3"
+clap = { version = "4", features = ["derive"] }
+eframe = { version = "0.33", default-features = false, features = ["default_fonts", "glow", "x11", "wayland"] }
+image = { version = "0.25", default-features = false, features = ["png"] }
+portable-pty = "0.9"
+libc = "0.2"
+sysinfo = { version = "0.39", default-features = false, features = ["system"] }
+tempfile = "3"
+url = "2"
+uuid = { version = "1", features = ["v4"] }
+
+# Pass clipboard shortcuts to the terminal, including image-only clipboard data.
+[dependencies.egui-winit]
+version = "0.33.3"
+default-features = false
+features = ["terminal-input"]
+
+[patch.crates-io]
+egui-winit = { path = "vendor/egui-winit" }
