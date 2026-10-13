@@ -71,6 +71,7 @@ struct TerminalApp {
     paste_result: mpsc::Receiver<Result<PasteResult>>,
     paste_sender: mpsc::Sender<Result<PasteResult>>,
     paste_busy: bool,
+    ime_preedit: String,
     status: String,
     size: Size,
 }
@@ -136,6 +137,7 @@ impl TerminalApp {
             paste_result,
             paste_sender,
             paste_busy: false,
+            ime_preedit: String::new(),
             status: "Ready · paste: Cmd+V / Ctrl+Shift+V".into(),
             size,
         })
@@ -364,15 +366,33 @@ impl eframe::App for TerminalApp {
                 let pos = rect.min + Vec2::new(point.column.0 as f32 * cell.x, point.line.0 as f32 * cell.y);
                 ui.painter().rect_stroke(Rect::from_min_size(pos, cell), 0.0, (1.0, Color32::LIGHT_GRAY), egui::StrokeKind::Inside);
             }
+            let point = content.cursor.point;
+            let cursor_pos = rect.min + Vec2::new(point.column.0 as f32 * cell.x, point.line.0 as f32 * cell.y);
+            let cursor_rect = Rect::from_min_size(cursor_pos, cell);
+            ctx.output_mut(|output| {
+                output.ime = Some(egui::output::IMEOutput { rect: cursor_rect, cursor_rect });
+            });
             let events = ctx.input(|i| i.events.clone());
+            // Consume candidate-selection keys even if Commit clears the preedit
+            // earlier in this frame. They must not execute a shell command.
+            let composing = ime_owns_keyboard(&self.ime_preedit, &events);
             let paste_shortcut = events.iter().any(|event| matches!(event, egui::Event::Key { key: Key::V, pressed: true, modifiers, .. } if modifiers.mac_cmd || (modifiers.ctrl && modifiers.shift)));
             if paste_shortcut { self.paste(); }
             for event in events {
                 match event {
                     egui::Event::Paste(_) if paste_shortcut => {},
                     egui::Event::Paste(_) => self.paste(),
+                    egui::Event::Ime(egui::ImeEvent::Preedit(text)) => { self.ime_preedit = text; },
+                    egui::Event::Ime(egui::ImeEvent::Commit(text)) => {
+                        self.ime_preedit.clear();
+                        self.term.scroll_display(Scroll::Bottom);
+                        self.write(text.as_bytes());
+                    },
+                    egui::Event::Ime(egui::ImeEvent::Disabled) | egui::Event::WindowFocused(false) => { self.ime_preedit.clear(); },
+                    egui::Event::Text(_) if composing => {},
                     egui::Event::Text(text) => { self.term.scroll_display(Scroll::Bottom); self.write(text.as_bytes()); },
                     egui::Event::Key { key, pressed: true, modifiers, .. } => {
+                        if composing { continue; }
                         if key == Key::V && (modifiers.mac_cmd || modifiers.ctrl && modifiers.shift) { continue; }
                         let app_cursor = self.term.mode().contains(TermMode::APP_CURSOR);
                         if let Some(bytes) = key_bytes(key, modifiers, app_cursor) {
@@ -383,9 +403,20 @@ impl eframe::App for TerminalApp {
                     _ => {},
                 }
             }
+            if !self.ime_preedit.is_empty() {
+                let galley = ui.painter().layout_no_wrap(self.ime_preedit.clone(), font.clone(), Color32::WHITE);
+                ui.painter().rect_filled(Rect::from_min_size(cursor_pos, galley.size()), 0.0, Color32::from_rgb(24, 26, 32));
+                ui.painter().galley(cursor_pos, galley, Color32::WHITE);
+            }
         });
         ctx.request_repaint_after(Duration::from_millis(16));
     }
+}
+
+fn ime_owns_keyboard(preedit: &str, events: &[egui::Event]) -> bool {
+    !preedit.is_empty() || events.iter().any(|event| matches!(event,
+        egui::Event::Ime(egui::ImeEvent::Preedit(text)) if !text.is_empty()
+    ) || matches!(event, egui::Event::Ime(egui::ImeEvent::Commit(_))))
 }
 
 fn key_bytes(key: Key, modifiers: egui::Modifiers, app_cursor: bool) -> Option<Vec<u8>> {
@@ -463,13 +494,38 @@ fn configure_fonts(ctx: &egui::Context) {
         }
         ctx.set_fonts(fonts);
     }
-    #[cfg(not(windows))]
+    #[cfg(target_os = "macos")]
+    {
+        let mut fonts = egui::FontDefinitions::default();
+        for path in ["/System/Library/Fonts/PingFang.ttc", "/System/Library/Fonts/STHeiti Light.ttc"] {
+            let Ok(data) = std::fs::read(path) else { continue; };
+            fonts.font_data.insert(path.into(), std::sync::Arc::new(egui::FontData::from_owned(data)));
+            for family in [egui::FontFamily::Monospace, egui::FontFamily::Proportional] {
+                fonts.families.entry(family).or_default().push(path.into());
+            }
+        }
+        ctx.set_fonts(fonts);
+    }
+    #[cfg(not(any(windows, target_os = "macos")))]
     let _ = ctx;
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn ime_reserves_composition_and_commit_keys() {
+        assert!(!ime_owns_keyboard("", &[egui::Event::Text("a".into())]));
+        assert!(ime_owns_keyboard("ni", &[]));
+        assert!(ime_owns_keyboard("", &[egui::Event::Ime(egui::ImeEvent::Preedit("ni".into()))]));
+        assert!(ime_owns_keyboard("", &[
+            egui::Event::Ime(egui::ImeEvent::Preedit(String::new())),
+            egui::Event::Ime(egui::ImeEvent::Commit("你".into())),
+        ]));
+        // Windows may leave IME enabled between compositions: ordinary keys
+        // still belong to the shell when no preedit or commit is present.
+        assert!(!ime_owns_keyboard("", &[egui::Event::Ime(egui::ImeEvent::Enabled)]));
+    }
     #[test]
     fn terminal_parses_output_and_answers_queries() {
         let (tx, rx) = mpsc::channel();
