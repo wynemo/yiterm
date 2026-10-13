@@ -326,20 +326,36 @@ impl eframe::App for TerminalApp {
             if scroll != 0.0 { self.term.scroll_display(Scroll::Delta((scroll / cell.y).round() as i32)); }
             let content = self.term.renderable_content();
             let offset = content.display_offset;
-            for indexed in content.display_iter {
+            let cells: Vec<_> = content.display_iter.collect();
+            // Paint all backgrounds first: a wide glyph extends into its spacer
+            // cell, whose background would otherwise erase the glyph's right half.
+            for indexed in &cells {
                 let row = indexed.point.line.0 + offset as i32;
                 if row < 0 { continue; }
                 let pos = rect.min + Vec2::new(indexed.point.column.0 as f32 * cell.x, row as f32 * cell.y);
-                let mut fg = color(indexed.cell.fg, true);
-                let mut bg = color(indexed.cell.bg, false);
-                if indexed.cell.flags.contains(Flags::INVERSE) { std::mem::swap(&mut fg, &mut bg); }
+                let bg = if indexed.cell.flags.contains(Flags::INVERSE) {
+                    color(indexed.cell.fg, true)
+                } else {
+                    color(indexed.cell.bg, false)
+                };
                 ui.painter().rect_filled(Rect::from_min_size(pos, cell), 0.0, bg);
-                if !indexed.cell.flags.intersects(Flags::HIDDEN | Flags::WIDE_CHAR_SPACER) {
+            }
+            for indexed in &cells {
+                let row = indexed.point.line.0 + offset as i32;
+                if row < 0 { continue; }
+                let pos = rect.min + Vec2::new(indexed.point.column.0 as f32 * cell.x, row as f32 * cell.y);
+                let fg = if indexed.cell.flags.contains(Flags::INVERSE) {
+                    color(indexed.cell.bg, false)
+                } else {
+                    color(indexed.cell.fg, true)
+                };
+                if !indexed.cell.flags.intersects(Flags::HIDDEN | Flags::WIDE_CHAR_SPACER | Flags::LEADING_WIDE_CHAR_SPACER) {
                     let mut text = indexed.cell.c.to_string();
                     if let Some(extra) = indexed.cell.zerowidth() { text.extend(extra); }
                     ui.painter().text(pos, egui::Align2::LEFT_TOP, text, font.clone(), fg);
                     if indexed.cell.flags.contains(Flags::UNDERLINE) {
-                        ui.painter().line_segment([pos + Vec2::new(0.0, cell.y - 2.0), pos + Vec2::new(cell.x, cell.y - 2.0)], (1.0, fg));
+                        let width = if indexed.cell.flags.contains(Flags::WIDE_CHAR) { 2.0 * cell.x } else { cell.x };
+                        ui.painter().line_segment([pos + Vec2::new(0.0, cell.y - 2.0), pos + Vec2::new(width, cell.y - 2.0)], (1.0, fg));
                     }
                 }
             }
