@@ -412,9 +412,43 @@ fn main() -> Result<()> {
             viewport: egui::ViewportBuilder::default().with_inner_size([960.0, 640.0]),
             ..Default::default()
         },
-        Box::new(move |_| Ok(Box::new(app))),
+        Box::new(move |cc| {
+            configure_fonts(&cc.egui_ctx);
+            Ok(Box::new(app))
+        }),
     )
     .map_err(|error| anyhow::anyhow!(error.to_string()))
+}
+
+fn configure_fonts(ctx: &egui::Context) {
+    #[cfg(windows)]
+    {
+        let windows = std::env::var_os("WINDIR")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| std::path::PathBuf::from(r"C:\Windows"));
+        let mut fonts = egui::FontDefinitions::default();
+        // Append CJK fonts so ASCII keeps the built-in monospace metrics.
+        // FontData uses face zero, including for Windows TTC collections.
+        for filename in ["msyh.ttc", "simhei.ttf", "simsun.ttc"] {
+            let Ok(data) = std::fs::read(windows.join("Fonts").join(filename)) else {
+                continue;
+            };
+            fonts.font_data.insert(
+                filename.into(),
+                std::sync::Arc::new(egui::FontData::from_owned(data)),
+            );
+            for family in [egui::FontFamily::Monospace, egui::FontFamily::Proportional] {
+                fonts
+                    .families
+                    .entry(family)
+                    .or_default()
+                    .push(filename.into());
+            }
+        }
+        ctx.set_fonts(fonts);
+    }
+    #[cfg(not(windows))]
+    let _ = ctx;
 }
 
 #[cfg(test)]
