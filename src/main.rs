@@ -72,6 +72,7 @@ struct TerminalApp {
     paste_sender: mpsc::Sender<Result<PasteResult>>,
     paste_busy: bool,
     ime_preedit: String,
+    mouse_button: Option<egui::PointerButton>,
     cursor_blink_started: Instant,
     status: String,
     size: Size,
@@ -141,6 +142,7 @@ impl TerminalApp {
             paste_sender,
             paste_busy: false,
             ime_preedit: String::new(),
+            mouse_button: None,
             cursor_blink_started: Instant::now(),
             status: "Ready · paste: Cmd+V / Ctrl+Shift+V".into(),
             size,
@@ -269,13 +271,18 @@ fn color(color: Color, foreground: bool) -> Color32 {
 impl eframe::App for TerminalApp {
     fn update(&mut self, ctx: &egui::Context, _: &mut eframe::Frame) {
         // Keep the cursor visible while typing and restart its blink on focus.
-        if ctx.input(|input| input.events.iter().any(|event| matches!(event,
-            egui::Event::Key { pressed: true, .. }
-                | egui::Event::Text(_)
-                | egui::Event::Paste(_)
-                | egui::Event::Ime(_)
-                | egui::Event::WindowFocused(true)
-        ))) {
+        if ctx.input(|input| {
+            input.events.iter().any(|event| {
+                matches!(
+                    event,
+                    egui::Event::Key { pressed: true, .. }
+                        | egui::Event::Text(_)
+                        | egui::Event::Paste(_)
+                        | egui::Event::Ime(_)
+                        | egui::Event::WindowFocused(true)
+                )
+            })
+        }) {
             self.cursor_blink_started = Instant::now();
         }
         for _ in 0..128 {
@@ -341,7 +348,24 @@ impl eframe::App for TerminalApp {
                 self.size = size;
             }
             let scroll = ctx.input(|i| i.smooth_scroll_delta.y);
-            if scroll != 0.0 { self.term.scroll_display(Scroll::Delta((scroll / cell.y).round() as i32)); }
+            let mouse_mode = *self.term.mode();
+            let report_mouse = mouse_mode.intersects(TermMode::MOUSE_MODE)
+                && !ctx.input(|i| i.modifiers.shift)
+                && self.term.grid().display_offset() == 0;
+            if scroll != 0.0 {
+                if report_mouse {
+                    if let Some(pos) = ctx.input(|i| i.pointer.hover_pos()).filter(|pos| rect.contains(*pos)) {
+                        let button = if scroll > 0.0 { 64 } else { 65 };
+                        for _ in 0..((scroll.abs() / cell.y).round() as usize).max(1) {
+                            if let Some(bytes) = mouse_bytes(mouse_mode, rect, cell, size, pos, (button, true), ctx.input(|i| i.modifiers)) {
+                                self.write(&bytes);
+                            }
+                        }
+                    }
+                } else {
+                    self.term.scroll_display(Scroll::Delta((scroll / cell.y).round() as i32));
+                }
+            }
             let content = self.term.renderable_content();
             let offset = content.display_offset;
             let cells: Vec<_> = content.display_iter.collect();
@@ -399,6 +423,26 @@ impl eframe::App for TerminalApp {
             if paste_shortcut { self.paste(); }
             for event in events {
                 match event {
+                    egui::Event::PointerButton { pos, button, pressed, modifiers } => {
+                        let tracked = self.mouse_button == Some(button);
+                        if report_mouse && (rect.contains(pos) || (!pressed && tracked))
+                            && let Some(code) = mouse_button_code(button) {
+                                if let Some(bytes) = mouse_bytes(mouse_mode, rect, cell, size, pos, (code, pressed), modifiers) {
+                                    self.write(&bytes);
+                                }
+                                if pressed { self.mouse_button = Some(button); }
+                        }
+                        if !pressed && tracked { self.mouse_button = None; }
+                    },
+                    egui::Event::PointerMoved(pos) if report_mouse => {
+                        if rect.contains(pos) && (mouse_mode.contains(TermMode::MOUSE_MOTION)
+                            || (mouse_mode.contains(TermMode::MOUSE_DRAG) && self.mouse_button.is_some())) {
+                            let code = self.mouse_button.and_then(mouse_button_code).unwrap_or(3) + 32;
+                            if let Some(bytes) = mouse_bytes(mouse_mode, rect, cell, size, pos, (code, true), ctx.input(|i| i.modifiers)) {
+                                self.write(&bytes);
+                            }
+                        }
+                    },
                     egui::Event::Paste(_) if paste_shortcut => {},
                     egui::Event::Paste(_) => self.paste(),
                     egui::Event::Ime(egui::ImeEvent::Preedit(text)) => { self.ime_preedit = text; },
@@ -432,10 +476,56 @@ impl eframe::App for TerminalApp {
     }
 }
 
+fn mouse_button_code(button: egui::PointerButton) -> Option<u8> {
+    match button {
+        egui::PointerButton::Primary => Some(0),
+        egui::PointerButton::Middle => Some(1),
+        egui::PointerButton::Secondary => Some(2),
+        _ => None,
+    }
+}
+
+fn mouse_bytes(
+    mode: TermMode,
+    rect: Rect,
+    cell: Vec2,
+    size: Size,
+    pos: egui::Pos2,
+    action: (u8, bool),
+    modifiers: egui::Modifiers,
+) -> Option<Vec<u8>> {
+    let (button, pressed) = action;
+    let col = (((pos.x - rect.min.x) / cell.x).floor().max(0.0) as usize).min(size.cols - 1) + 1;
+    let row = (((pos.y - rect.min.y) / cell.y).floor().max(0.0) as usize).min(size.rows - 1) + 1;
+    let modifiers =
+        u8::from(modifiers.shift) * 4 + u8::from(modifiers.alt) * 8 + u8::from(modifiers.ctrl) * 16;
+    if mode.contains(TermMode::SGR_MOUSE) {
+        let suffix = if pressed { 'M' } else { 'm' };
+        Some(format!("\x1b[<{};{col};{row}{suffix}", button + modifiers).into_bytes())
+    } else {
+        // The original X10 encoding cannot represent coordinates above 223.
+        if col > 223 || row > 223 {
+            return None;
+        }
+        let code = if pressed { button } else { 3 };
+        Some(vec![
+            0x1b,
+            b'[',
+            b'M',
+            32 + code + modifiers,
+            32 + col as u8,
+            32 + row as u8,
+        ])
+    }
+}
+
 fn ime_owns_keyboard(preedit: &str, events: &[egui::Event]) -> bool {
-    !preedit.is_empty() || events.iter().any(|event| matches!(event,
-        egui::Event::Ime(egui::ImeEvent::Preedit(text)) if !text.is_empty()
-    ) || matches!(event, egui::Event::Ime(egui::ImeEvent::Commit(_))))
+    !preedit.is_empty()
+        || events.iter().any(|event| {
+            matches!(event,
+                egui::Event::Ime(egui::ImeEvent::Preedit(text)) if !text.is_empty()
+            ) || matches!(event, egui::Event::Ime(egui::ImeEvent::Commit(_)))
+        })
 }
 
 fn key_bytes(key: Key, modifiers: egui::Modifiers, app_cursor: bool) -> Option<Vec<u8>> {
@@ -516,9 +606,17 @@ fn configure_fonts(ctx: &egui::Context) {
     #[cfg(target_os = "macos")]
     {
         let mut fonts = egui::FontDefinitions::default();
-        for path in ["/System/Library/Fonts/PingFang.ttc", "/System/Library/Fonts/STHeiti Light.ttc"] {
-            let Ok(data) = std::fs::read(path) else { continue; };
-            fonts.font_data.insert(path.into(), std::sync::Arc::new(egui::FontData::from_owned(data)));
+        for path in [
+            "/System/Library/Fonts/PingFang.ttc",
+            "/System/Library/Fonts/STHeiti Light.ttc",
+        ] {
+            let Ok(data) = std::fs::read(path) else {
+                continue;
+            };
+            fonts.font_data.insert(
+                path.into(),
+                std::sync::Arc::new(egui::FontData::from_owned(data)),
+            );
             for family in [egui::FontFamily::Monospace, egui::FontFamily::Proportional] {
                 fonts.families.entry(family).or_default().push(path.into());
             }
@@ -533,17 +631,63 @@ fn configure_fonts(ctx: &egui::Context) {
 mod tests {
     use super::*;
     #[test]
+    fn mouse_reports_use_one_based_cells_and_preserve_release_button() {
+        let rect = Rect::from_min_size(egui::pos2(10.0, 20.0), Vec2::new(800.0, 500.0));
+        let cell = Vec2::new(10.0, 20.0);
+        let size = Size { cols: 80, rows: 25 };
+        let encode = |mode, pos, button, pressed| {
+            mouse_bytes(
+                mode,
+                rect,
+                cell,
+                size,
+                pos,
+                (button, pressed),
+                egui::Modifiers::NONE,
+            )
+        };
+        assert_eq!(
+            encode(TermMode::SGR_MOUSE, egui::pos2(25.0, 20.0), 0, true),
+            Some(b"\x1b[<0;2;1M".to_vec())
+        );
+        assert_eq!(
+            encode(TermMode::SGR_MOUSE, egui::pos2(25.0, 20.0), 0, false),
+            Some(b"\x1b[<0;2;1m".to_vec())
+        );
+        assert_eq!(
+            encode(TermMode::empty(), rect.min, 0, true),
+            Some(vec![27, 91, 77, 32, 33, 33])
+        );
+        assert_eq!(
+            encode(TermMode::empty(), rect.min, 0, false),
+            Some(vec![27, 91, 77, 35, 33, 33])
+        );
+        assert_eq!(
+            encode(TermMode::SGR_MOUSE, rect.max, 64, true),
+            Some(b"\x1b[<64;80;25M".to_vec())
+        );
+    }
+    #[test]
     fn ime_reserves_composition_and_commit_keys() {
         assert!(!ime_owns_keyboard("", &[egui::Event::Text("a".into())]));
         assert!(ime_owns_keyboard("ni", &[]));
-        assert!(ime_owns_keyboard("", &[egui::Event::Ime(egui::ImeEvent::Preedit("ni".into()))]));
-        assert!(ime_owns_keyboard("", &[
-            egui::Event::Ime(egui::ImeEvent::Preedit(String::new())),
-            egui::Event::Ime(egui::ImeEvent::Commit("你".into())),
-        ]));
+        assert!(ime_owns_keyboard(
+            "",
+            &[egui::Event::Ime(egui::ImeEvent::Preedit("ni".into()))]
+        ));
+        assert!(ime_owns_keyboard(
+            "",
+            &[
+                egui::Event::Ime(egui::ImeEvent::Preedit(String::new())),
+                egui::Event::Ime(egui::ImeEvent::Commit("你".into())),
+            ]
+        ));
         // Windows may leave IME enabled between compositions: ordinary keys
         // still belong to the shell when no preedit or commit is present.
-        assert!(!ime_owns_keyboard("", &[egui::Event::Ime(egui::ImeEvent::Enabled)]));
+        assert!(!ime_owns_keyboard(
+            "",
+            &[egui::Event::Ime(egui::ImeEvent::Enabled)]
+        ));
     }
     #[test]
     fn terminal_parses_output_and_answers_queries() {

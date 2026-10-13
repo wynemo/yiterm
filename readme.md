@@ -24,11 +24,11 @@ Windows 默认启动 `powershell.exe`；macOS 默认使用 `$SHELL`。`--shell` 
 - macOS 在会话内通过私有 PATH 中的 SSH 包装程序为普通 `ssh` 自动添加 ControlMaster 参数，使用短路径、权限 `0700` 的私有目录保存 socket。保留用户显式传入的选项，不改写 `~/.ssh/config`。粘贴时按前台进程组和进程树读取真实 SSH 参数，保留端口、密钥、用户、跳板机及 ControlPath，退出 SSH 后自动恢复本地路径。Windows OpenSSH 不提供同样的 Unix socket 复用，使用独立 scp 连接，需配置密钥或 ssh-agent。上传启用 BatchMode，不会弹出密码交互。
 - 临时图片会保留，便于命令稍后读取；本地和远端都需要自行清理。
 
-支持 ANSI 颜色、光标、备用屏幕、终端尺寸同步、滚动历史、方向键、Ctrl 字母快捷键和 bracketed paste。主 shell/SSH 会话退出后自动关闭窗口（例如 fish 空提示符下按 Ctrl+D，或 PowerShell 输入 `exit`）。关闭窗口会终止 shell/SSH 子进程。
+支持 ANSI 颜色、光标、备用屏幕、终端尺寸同步、滚动历史、方向键、Ctrl 字母快捷键、鼠标点击/拖动/滚轮协议和 bracketed paste。主 shell/SSH 会话退出后自动关闭窗口（例如 fish 空提示符下按 Ctrl+D，或 PowerShell 输入 `exit`）。关闭窗口会终止 shell/SSH 子进程。
 
 ## 当前边界
 
-这是单窗口、单会话原型，尚未实现标签页、鼠标协议、文本选中复制、完整快捷键映射和字体配置。新窗口内直接输入 `ssh` 即可。更新前已建立的 SSH 连接需要退出并重新连接，才能自动建立复用 socket。使用绝对路径 `/usr/bin/ssh` 或绕过 PATH 的 shell 别名仍会被识别，但不会自动增加复用参数；未开启复用的连接上传需要密钥或 ssh-agent。Windows 使用进程树识别当前 SSH；若同时存在多个 SSH 子进程，会拒绝图片上传以避免选错目标。远端再次 SSH 到另一台机器、tmux 内多个独立前台会话尚不支持自动确定最终目标。Windows 自定义 shell 若不是 PowerShell，图片路径的转义规则需要相应调整。Windows 自动加载 `%WINDIR%\Fonts` 下的微软雅黑、黑体和宋体作为中文回退字体；系统需安装其中至少一种。macOS 自动加载系统苹方或黑体作为中文回退字体。macOS 和 Windows 支持输入法组合输入及候选词提交，候选框跟随终端光标。其他平台默认字体对 CJK 字符的覆盖仍有限。
+这是单窗口、单会话原型，尚未实现标签页、文本选中复制、完整快捷键映射和字体配置。新窗口内直接输入 `ssh` 即可。更新前已建立的 SSH 连接需要退出并重新连接，才能自动建立复用 socket。使用绝对路径 `/usr/bin/ssh` 或绕过 PATH 的 shell 别名仍会被识别，但不会自动增加复用参数；未开启复用的连接上传需要密钥或 ssh-agent。Windows 使用进程树识别当前 SSH；若同时存在多个 SSH 子进程，会拒绝图片上传以避免选错目标。远端再次 SSH 到另一台机器、tmux 内多个独立前台会话尚不支持自动确定最终目标。Windows 自定义 shell 若不是 PowerShell，图片路径的转义规则需要相应调整。Windows 自动加载 `%WINDIR%\Fonts` 下的微软雅黑、黑体和宋体作为中文回退字体；系统需安装其中至少一种。macOS 自动加载系统苹方或黑体作为中文回退字体。macOS 和 Windows 支持输入法组合输入及候选词提交，候选框跟随终端光标。其他平台默认字体对 CJK 字符的覆盖仍有限。
 
 ## 验证
 
