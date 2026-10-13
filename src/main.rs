@@ -303,8 +303,9 @@ impl eframe::App for TerminalApp {
                 Err(error) => self.status = format!("{error:#}"),
             }
         }
-        if let Ok(Some(exit)) = self.child.try_wait() {
-            self.status = format!("Session exited: {exit}");
+        if let Ok(Some(_)) = self.child.try_wait() {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            return;
         }
         egui::TopBottomPanel::bottom("status").show(ctx, |ui| {
             ui.horizontal(|ui| {
