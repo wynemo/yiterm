@@ -39,7 +39,7 @@ cargo test --locked
 cargo build --locked --release
 ```
 
-CI 在 macOS / Windows 上执行上述检查。本地测试覆盖终端解析、查询响应、键盘序列、PNG 保存、路径转义、真实 PTY 中普通 SSH 的识别/退出恢复、sh/bash/zsh/fish 包装程序、上传参数、失败处理和超时；真实剪贴板与远端 SSH 上传仍需在目标环境验证。
+上述检查可在本地按需运行；CI 只构建和打包。本地测试覆盖终端解析、查询响应、键盘序列、PNG 保存、路径转义、真实 PTY 中普通 SSH 的识别/退出恢复、sh/bash/zsh/fish 包装程序、上传参数、失败处理和超时；真实剪贴板与远端 SSH 上传仍需在目标环境验证。
 
 `vendor/egui-winit` 基于 egui-winit 0.33.3（MIT OR Apache-2.0），增加 `terminal-input` feature，绕过框架的复制/粘贴快捷键拦截，确保 Ctrl+C 和纯图片粘贴能交给终端处理。升级 egui 时需保留此补丁。
 
@@ -52,6 +52,6 @@ CI 在 macOS / Windows 上执行上述检查。本地测试覆盖终端解析、
 | Windows x64 | `x86_64-pc-windows-msvc` | `windows-2022` | `yiterm-0.0.1-windows-x64.zip` |
 | macOS arm64 | `aarch64-apple-darwin` | `macos-14` | `yiterm-0.0.1-macos-arm64.tar.gz` |
 
-每个目标执行格式检查、Clippy、测试和 release 构建。成功后在本次运行的 Artifacts 下载对应平台产物；产物内附 SHA-256 校验文件，保留 30 天。打包脚本读取 Cargo.toml 中的版本号并检查 PE / Mach-O 的真实架构，macOS 压缩包保留可执行权限。
+每个目标仅执行 release 构建、打包和产物上传，不运行格式检查、Clippy 或测试。成功后在本次运行的 Artifacts 下载对应平台产物；产物内附 SHA-256 校验文件，保留 30 天。打包脚本读取 Cargo.toml 中的版本号并检查 PE / Mach-O 的真实架构，macOS 压缩包保留可执行权限。
 
 解压后运行 `yiterm.exe`（Windows）或 `./yiterm`（macOS）。SSH 功能需要系统 OpenSSH。构建产物目前是独立可执行文件，未提供安装器或签名公证。
