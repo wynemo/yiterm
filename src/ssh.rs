@@ -371,6 +371,7 @@ pub struct Detection {
     pub identity: TargetIdentity,
 }
 
+#[cfg(not(unix))]
 fn is_descendant(system: &System, mut pid: Pid, root: Pid) -> bool {
     for _ in 0..128 {
         if pid == root {
@@ -411,14 +412,16 @@ fn detect_once(root: u32, group: Option<i32>) -> Result<Option<Detection>> {
         true,
         ProcessRefreshKind::nothing().without_tasks(),
     );
+    ensure!(
+        system.process(Pid::from_u32(root)).is_some(),
+        "Terminal shell has exited"
+    );
     let candidates: Vec<_> = system
         .processes()
         .iter()
         .filter_map(|(&pid, process)| {
             let name = process.name().to_string_lossy();
-            if !(name == "ssh" || name.eq_ignore_ascii_case("ssh.exe"))
-                || !is_descendant(&system, pid, Pid::from_u32(root))
-            {
+            if !(name == "ssh" || name.eq_ignore_ascii_case("ssh.exe")) {
                 return None;
             }
             #[cfg(unix)]
@@ -427,6 +430,10 @@ fn detect_once(root: u32, group: Option<i32>) -> Result<Option<Detection>> {
                 if group != Some(current_group) {
                     return None;
                 }
+            }
+            #[cfg(not(unix))]
+            if !is_descendant(&system, pid, Pid::from_u32(root)) {
+                return None;
             }
             Some(pid)
         })

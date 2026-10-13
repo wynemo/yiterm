@@ -50,10 +50,32 @@ impl Session {
     fn wait_remote(&self) -> ssh::Detection {
         let deadline = Instant::now() + Duration::from_secs(10);
         loop {
-            if let Ok(Some(remote)) = self.detect() {
+            let result = self.detect();
+            if let Ok(Some(remote)) = result {
                 return remote;
             }
-            assert!(Instant::now() < deadline, "Foreground SSH was not detected");
+            if Instant::now() >= deadline {
+                if let Some(tty) = self.master.tty_name() {
+                    let output = std::process::Command::new("/bin/ps")
+                        .args([
+                            "-t",
+                            &tty.to_string_lossy(),
+                            "-o",
+                            "pid,ppid,pgid,comm,args",
+                        ])
+                        .output()
+                        .unwrap();
+                    eprintln!(
+                        "Fixture processes: {}",
+                        String::from_utf8_lossy(&output.stdout)
+                    );
+                }
+                panic!(
+                    "Foreground SSH was not detected (group {:?}, error {:?})",
+                    self.master.process_group_leader(),
+                    result.err()
+                );
+            }
             std::thread::sleep(Duration::from_millis(30));
         }
     }
