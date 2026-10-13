@@ -17,6 +17,9 @@ tempfile = "3"
 url = "2"
 uuid = { version = "1", features = ["v4"] }
 
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_System_LibraryLoader"] }
+
 # Pass clipboard shortcuts to the terminal, including image-only clipboard data.
 [dependencies.egui-winit]
 version = "0.33.3"

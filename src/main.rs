@@ -1,5 +1,8 @@
 use yiterm::{mouse, paste, ssh};
 
+#[cfg(windows)]
+mod conpty;
+
 macro_rules! mouse_trace {
     ($($arg:tt)*) => {
         if cfg!(windows) {
@@ -97,6 +100,8 @@ impl TerminalApp {
         if let Some(host) = &args.ssh {
             ssh::parse(std::slice::from_ref(host))?;
         }
+        #[cfg(windows)]
+        conpty::initialize()?;
         let pair = portable_pty::native_pty_system().openpty(PtySize {
             rows: 24,
             cols: 80,

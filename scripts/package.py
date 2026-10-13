@@ -2,6 +2,7 @@
 """Package a release binary, checking its architecture before upload."""
 import argparse
 import hashlib
+import io
 import os
 from pathlib import Path
 import struct
@@ -9,12 +10,36 @@ import tarfile
 import json
 import subprocess
 import zipfile
+from urllib.request import urlopen
 
 ROOT = Path(__file__).resolve().parents[1]
 TARGETS = {
     "x86_64-pc-windows-msvc": ("windows-x64", "yiterm.exe"),
     "aarch64-apple-darwin": ("macos-arm64", "yiterm"),
 }
+CONPTY_VERSION = "1.24.261001001"
+CONPTY_FILES = {
+    "runtimes/win-x64/native/conpty.dll": "conpty.dll",
+    "build/native/runtimes/x64/OpenConsole.exe": "OpenConsole.exe",
+}
+
+
+def conpty_files(data: bytes) -> dict[str, bytes]:
+    """Require the matched x64 DLL and console host from Microsoft's package."""
+    with zipfile.ZipFile(io.BytesIO(data)) as package:
+        files = {name: package.read(source) for source, name in CONPTY_FILES.items()}
+    for content in files.values():
+        verify_binary(content, "x86_64-pc-windows-msvc")
+    return files
+
+
+def download_conpty() -> dict[str, bytes]:
+    url = (
+        "https://api.nuget.org/v3-flatcontainer/microsoft.windows.console.conpty/"
+        f"{CONPTY_VERSION}/microsoft.windows.console.conpty.{CONPTY_VERSION}.nupkg"
+    )
+    with urlopen(url, timeout=60) as response:
+        return conpty_files(response.read())
 
 
 def verify_binary(data: bytes, target: str) -> None:
@@ -56,10 +81,17 @@ def main() -> None:
     output = ROOT / "dist"
     output.mkdir(exist_ok=True)
     if args.target.endswith("windows-msvc"):
+        # portable-pty loads an app-local conpty.dll and its OpenConsole.exe.
+        # The system ConPTY can swallow native console mouse-mode changes;
+        # ship the same runtime family used by Windows Terminal instead.
+        runtime = download_conpty()
+        files.append((ROOT / "licenses/conpty-LICENSE", f"{name}/licenses/conpty-LICENSE"))
         archive = output / f"{name}.zip"
         with zipfile.ZipFile(archive, "w", zipfile.ZIP_DEFLATED) as package:
             for source, destination in files:
                 package.write(source, destination)
+            for filename, content in runtime.items():
+                package.writestr(f"{name}/{filename}", content)
     else:
         archive = output / f"{name}.tar.gz"
         with tarfile.open(archive, "w:gz") as package:
