@@ -24,6 +24,9 @@ use std::{
     time::{Duration, Instant},
 };
 
+const TERMINAL_FONT_SIZE: f32 = 16.0;
+const TERMINAL_LINE_HEIGHT: f32 = 1.3;
+
 #[derive(Parser, Clone)]
 #[command(version, about = "A small native terminal with clipboard image paste")]
 struct Args {
@@ -411,8 +414,11 @@ impl TerminalSession {
             self.cursor_blink_started = Instant::now();
         }
         let rect = ui.available_rect_before_wrap();
-        let font = FontId::monospace(16.0);
-        let cell = Vec2::new(ui.fonts_mut(|f| f.glyph_width(&font, 'M')), 21.0);
+        let font = FontId::monospace(TERMINAL_FONT_SIZE);
+        let cell = Vec2::new(
+            ui.fonts_mut(|f| f.glyph_width(&font, 'M')),
+            TERMINAL_FONT_SIZE * TERMINAL_LINE_HEIGHT,
+        );
         let size = Size {
             cols: ((rect.width() / cell.x) as usize).max(2),
             rows: ((rect.height() / cell.y) as usize).max(1),
@@ -487,8 +493,10 @@ impl TerminalSession {
                 if let Some(extra) = indexed.cell.zerowidth() {
                     text.extend(extra);
                 }
-                ui.painter()
-                    .text(pos, egui::Align2::LEFT_TOP, text, font.clone(), fg);
+                let galley = ui.painter().layout_no_wrap(text, font.clone(), fg);
+                // Center the font's line box in the terminal row, as GPUI does.
+                let text_pos = pos + Vec2::new(0.0, (cell.y - galley.size().y) / 2.0);
+                ui.painter().galley(text_pos, galley, fg);
                 if indexed.cell.flags.contains(Flags::UNDERLINE) {
                     let width = if indexed.cell.flags.contains(Flags::WIDE_CHAR) {
                         2.0 * cell.x
@@ -1345,13 +1353,24 @@ fn run(args: Args, logging: &logging::Logging) -> Result<()> {
 }
 
 fn configure_fonts(ctx: &egui::Context) {
+    let mut fonts = egui::FontDefinitions::default();
+    fonts.font_data.insert(
+        "Lilex".into(),
+        std::sync::Arc::new(egui::FontData::from_static(include_bytes!(
+            "../assets/fonts/lilex/Lilex-Regular.ttf"
+        ))),
+    );
+    fonts
+        .families
+        .entry(egui::FontFamily::Monospace)
+        .or_default()
+        .insert(0, "Lilex".into());
     #[cfg(windows)]
     {
         let windows = std::env::var_os("WINDIR")
             .map(std::path::PathBuf::from)
             .unwrap_or_else(|| std::path::PathBuf::from(r"C:\Windows"));
-        let mut fonts = egui::FontDefinitions::default();
-        // Append fallback fonts so ASCII keeps the built-in monospace metrics.
+        // Append fallback fonts so ASCII and box drawing keep Lilex's metrics.
         // Remote macOS apps use symbols such as ⌃/⌥/⌘ for keyboard shortcuts;
         // the built-in and CJK fonts do not cover all of these glyphs.
         // FontData uses face zero, including for Windows TTC collections.
@@ -1371,11 +1390,9 @@ fn configure_fonts(ctx: &egui::Context) {
                     .push(filename.into());
             }
         }
-        ctx.set_fonts(fonts);
     }
     #[cfg(target_os = "macos")]
     {
-        let mut fonts = egui::FontDefinitions::default();
         for path in [
             "/System/Library/Fonts/PingFang.ttc",
             "/System/Library/Fonts/STHeiti Light.ttc",
@@ -1391,15 +1408,40 @@ fn configure_fonts(ctx: &egui::Context) {
                 fonts.families.entry(family).or_default().push(path.into());
             }
         }
-        ctx.set_fonts(fonts);
     }
-    #[cfg(not(any(windows, target_os = "macos")))]
-    let _ = ctx;
+    ctx.set_fonts(fonts);
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn embedded_terminal_font_keeps_box_drawing_on_the_cell_grid() {
+        for scale in [1.0, 1.25, 1.5, 2.0] {
+            let ctx = egui::Context::default();
+            configure_fonts(&ctx);
+            ctx.set_pixels_per_point(scale);
+            let _ = ctx.run(egui::RawInput::default(), |ctx| {
+                ctx.fonts_mut(|fonts| {
+                    let font = FontId::monospace(TERMINAL_FONT_SIZE);
+                    let width = fonts.glyph_width(&font, 'M');
+                    // Lilex has a 600/1000 em advance. Check the resolved font,
+                    // not just registration: falling back to Hack changes this.
+                    assert!((width - 9.6).abs() < 0.01);
+                    for ch in "─│┌┐└┘├┤┬┴┼".chars() {
+                        assert!((fonts.glyph_width(&font, ch) - width).abs() < 0.01);
+                    }
+                    let height = fonts.row_height(&font);
+                    assert!(
+                        (height - TERMINAL_FONT_SIZE * TERMINAL_LINE_HEIGHT).abs() < 0.1,
+                        "Lilex line box {height} does not match terminal rows at scale {scale}"
+                    );
+                });
+            });
+        }
+    }
+
     #[test]
     fn popup_clicks_do_not_activate_the_pane_underneath() {
         let ctx = egui::Context::default();
