@@ -535,7 +535,7 @@ impl TerminalSession {
                 });
             });
         }
-        let events = if focused {
+        let events = if focused && !egui::Popup::is_any_open(ctx) {
             ctx.input(|i| i.events.clone())
         } else {
             Vec::new()
@@ -586,6 +586,10 @@ impl TerminalSession {
                         }
                     }
                 }
+                egui::Event::PointerButton {
+                    button: egui::PointerButton::Secondary,
+                    ..
+                } => {}
                 egui::Event::PointerButton {
                     pos,
                     button,
@@ -894,7 +898,7 @@ impl TerminalTab {
         !self.panes.is_empty()
     }
 
-    fn show(&mut self, ctx: &egui::Context, ui: &mut egui::Ui) {
+    fn show(&mut self, ctx: &egui::Context, ui: &mut egui::Ui) -> Option<(usize, SplitDirection)> {
         let mut rectangles = Vec::new();
         self.layout.rectangles(
             ui,
@@ -903,12 +907,30 @@ impl TerminalTab {
             &mut rectangles,
         );
         let mut close = None;
+        let mut split = None;
         // Resolve focus before delivering this frame's keyboard and clipboard events.
         for &(index, rect) in &rectangles {
-            if ctx.input(|input| input.pointer.primary_pressed()) && ui.rect_contains_pointer(rect)
+            if ctx
+                .input(|input| input.pointer.primary_pressed() || input.pointer.secondary_pressed())
+                && ui.rect_contains_pointer(rect)
             {
                 self.select(index);
             }
+            let response = ui.interact(
+                rect,
+                ui.id().with(("pane-menu", index)),
+                egui::Sense::click(),
+            );
+            response.context_menu(|ui| {
+                if ui.button("Split Right").clicked() {
+                    split = Some((index, SplitDirection::Right));
+                    ui.close();
+                }
+                if ui.button("Split Down").clicked() {
+                    split = Some((index, SplitDirection::Down));
+                    ui.close();
+                }
+            });
             let header = Rect::from_min_size(rect.min, Vec2::new(rect.width(), 24.0));
             let mut header_ui = ui.new_child(
                 egui::UiBuilder::new()
@@ -953,7 +975,9 @@ impl TerminalTab {
         }
         if let Some(index) = close {
             self.close_pane(index);
+            return None;
         }
+        split
     }
 }
 
@@ -1176,11 +1200,16 @@ impl eframe::App for TerminalApp {
                 ui.label(&session.status);
             });
         });
+        let mut pane_split = None;
         egui::CentralPanel::default()
             .frame(egui::Frame::NONE.fill(Color32::from_rgb(24, 26, 32)))
             .show(ctx, |ui| {
-                self.tabs[self.active].show(ctx, ui);
+                pane_split = self.tabs[self.active].show(ctx, ui);
             });
+        if let Some((pane, direction)) = pane_split {
+            self.tabs[self.active].select(pane);
+            self.split_pane(direction);
+        }
         // A pane can be closed from its header during rendering.
         if self.tabs[self.active].panes.is_empty() {
             self.close_tab(self.active);
