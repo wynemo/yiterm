@@ -905,13 +905,8 @@ impl TerminalTab {
         let mut close = None;
         // Resolve focus before delivering this frame's keyboard and clipboard events.
         for &(index, rect) in &rectangles {
-            if ctx.input(|input| {
-                input.pointer.primary_pressed()
-                    && input
-                        .pointer
-                        .interact_pos()
-                        .is_some_and(|pos| rect.contains(pos))
-            }) {
+            if ctx.input(|input| input.pointer.primary_pressed()) && ui.rect_contains_pointer(rect)
+            {
                 self.select(index);
             }
             let header = Rect::from_min_size(rect.min, Vec2::new(rect.width(), 24.0));
@@ -1376,6 +1371,52 @@ fn configure_fonts(ctx: &egui::Context) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn popup_clicks_do_not_activate_the_pane_underneath() {
+        let ctx = egui::Context::default();
+        let pos = egui::pos2(100.0, 100.0);
+        for pressed in [false, true] {
+            let mut events = vec![egui::Event::PointerMoved(pos)];
+            if pressed {
+                events.push(egui::Event::PointerButton {
+                    pos,
+                    button: egui::PointerButton::Primary,
+                    pressed: true,
+                    modifiers: egui::Modifiers::NONE,
+                });
+            }
+            let _ = ctx.run(
+                egui::RawInput {
+                    screen_rect: Some(Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        Vec2::new(800.0, 600.0),
+                    )),
+                    events,
+                    ..Default::default()
+                },
+                |ctx| {
+                    egui::Area::new(egui::Id::new("pane-menu"))
+                        .order(egui::Order::Foreground)
+                        .fixed_pos(egui::pos2(50.0, 50.0))
+                        .show(ctx, |ui| {
+                            ui.allocate_space(Vec2::splat(200.0));
+                        });
+                    egui::CentralPanel::default().show(ctx, |ui| {
+                        let rect = ui.available_rect_before_wrap();
+                        assert!(rect.contains(pos));
+                        if pressed {
+                            assert!(ctx.input(|input| input.pointer.primary_pressed()));
+                            assert!(
+                                !ui.rect_contains_pointer(rect),
+                                "Menu click reached underlying pane"
+                            );
+                        }
+                    });
+                },
+            );
+        }
+    }
+
     #[test]
     fn nested_splits_have_disjoint_rectangles_and_collapse_after_close() {
         let mut layout = PaneLayout::Leaf(0);
