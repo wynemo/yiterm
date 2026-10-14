@@ -165,7 +165,7 @@ impl TerminalApp {
             ime_preedit: String::new(),
             mouse_button: None,
             cursor_blink_started: Instant::now(),
-            status: "Ready · paste: Cmd+V / Ctrl+Shift+V".into(),
+            status: "Ready · paste: Cmd+V / Ctrl+Shift+V / Shift+Insert".into(),
             size,
         })
     }
@@ -459,7 +459,7 @@ impl eframe::App for TerminalApp {
             // Consume candidate-selection keys even if Commit clears the preedit
             // earlier in this frame. They must not execute a shell command.
             let composing = ime_owns_keyboard(&self.ime_preedit, &events);
-            let paste_shortcut = events.iter().any(|event| matches!(event, egui::Event::Key { key: Key::V, pressed: true, modifiers, .. } if modifiers.mac_cmd || (modifiers.ctrl && modifiers.shift)));
+            let paste_shortcut = events.iter().any(|event| matches!(event, egui::Event::Key { key, pressed: true, modifiers, .. } if is_paste_shortcut(*key, *modifiers)));
             if paste_shortcut { self.paste(); }
             for event in events {
                 match event {
@@ -517,7 +517,7 @@ impl eframe::App for TerminalApp {
                     egui::Event::Text(text) => { self.term.scroll_display(Scroll::Bottom); self.write(text.as_bytes()); },
                     egui::Event::Key { key, pressed: true, modifiers, .. } => {
                         if composing { continue; }
-                        if key == Key::V && (modifiers.mac_cmd || modifiers.ctrl && modifiers.shift) { continue; }
+                        if is_paste_shortcut(key, modifiers) { continue; }
                         let app_cursor = self.term.mode().contains(TermMode::APP_CURSOR);
                         if let Some(bytes) = key_bytes(key, modifiers, app_cursor) {
                             self.term.scroll_display(Scroll::Bottom);
@@ -591,6 +591,11 @@ fn ime_owns_keyboard(preedit: &str, events: &[egui::Event]) -> bool {
                 egui::Event::Ime(egui::ImeEvent::Preedit(text)) if !text.is_empty()
             ) || matches!(event, egui::Event::Ime(egui::ImeEvent::Commit(_)))
         })
+}
+
+fn is_paste_shortcut(key: Key, modifiers: egui::Modifiers) -> bool {
+    (key == Key::V && (modifiers.mac_cmd || modifiers.ctrl && modifiers.shift))
+        || (key == Key::Insert && modifiers.shift && !modifiers.ctrl && !modifiers.alt && !modifiers.mac_cmd)
 }
 
 fn key_bytes(key: Key, modifiers: egui::Modifiers, app_cursor: bool) -> Option<Vec<u8>> {
@@ -860,5 +865,17 @@ mod tests {
             key_bytes(Key::ArrowUp, egui::Modifiers::NONE, true),
             Some(b"\x1bOA".to_vec())
         );
+    }
+
+    #[test]
+    fn paste_shortcuts_include_shift_insert() {
+        assert!(is_paste_shortcut(Key::Insert, egui::Modifiers::SHIFT));
+        assert!(is_paste_shortcut(Key::V, egui::Modifiers::CTRL | egui::Modifiers::SHIFT));
+        assert!(is_paste_shortcut(Key::V, egui::Modifiers::MAC_CMD));
+        assert!(!is_paste_shortcut(Key::Insert, egui::Modifiers::NONE));
+        assert!(!is_paste_shortcut(Key::Insert, egui::Modifiers::CTRL));
+        assert!(!is_paste_shortcut(Key::Insert, egui::Modifiers::CTRL | egui::Modifiers::SHIFT));
+        assert!(!is_paste_shortcut(Key::V, egui::Modifiers::CTRL));
+        assert_eq!(key_bytes(Key::Insert, egui::Modifiers::NONE, false), Some(b"\x1b[2~".to_vec()));
     }
 }
