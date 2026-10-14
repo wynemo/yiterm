@@ -371,7 +371,6 @@ pub struct Detection {
     pub identity: TargetIdentity,
 }
 
-#[cfg(not(unix))]
 fn is_descendant(system: &System, mut pid: Pid, root: Pid) -> bool {
     for _ in 0..128 {
         if pid == root {
@@ -449,12 +448,11 @@ fn detect_once(root: u32, group: Option<i32>) -> Result<Option<Detection>> {
             .with_cmd(UpdateKind::Always)
             .with_exe(UpdateKind::Always),
     );
-    let mut found = Vec::new();
+    let mut real_candidates = Vec::new();
     for pid in candidates {
         let Some(process) = system.process(pid) else {
             continue;
         };
-        let cmd = process.cmd();
         // On Windows the PATH shim waits for its real OpenSSH child; ignore
         // the shim executable itself and select that child's real argv.
         if process
@@ -470,6 +468,24 @@ fn detect_once(root: u32, group: Option<i32>) -> Result<Option<Detection>> {
         {
             continue;
         }
+        real_candidates.push(pid);
+    }
+    // ProxyJump/ProxyCommand SSH helpers inherit the foreground process group.
+    // Select the outer SSH session, not its transport children (e.g. ssh -W).
+    // Exclude our Windows shim above before checking ancestry.
+    let mut found = Vec::new();
+    for &pid in &real_candidates {
+        if real_candidates
+            .iter()
+            .any(|&parent| parent != pid && is_descendant(&system, pid, parent))
+        {
+            tracing::debug!(pid = pid.as_u32(), "Ignoring SSH transport child");
+            continue;
+        }
+        let Some(process) = system.process(pid) else {
+            continue;
+        };
+        let cmd = process.cmd();
         ensure!(
             !cmd.is_empty(),
             "Cannot read foreground SSH arguments; image was not pasted"

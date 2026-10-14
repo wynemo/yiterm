@@ -171,3 +171,44 @@ fn shell_bootstrap_preserves_typed_ssh_and_enables_multiplexing() {
         );
     }
 }
+
+#[test]
+fn jump_transport_child_does_not_replace_interactive_destination() {
+    let mut session = Session::new("/bin/sh");
+    // Keep the outer SSH and its -W proxy child alive without network access.
+    session.send("ssh -F /dev/null -oProxyCommand='exec /usr/bin/ssh -F /dev/null -oProxyCommand=\"exec sleep 60\" -oConnectTimeout=30 -W target.invalid:22 jump.invalid' -oConnectTimeout=30 alice@target.invalid\r");
+    let deadline = Instant::now() + Duration::from_secs(10);
+    // Wait until the proxy child really exists so the regression is exercised.
+    loop {
+        let output = std::process::Command::new("/bin/ps")
+            .args([
+                "-t",
+                &session.master.tty_name().unwrap().to_string_lossy(),
+                "-o",
+                "args=",
+            ])
+            .output()
+            .unwrap();
+        let text = String::from_utf8_lossy(&output.stdout);
+        if text.lines().any(|line| {
+            line.trim_start().starts_with("/usr/bin/ssh -F /dev/null")
+                && line.contains("-W target.invalid:22")
+        }) {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "SSH proxy child did not start: {text}"
+        );
+        std::thread::sleep(Duration::from_millis(30));
+    }
+    let detected = session
+        .detect()
+        .expect("Transport child must not cause a -W error")
+        .unwrap();
+    assert_eq!(detected.remote.host, "alice@target.invalid");
+    assert!(ssh::target_is_alive(
+        detected.identity,
+        session.master.process_group_leader()
+    ));
+}
