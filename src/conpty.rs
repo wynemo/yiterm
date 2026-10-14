@@ -14,7 +14,7 @@ pub fn initialize() -> Result<()> {
     let directory = executable.parent().context("Executable has no directory")?;
     let dll = directory.join("conpty.dll");
     if !dll.exists() && option_env!("YITERM_BUILD_REV").is_none() {
-        eprintln!("[yiterm pty] runtime=system (unbundled development build)");
+        tracing::info!(runtime = "system", "ConPTY initialized (development build)");
         return Ok(());
     }
     ensure!(
@@ -51,8 +51,8 @@ pub fn initialize() -> Result<()> {
         length > 0 && (length as usize) < actual.len(),
         "Cannot identify loaded ConPTY"
     );
-    eprintln!(
-        "[yiterm pty] runtime=bundled path={}",
+    tracing::info!(
+        "ConPTY runtime=bundled path={}",
         OsString::from_wide(&actual[..length as usize]).to_string_lossy()
     );
     Ok(())

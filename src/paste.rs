@@ -70,7 +70,14 @@ pub fn upload(path: &Path, remote: &crate::ssh::Remote, scp: &Path) -> Result<St
         .arg("--")
         .arg(path)
         .arg(format!("{}:{destination}", remote.scp_destination()));
+    let started = Instant::now();
+    tracing::info!("Image upload started");
     let output = run_transfer(command, Duration::from_secs(60))?;
+    tracing::info!(
+        success = output.0.success(),
+        elapsed_ms = started.elapsed().as_millis() as u64,
+        "Image upload completed"
+    );
     if !output.0.success() {
         bail!(
             "Image upload failed: {}",

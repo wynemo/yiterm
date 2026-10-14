@@ -1,0 +1,9 @@
+[logging]
+# Levels: off, error, warn, info, debug, trace. Module overrides are supported.
+filter = "warn,yiterm=info"
+console = true
+file = true
+# Optional absolute path; omit to use the platform's default log directory.
+# directory = "/path/to/logs"
+rotation = "daily"
+max_files = 14

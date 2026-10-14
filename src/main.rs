@@ -1,15 +1,7 @@
-use yiterm::{mouse, paste, ssh};
+use yiterm::{logging, mouse, paste, ssh};
 
 #[cfg(windows)]
 mod conpty;
-
-macro_rules! mouse_trace {
-    ($($arg:tt)*) => {
-        if cfg!(windows) {
-            eprintln!("[yiterm mouse] {}", format_args!($($arg)*));
-        }
-    };
-}
 
 use alacritty_terminal::{
     Term,
@@ -36,6 +28,12 @@ struct Args {
     /// Connect directly to this OpenSSH host (remote shell must be POSIX).
     #[arg(long)]
     ssh: Option<String>,
+    /// Configuration TOML file.
+    #[arg(long)]
+    config: Option<std::path::PathBuf>,
+    /// Override logging filter (e.g. warn,yiterm=debug).
+    #[arg(long)]
+    log_filter: Option<String>,
     /// Local shell executable. Defaults to $SHELL or powershell.exe.
     #[arg(long)]
     shell: Option<String>,
@@ -71,6 +69,7 @@ struct PasteResult {
     image_group: Option<Option<i32>>,
 }
 struct TerminalApp {
+    log_directory: std::path::PathBuf,
     term: Term<Listener>,
     parser: Processor,
     mouse_modes: mouse::MouseModes,
@@ -91,10 +90,14 @@ struct TerminalApp {
     size: Size,
 }
 impl TerminalApp {
-    fn new(args: Args) -> Result<Self> {
-        mouse_trace!(
+    fn new(args: Args, logging: &logging::Logging) -> Result<Self> {
+        tracing::trace!(target: "yiterm::mouse",
             "build={} transport=raw_vt",
             option_env!("YITERM_BUILD_REV").unwrap_or("local")
+        );
+        tracing::info!(
+            session_kind = if args.ssh.is_some() { "ssh" } else { "local" },
+            "Starting terminal session"
         );
         let integration = ssh::Integration::new(&std::env::current_exe()?)?;
         if let Some(host) = &args.ssh {
@@ -133,7 +136,14 @@ impl TerminalApp {
             let mut buffer = [0; 16384];
             loop {
                 match reader.read(&mut buffer) {
-                    Ok(0) | Err(_) => break,
+                    Ok(0) => {
+                        tracing::info!("PTY output closed");
+                        break;
+                    }
+                    Err(error) => {
+                        tracing::warn!(%error, "PTY read failed");
+                        break;
+                    }
                     Ok(n) => {
                         if tx.send(buffer[..n].to_vec()).is_err() {
                             break;
@@ -148,7 +158,9 @@ impl TerminalApp {
         config.default_cursor_style.blinking = true;
         let term = Term::new(config, &size, Listener(tx));
         let (paste_sender, paste_result) = mpsc::channel();
+        tracing::info!(child_pid = ?child.process_id(), "Terminal session started");
         Ok(Self {
+            log_directory: logging.directory.clone(),
             term,
             parser: Processor::new(),
             mouse_modes: mouse::MouseModes::default(),
@@ -165,7 +177,10 @@ impl TerminalApp {
             ime_preedit: String::new(),
             mouse_button: None,
             cursor_blink_started: Instant::now(),
-            status: "Ready · paste: Cmd+V / Ctrl+Shift+V / Shift+Insert".into(),
+            status: logging
+                .warning
+                .clone()
+                .unwrap_or_else(|| "Ready · paste: Cmd+V / Ctrl+Shift+V / Shift+Insert".into()),
             size,
         })
     }
@@ -175,11 +190,12 @@ impl TerminalApp {
             .write_all(bytes)
             .and_then(|_| self.writer.flush())
         {
+            tracing::error!(%error, "PTY write failed");
             self.status = error.to_string();
         }
     }
     fn write_mouse(&mut self, report: &[u8]) {
-        mouse_trace!(
+        tracing::trace!(target: "yiterm::mouse",
             "send protocol={:?} cols={} rows={} hex={}",
             self.mouse_modes.protocol(*self.term.mode()),
             self.size.cols,
@@ -191,9 +207,9 @@ impl TerminalApp {
             .write_all(report)
             .and_then(|_| self.writer.flush())
         {
-            Ok(()) => mouse_trace!("write_ok"),
+            Ok(()) => tracing::trace!(target: "yiterm::mouse", "write_ok"),
             Err(error) => {
-                mouse_trace!("write_error={error}");
+                tracing::error!(%error, "PTY mouse write failed");
                 self.status = error.to_string();
             }
         }
@@ -209,6 +225,8 @@ impl TerminalApp {
         let group = self.foreground_group();
         let scp = self.integration.real_scp.clone();
         std::thread::spawn(move || {
+            let started = Instant::now();
+            tracing::debug!("Clipboard paste started");
             let result = (|| -> Result<PasteResult> {
                 let mut clipboard = arboard::Clipboard::new()?;
                 if let Ok(image) = clipboard.get_image() {
@@ -240,6 +258,11 @@ impl TerminalApp {
                     })
                 }
             })();
+            tracing::debug!(
+                elapsed_ms = started.elapsed().as_millis() as u64,
+                success = result.is_ok(),
+                "Clipboard paste completed"
+            );
             let _ = tx.send(result);
         });
     }
@@ -334,10 +357,10 @@ impl eframe::App for TerminalApp {
             let requests = self.mouse_modes.observe(&bytes);
             self.parser.advance(&mut self.term, &bytes);
             for (mode, enabled) in requests {
-                mouse_trace!("request mode={mode} enabled={enabled}");
+                tracing::trace!(target: "yiterm::mouse", "request mode={mode} enabled={enabled}");
             }
             if previous_mode != *self.term.mode() {
-                mouse_trace!("state {:?}", self.term.mode());
+                tracing::trace!(target: "yiterm::mouse", "state {:?}", self.term.mode());
             }
             self.cursor_blink_started = Instant::now();
         }
@@ -371,13 +394,30 @@ impl eframe::App for TerminalApp {
                         };
                     }
                 }
-                Err(error) => self.status = format!("{error:#}"),
+                Err(error) => {
+                    tracing::warn!(error = %format!("{error:#}"), "Clipboard paste failed");
+                    self.status = format!("{error:#}");
+                }
             }
         }
-        if let Ok(Some(_)) = self.child.try_wait() {
+        if let Ok(Some(status)) = self.child.try_wait() {
+            tracing::info!(?status, "Terminal session exited");
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
             return;
         }
+        egui::TopBottomPanel::top("menu").show(ctx, |ui| {
+            egui::MenuBar::new().ui(ui, |ui| {
+                ui.menu_button("Tools", |ui| {
+                    if ui.button("Open Log Directory").clicked() {
+                        if let Err(error) = logging::open_directory(&self.log_directory) {
+                            tracing::warn!(%error, "Cannot open log directory");
+                            self.status = format!("{error:#}");
+                        }
+                        ui.close();
+                    }
+                });
+            });
+        });
         egui::TopBottomPanel::bottom("status").show(ctx, |ui| {
             ui.horizontal(|ui| {
                 if ui.button("Paste").clicked() {
@@ -392,7 +432,7 @@ impl eframe::App for TerminalApp {
             let cell = Vec2::new(ui.fonts_mut(|f| f.glyph_width(&font, 'M')), 21.0);
             let size = Size { cols: ((rect.width() / cell.x) as usize).max(2), rows: ((rect.height() / cell.y) as usize).max(1) };
             if size.cols != self.size.cols || size.rows != self.size.rows {
-                if let Err(error) = self.master.resize(PtySize { cols: size.cols as u16, rows: size.rows as u16, pixel_width: 0, pixel_height: 0 }) { self.status = error.to_string(); }
+                if let Err(error) = self.master.resize(PtySize { cols: size.cols as u16, rows: size.rows as u16, pixel_width: 0, pixel_height: 0 }) { tracing::warn!(%error, "PTY resize failed"); self.status = error.to_string(); }
                 self.term.resize(size);
                 self.size = size;
             }
@@ -464,7 +504,7 @@ impl eframe::App for TerminalApp {
             for event in events {
                 match event {
                     egui::Event::MouseWheel { unit, delta, modifiers } => {
-                        mouse_trace!("wheel unit={unit:?} delta={} report={report_mouse}", delta.y);
+                        tracing::trace!(target: "yiterm::mouse", "wheel unit={unit:?} delta={} report={report_mouse}", delta.y);
                         if !report_mouse || modifiers.shift || delta.y == 0.0 { continue; }
                         let Some(pos) = ctx.input(|i| i.pointer.hover_pos()).filter(|pos| rect.contains(*pos)) else {
                             self.mouse_wheel.reset();
@@ -485,7 +525,7 @@ impl eframe::App for TerminalApp {
                     },
                     egui::Event::PointerButton { pos, button, pressed, modifiers } => {
                         let tracked = self.mouse_button == Some(button);
-                        mouse_trace!("button={button:?} pressed={pressed} report={report_mouse} inside={} shift={} offset={} pos={pos:?} rect={rect:?} cell={cell:?} mode={mouse_mode:?}", rect.contains(pos), modifiers.shift, self.term.grid().display_offset());
+                        tracing::trace!(target: "yiterm::mouse", "button={button:?} pressed={pressed} report={report_mouse} inside={} shift={} offset={} pos={pos:?} rect={rect:?} cell={cell:?} mode={mouse_mode:?}", rect.contains(pos), modifiers.shift, self.term.grid().display_offset());
                         if report_mouse && (rect.contains(pos) || (!pressed && tracked))
                             && let Some(code) = mouse_button_code(button) {
                                 if let Some(bytes) = mouse_bytes(mouse_protocol, rect, cell, size, pos, (code, pressed), modifiers) {
@@ -595,7 +635,11 @@ fn ime_owns_keyboard(preedit: &str, events: &[egui::Event]) -> bool {
 
 fn is_paste_shortcut(key: Key, modifiers: egui::Modifiers) -> bool {
     (key == Key::V && (modifiers.mac_cmd || modifiers.ctrl && modifiers.shift))
-        || (key == Key::Insert && modifiers.shift && !modifiers.ctrl && !modifiers.alt && !modifiers.mac_cmd)
+        || (key == Key::Insert
+            && modifiers.shift
+            && !modifiers.ctrl
+            && !modifiers.alt
+            && !modifiers.mac_cmd)
 }
 
 fn key_bytes(key: Key, modifiers: egui::Modifiers, app_cursor: bool) -> Option<Vec<u8>> {
@@ -631,7 +675,17 @@ fn main() -> Result<()> {
     if ssh::is_wrapper() {
         return ssh::run_wrapper();
     }
-    let app = TerminalApp::new(Args::parse())?;
+    let args = Args::parse();
+    let logging = logging::init(args.config.as_deref(), args.log_filter.as_deref())?;
+    let result = run(args, &logging);
+    if let Err(error) = &result {
+        tracing::error!(error = %format!("{error:#}"), "Application failed");
+    }
+    result
+}
+
+fn run(args: Args, logging: &logging::Logging) -> Result<()> {
+    let app = TerminalApp::new(args, logging)?;
     eframe::run_native(
         "yiterm",
         eframe::NativeOptions {
@@ -870,12 +924,21 @@ mod tests {
     #[test]
     fn paste_shortcuts_include_shift_insert() {
         assert!(is_paste_shortcut(Key::Insert, egui::Modifiers::SHIFT));
-        assert!(is_paste_shortcut(Key::V, egui::Modifiers::CTRL | egui::Modifiers::SHIFT));
+        assert!(is_paste_shortcut(
+            Key::V,
+            egui::Modifiers::CTRL | egui::Modifiers::SHIFT
+        ));
         assert!(is_paste_shortcut(Key::V, egui::Modifiers::MAC_CMD));
         assert!(!is_paste_shortcut(Key::Insert, egui::Modifiers::NONE));
         assert!(!is_paste_shortcut(Key::Insert, egui::Modifiers::CTRL));
-        assert!(!is_paste_shortcut(Key::Insert, egui::Modifiers::CTRL | egui::Modifiers::SHIFT));
+        assert!(!is_paste_shortcut(
+            Key::Insert,
+            egui::Modifiers::CTRL | egui::Modifiers::SHIFT
+        ));
         assert!(!is_paste_shortcut(Key::V, egui::Modifiers::CTRL));
-        assert_eq!(key_bytes(Key::Insert, egui::Modifiers::NONE, false), Some(b"\x1b[2~".to_vec()));
+        assert_eq!(
+            key_bytes(Key::Insert, egui::Modifiers::NONE, false),
+            Some(b"\x1b[2~".to_vec())
+        );
     }
 }
