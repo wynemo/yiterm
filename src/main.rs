@@ -27,6 +27,15 @@ use std::{
 const TERMINAL_FONT_SIZE: f32 = 16.0;
 const TERMINAL_LINE_HEIGHT: f32 = 1.3;
 
+fn terminal_cell_rect(origin: egui::Pos2, cell: Vec2, column: usize, row: usize) -> Rect {
+    // Compute both sides from grid coordinates. Adding cell height to the top
+    // can round differently from the next row's top at fractional line heights.
+    Rect::from_min_max(
+        origin + Vec2::new(column as f32 * cell.x, row as f32 * cell.y),
+        origin + Vec2::new((column + 1) as f32 * cell.x, (row + 1) as f32 * cell.y),
+    )
+}
+
 #[derive(Parser, Clone)]
 #[command(version, about = "A small native terminal with clipboard image paste")]
 struct Args {
@@ -464,15 +473,16 @@ impl TerminalSession {
             if row < 0 {
                 continue;
             }
-            let pos =
-                rect.min + Vec2::new(indexed.point.column.0 as f32 * cell.x, row as f32 * cell.y);
             let bg = if indexed.cell.flags.contains(Flags::INVERSE) {
                 color(indexed.cell.fg, true)
             } else {
                 color(indexed.cell.bg, false)
             };
-            ui.painter()
-                .rect_filled(Rect::from_min_size(pos, cell), 0.0, bg);
+            ui.painter().rect_filled(
+                terminal_cell_rect(rect.min, cell, indexed.point.column.0, row as usize),
+                0.0,
+                bg,
+            );
         }
         for indexed in &cells {
             let row = indexed.point.line.0 + offset as i32;
@@ -1429,6 +1439,29 @@ fn configure_fonts(ctx: &egui::Context) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn terminal_background_cells_share_pixel_edges() {
+        use egui::emath::GuiRounding;
+
+        let cell = Vec2::new(9.6, TERMINAL_FONT_SIZE * TERMINAL_LINE_HEIGHT);
+        for scale in [1.0, 1.25, 1.5, 2.0] {
+            for origin in [egui::pos2(2.0, 26.5), egui::pos2(7.25, 63.0)] {
+                for row in 0..100 {
+                    for column in 0..100 {
+                        let rect =
+                            terminal_cell_rect(origin, cell, column, row).round_to_pixels(scale);
+                        let below = terminal_cell_rect(origin, cell, column, row + 1)
+                            .round_to_pixels(scale);
+                        let right = terminal_cell_rect(origin, cell, column + 1, row)
+                            .round_to_pixels(scale);
+                        assert_eq!(rect.max.y, below.min.y, "background gap at row {row}");
+                        assert_eq!(rect.max.x, right.min.x, "background gap at column {column}");
+                    }
+                }
+            }
+        }
+    }
 
     #[test]
     fn embedded_terminal_font_keeps_box_drawing_on_the_cell_grid() {
