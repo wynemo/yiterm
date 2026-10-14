@@ -2,6 +2,8 @@ name: Build YiTerm
 
 on:
   push:
+    branches: ['**']
+    tags: ['**']
   pull_request:
   workflow_dispatch:
 
@@ -64,3 +66,39 @@ jobs:
           if-no-files-found: error
           compression-level: 0
           retention-days: 30
+
+  release:
+    name: Publish GitHub Release
+    needs: build
+    if: github.ref_type == 'tag' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - name: Download release packages
+        uses: actions/download-artifact@v8
+        with:
+          pattern: yiterm-*
+          path: dist
+          merge-multiple: true
+
+      - name: Create release and upload packages
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        shell: bash
+        run: |
+          shopt -s nullglob
+          assets=(dist/*.zip dist/*.tar.gz dist/*.sha256)
+          if (( ${#assets[@]} == 0 )); then
+            echo "No release packages found" >&2
+            exit 1
+          fi
+          if gh release view "$RELEASE_TAG" > /dev/null 2>&1; then
+            gh release upload "$RELEASE_TAG" "${assets[@]}" --clobber
+          else
+            gh release create "$RELEASE_TAG" "${assets[@]}" \
+              --verify-tag --title "$RELEASE_TAG" --generate-notes
+          fi
