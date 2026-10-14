@@ -1,4 +1,4 @@
-# YiTerm 0.0.1
+# YiTerm
 
 Rust 原生终端原型，支持 macOS 和 Windows。使用 `alacritty_terminal` 解析终端协议、`portable-pty` 启动本地 shell / ConPTY、egui 绘制窗口。
 
@@ -22,6 +22,17 @@ cargo run --release -- --ssh my-server
 ```
 
 Windows 默认启动 `powershell.exe`；macOS 默认使用 `$SHELL`。`--shell` 接收可执行文件路径，不接收整条命令。可以在窗口内直接输入 `ssh user@host`，进入远端后照常粘贴图片；也可使用 `--ssh` 直接启动远端会话。SSH 目标使用 `~/.ssh/config` 中的别名或 `user@host`；端口、密钥、跳板机等写入 SSH config。远端需要 POSIX shell、可写的 `/tmp` 和 scp/SFTP 支持。
+
+## 多标签页
+
+顶部标签栏点击 **+** 新建 tab，点击标签切换，点击 **×** 关闭。每个 tab 有独立的 shell / SSH 会话、终端输出和粘贴状态，后台 tab 持续运行。新 tab 复用启动时的 `--shell` 或 `--ssh` 参数；关闭最后一个 tab 时退出窗口。
+
+| 操作 | macOS | Windows / Linux |
+| --- | --- | --- |
+| 新建 tab | Cmd+T | Ctrl+Shift+T |
+| 关闭当前 tab | Cmd+W | Ctrl+Shift+W |
+| 下一个 tab | Ctrl+Tab | Ctrl+Tab |
+| 上一个 tab | Ctrl+Shift+Tab | Ctrl+Shift+Tab |
 
 ## 日志
 

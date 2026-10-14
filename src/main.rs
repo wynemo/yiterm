@@ -24,7 +24,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-#[derive(Parser)]
+#[derive(Parser, Clone)]
 #[command(version, about = "A small native terminal with clipboard image paste")]
 struct Args {
     /// Connect directly to this OpenSSH host (remote shell must be POSIX).
@@ -70,8 +70,8 @@ struct PasteResult {
     target: Option<ssh::TargetIdentity>,
     image_group: Option<Option<i32>>,
 }
-struct TerminalApp {
-    log_directory: std::path::PathBuf,
+struct TerminalSession {
+    title: String,
     term: Term<Listener>,
     parser: Processor,
     mouse_modes: mouse::MouseModes,
@@ -91,8 +91,8 @@ struct TerminalApp {
     status: String,
     size: Size,
 }
-impl TerminalApp {
-    fn new(args: Args, logging: &logging::Logging) -> Result<Self> {
+impl TerminalSession {
+    fn new(args: &Args, warning: Option<&str>) -> Result<Self> {
         tracing::trace!(target: "yiterm::mouse",
             "build={} transport=raw_vt",
             option_env!("YITERM_BUILD_REV").unwrap_or("local")
@@ -116,7 +116,7 @@ impl TerminalApp {
         let mut command = if let Some(host) = &args.ssh {
             integration.direct(host)?
         } else {
-            let shell = args.shell.unwrap_or_else(|| {
+            let shell = args.shell.clone().unwrap_or_else(|| {
                 if cfg!(windows) {
                     "powershell.exe".into()
                 } else {
@@ -162,7 +162,7 @@ impl TerminalApp {
         let (paste_sender, paste_result) = mpsc::channel();
         tracing::info!(child_pid = ?child.process_id(), "Terminal session started");
         Ok(Self {
-            log_directory: logging.directory.clone(),
+            title: args.ssh.clone().unwrap_or_else(|| "Terminal".into()),
             term,
             parser: Processor::new(),
             mouse_modes: mouse::MouseModes::default(),
@@ -179,9 +179,8 @@ impl TerminalApp {
             ime_preedit: String::new(),
             mouse_button: None,
             cursor_blink_started: Instant::now(),
-            status: logging
-                .warning
-                .clone()
+            status: warning
+                .map(str::to_owned)
                 .unwrap_or_else(|| "Ready · paste: Cmd+V / Ctrl+Shift+V / Shift+Insert".into()),
             size,
         })
@@ -287,7 +286,7 @@ impl TerminalApp {
         }
     }
 }
-impl Drop for TerminalApp {
+impl Drop for TerminalSession {
     fn drop(&mut self) {
         let _ = self.child.kill();
     }
@@ -334,23 +333,8 @@ fn color(color: Color, foreground: bool) -> Color32 {
     }
 }
 
-impl eframe::App for TerminalApp {
-    fn update(&mut self, ctx: &egui::Context, _: &mut eframe::Frame) {
-        // Keep the cursor visible while typing and restart its blink on focus.
-        if ctx.input(|input| {
-            input.events.iter().any(|event| {
-                matches!(
-                    event,
-                    egui::Event::Key { pressed: true, .. }
-                        | egui::Event::Text(_)
-                        | egui::Event::Paste(_)
-                        | egui::Event::Ime(_)
-                        | egui::Event::WindowFocused(true)
-                )
-            })
-        }) {
-            self.cursor_blink_started = Instant::now();
-        }
+impl TerminalSession {
+    fn poll(&mut self) -> bool {
         for _ in 0..128 {
             let Ok(bytes) = self.output.try_recv() else {
                 break;
@@ -369,9 +353,8 @@ impl eframe::App for TerminalApp {
         while let Ok(event) = self.events.try_recv() {
             match event {
                 Event::PtyWrite(text) => self.write(text.as_bytes()),
-                Event::Title(title) => {
-                    ctx.send_viewport_cmd(egui::ViewportCommand::Title(format!("yiterm — {title}")))
-                }
+                Event::Title(title) => self.title = title,
+                Event::ResetTitle => self.title = "Terminal".into(),
                 _ => {}
             }
         }
@@ -404,22 +387,27 @@ impl eframe::App for TerminalApp {
         }
         if let Ok(Some(status)) = self.child.try_wait() {
             tracing::info!(?status, "Terminal session exited");
-            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
-            return;
+            return false;
         }
-        egui::TopBottomPanel::top("menu").show(ctx, |ui| {
-            egui::MenuBar::new().ui(ui, |ui| {
-                ui.menu_button("Tools", |ui| {
-                    if ui.button("Open Log Directory").clicked() {
-                        if let Err(error) = logging::open_directory(&self.log_directory) {
-                            tracing::warn!(%error, "Cannot open log directory");
-                            self.status = format!("{error:#}");
-                        }
-                        ui.close();
-                    }
-                });
-            });
-        });
+        true
+    }
+
+    fn show(&mut self, ctx: &egui::Context) {
+        // Keep the cursor visible while typing and restart its blink on focus.
+        if ctx.input(|input| {
+            input.events.iter().any(|event| {
+                matches!(
+                    event,
+                    egui::Event::Key { pressed: true, .. }
+                        | egui::Event::Text(_)
+                        | egui::Event::Paste(_)
+                        | egui::Event::Ime(_)
+                        | egui::Event::WindowFocused(true)
+                )
+            })
+        }) {
+            self.cursor_blink_started = Instant::now();
+        }
         egui::TopBottomPanel::bottom("status").show(ctx, |ui| {
             ui.horizontal(|ui| {
                 if ui.button("Paste").clicked() {
@@ -576,6 +564,175 @@ impl eframe::App for TerminalApp {
             }
         });
         ctx.request_repaint_after(Duration::from_millis(16));
+    }
+}
+
+struct TerminalApp {
+    sessions: Vec<TerminalSession>,
+    active: usize,
+    args: Args,
+    log_directory: std::path::PathBuf,
+    warning: Option<String>,
+    error: Option<String>,
+}
+
+impl TerminalApp {
+    fn new(args: Args, logging: &logging::Logging) -> Result<Self> {
+        let session = TerminalSession::new(&args, logging.warning.as_deref())?;
+        Ok(Self {
+            sessions: vec![session],
+            active: 0,
+            args,
+            log_directory: logging.directory.clone(),
+            warning: logging.warning.clone(),
+            error: None,
+        })
+    }
+
+    fn new_tab(&mut self) {
+        match TerminalSession::new(&self.args, self.warning.as_deref()) {
+            Ok(session) => {
+                self.sessions.push(session);
+                self.select(self.sessions.len() - 1);
+                self.error = None;
+            }
+            Err(error) => {
+                tracing::warn!(%error, "Cannot create terminal tab");
+                self.error = Some(format!("Cannot create tab: {error:#}"));
+            }
+        }
+    }
+
+    fn select(&mut self, index: usize) {
+        if let Some(previous) = self.sessions.get_mut(self.active) {
+            previous.ime_preedit.clear();
+            previous.mouse_button = None;
+            previous.mouse_wheel.reset();
+        }
+        self.active = index;
+        self.sessions[index].cursor_blink_started = Instant::now();
+    }
+
+    fn close_tab(&mut self, index: usize) {
+        let was_active = index == self.active;
+        self.sessions.remove(index);
+        self.active = active_after_close(self.active, index, self.sessions.len());
+        if was_active && !self.sessions.is_empty() {
+            self.select(self.active);
+        }
+    }
+}
+
+fn active_after_close(active: usize, closed: usize, remaining: usize) -> usize {
+    let active = if closed < active { active - 1 } else { active };
+    active.min(remaining.saturating_sub(1))
+}
+
+fn consume_tab_shortcuts(input: &mut egui::InputState) -> (bool, bool, bool, bool) {
+    let command = if cfg!(target_os = "macos") {
+        egui::Modifiers::MAC_CMD
+    } else {
+        egui::Modifiers::CTRL | egui::Modifiers::SHIFT
+    };
+    // egui allows extra Shift when matching Ctrl: consume the specific shortcut first.
+    let previous = input.consume_key(egui::Modifiers::CTRL | egui::Modifiers::SHIFT, Key::Tab);
+    let next = input.consume_key(egui::Modifiers::CTRL, Key::Tab);
+    (
+        input.consume_key(command, Key::T),
+        input.consume_key(command, Key::W),
+        next,
+        previous,
+    )
+}
+
+impl eframe::App for TerminalApp {
+    fn update(&mut self, ctx: &egui::Context, _: &mut eframe::Frame) {
+        // Drain every PTY, including background tabs, so output and paste results
+        // cannot block and terminal queries are answered while another tab is active.
+        for index in (0..self.sessions.len()).rev() {
+            if !self.sessions[index].poll() {
+                self.close_tab(index);
+            }
+        }
+        if self.sessions.is_empty() {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            return;
+        }
+        let composing = ctx.input(|input| {
+            ime_owns_keyboard(&self.sessions[self.active].ime_preedit, &input.events)
+        });
+        if !composing {
+            let (new, close, next, previous) = ctx.input_mut(consume_tab_shortcuts);
+            if new {
+                self.new_tab();
+            }
+            if close {
+                self.close_tab(self.active);
+            }
+            if !self.sessions.is_empty() && (next || previous) {
+                let count = self.sessions.len();
+                self.select((self.active + if previous { count - 1 } else { 1 }) % count);
+            }
+        }
+        let mut selected = None;
+        let mut closed = None;
+        let mut new = false;
+        egui::TopBottomPanel::top("menu").show(ctx, |ui| {
+            egui::MenuBar::new().ui(ui, |ui| {
+                ui.menu_button("Tools", |ui| {
+                    if ui.button("Open Log Directory").clicked() {
+                        if let Err(error) = logging::open_directory(&self.log_directory) {
+                            self.error = Some(format!("{error:#}"));
+                        }
+                        ui.close();
+                    }
+                });
+            });
+            egui::ScrollArea::horizontal()
+                .id_salt("tabs")
+                .show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        for (index, session) in self.sessions.iter().enumerate() {
+                            ui.push_id(index, |ui| {
+                                if ui
+                                    .selectable_label(
+                                        index == self.active,
+                                        format!("{}: {}", index + 1, session.title),
+                                    )
+                                    .clicked()
+                                {
+                                    selected = Some(index);
+                                }
+                                if ui.small_button("×").on_hover_text("Close tab").clicked() {
+                                    closed = Some(index);
+                                }
+                            });
+                        }
+                        new = ui.button("+").on_hover_text("New tab").clicked();
+                    });
+                });
+            if let Some(error) = &self.error {
+                ui.colored_label(Color32::LIGHT_RED, error);
+            }
+        });
+        if let Some(index) = selected {
+            self.select(index);
+        }
+        if let Some(index) = closed {
+            self.close_tab(index);
+        }
+        if new {
+            self.new_tab();
+        }
+        if self.sessions.is_empty() {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            return;
+        }
+        ctx.send_viewport_cmd(egui::ViewportCommand::Title(format!(
+            "yiterm — {}",
+            self.sessions[self.active].title
+        )));
+        self.sessions[self.active].show(ctx);
     }
 }
 
@@ -758,6 +915,90 @@ fn configure_fonts(ctx: &egui::Context) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn closing_tabs_preserves_selection_or_selects_a_neighbor() {
+        assert_eq!(active_after_close(2, 0, 3), 1);
+        assert_eq!(active_after_close(1, 3, 3), 1);
+        assert_eq!(active_after_close(1, 1, 3), 1);
+        assert_eq!(active_after_close(3, 3, 3), 2);
+        assert_eq!(active_after_close(0, 0, 0), 0);
+    }
+
+    #[test]
+    fn tab_shortcuts_are_consumed_without_reversing_previous_tab() {
+        for (modifiers, expected) in [
+            (egui::Modifiers::CTRL, (false, false, true, false)),
+            (
+                egui::Modifiers::CTRL | egui::Modifiers::SHIFT,
+                (false, false, false, true),
+            ),
+            (egui::Modifiers::NONE, (false, false, false, false)),
+        ] {
+            let mut input = egui::InputState::default();
+            input.events.push(egui::Event::Key {
+                key: Key::Tab,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers,
+            });
+            assert_eq!(consume_tab_shortcuts(&mut input), expected);
+            assert_eq!(
+                input.events.len(),
+                usize::from(modifiers == egui::Modifiers::NONE)
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn background_sessions_process_output_and_survive_another_tab_closing() {
+        let args = Args {
+            ssh: None,
+            config: None,
+            log_filter: None,
+            shell: Some("/bin/sh".into()),
+        };
+        let first = TerminalSession::new(&args, None).unwrap();
+        let second = TerminalSession::new(&args, None).unwrap();
+        let mut app = TerminalApp {
+            sessions: vec![first, second],
+            active: 0,
+            args,
+            log_directory: std::env::temp_dir(),
+            warning: None,
+            error: None,
+        };
+        // Set different titles through each real PTY; the background session
+        // must parse output too, without changing the foreground session title.
+        app.sessions[0].write(b"printf '\\033]0;first-session\\007'\n");
+        app.sessions[1].write(b"printf '\\033]0;background-session\\007'\n");
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            assert!(app.sessions[0].poll());
+            assert!(app.sessions[1].poll());
+            if app.sessions[0].title == "first-session"
+                && app.sessions[1].title == "background-session"
+            {
+                break;
+            }
+            assert!(Instant::now() < deadline, "PTY titles were not processed");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        app.close_tab(0);
+        assert_eq!(app.active, 0);
+        assert_eq!(app.sessions[0].title, "background-session");
+        assert!(app.sessions[0].child.try_wait().unwrap().is_none());
+        app.new_tab();
+        assert_eq!(app.sessions.len(), 2);
+        assert_eq!(app.active, 1);
+        app.args.shell = Some("/yiterm-nonexistent-shell".into());
+        app.new_tab();
+        assert_eq!(app.sessions.len(), 2);
+        assert_eq!(app.active, 1);
+        assert!(app.error.is_some());
+    }
+
     #[test]
     fn mouse_reports_use_one_based_cells_and_preserve_release_button() {
         let rect = Rect::from_min_size(egui::pos2(10.0, 20.0), Vec2::new(800.0, 500.0));
