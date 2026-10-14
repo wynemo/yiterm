@@ -31,7 +31,9 @@ where
 #[serde(default, deny_unknown_fields)]
 pub struct LoggingConfig {
     pub filter: String,
-    pub console: bool,
+    // Accept legacy configurations without enabling console output.
+    #[serde(rename = "console")]
+    _console: bool,
     pub file: bool,
     pub directory: Option<PathBuf>,
     pub rotation: String,
@@ -41,7 +43,7 @@ impl Default for LoggingConfig {
     fn default() -> Self {
         Self {
             filter: "warn,yiterm=info".into(),
-            console: true,
+            _console: false,
             file: true,
             directory: None,
             rotation: "daily".into(),
@@ -65,9 +67,6 @@ impl Drop for Logging {
     fn drop(&mut self) {
         let dropped = self.counter.as_ref().map_or(0, ErrorCounter::dropped_lines);
         tracing::info!(dropped_lines = dropped, "Application logging shutdown");
-        if dropped > 0 {
-            eprintln!("yiterm: dropped {dropped} log lines (queue full)");
-        }
     }
 }
 fn project_dirs() -> Result<directories::ProjectDirs> {
@@ -198,12 +197,6 @@ pub fn init(path: Option<&Path>, override_filter: Option<&str>) -> Result<Loggin
     } else {
         None
     };
-    let console = (config.console || warning.is_some()).then(|| {
-        tracing_subscriber::fmt::layer()
-            .with_writer(std::io::stderr)
-            .with_ansi(false)
-            .event_format(ProcessFormat)
-    });
     let file = writer.map(|writer| {
         tracing_subscriber::fmt::layer()
             .with_writer(writer)
@@ -212,11 +205,9 @@ pub fn init(path: Option<&Path>, override_filter: Option<&str>) -> Result<Loggin
     });
     tracing_subscriber::registry()
         .with(filter)
-        .with(console)
         .with(file)
         .try_init()?;
     if let Some(message) = &warning {
-        eprintln!("yiterm: {message}");
         tracing::warn!("{message}");
     }
     tracing::info!(pid = std::process::id(), version = env!("CARGO_PKG_VERSION"),
@@ -259,7 +250,7 @@ mod tests {
         )
         .unwrap();
         let config = load(&path, true).unwrap();
-        assert!(!config.console);
+        assert!(!config._console);
         assert!(config.file);
         assert!(EnvFilter::try_new(config.filter).is_ok());
         std::fs::write(&path, "[logging]\nmax_files = 'bad'\n").unwrap();

@@ -1,3 +1,5 @@
+#![cfg_attr(windows, windows_subsystem = "windows")]
+
 use yiterm::{logging, mouse, paste, ssh};
 
 #[cfg(windows)]

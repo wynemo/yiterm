@@ -34,7 +34,7 @@ fn files_filters_flush_and_fallback() {
         std::fs::write(
             directory.path().join("config.toml"),
             format!(
-                "[logging]\nfilter = 'warn,yiterm=info'\nconsole = false\ndirectory = '{}'\n",
+                "[logging]\nfilter = 'warn,yiterm=info'\nconsole = true\ndirectory = '{}'\n",
                 logs.display()
             ),
         )
@@ -54,8 +54,8 @@ fn files_filters_flush_and_fallback() {
             "{}",
             String::from_utf8_lossy(&output.stderr)
         );
+        assert!(output.stderr.is_empty(), "Unexpected console logging");
         if mode == "fallback" {
-            assert!(String::from_utf8_lossy(&output.stderr).contains("File logging unavailable"));
             continue;
         }
         let paths: Vec<_> = std::fs::read_dir(&logs)
