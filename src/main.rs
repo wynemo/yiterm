@@ -695,10 +695,15 @@ impl eframe::App for TerminalApp {
                         for (index, session) in self.sessions.iter().enumerate() {
                             ui.push_id(index, |ui| {
                                 if ui
-                                    .selectable_label(
-                                        index == self.active,
-                                        format!("{}: {}", index + 1, session.title),
+                                    .add_sized(
+                                        [180.0, ui.spacing().interact_size.y],
+                                        egui::Button::selectable(
+                                            index == self.active,
+                                            format!("{}: {}", index + 1, session.title),
+                                        )
+                                        .truncate(),
                                     )
+                                    .on_hover_text(&session.title)
                                     .clicked()
                                 {
                                     selected = Some(index);
