@@ -707,9 +707,11 @@ fn configure_fonts(ctx: &egui::Context) {
             .map(std::path::PathBuf::from)
             .unwrap_or_else(|| std::path::PathBuf::from(r"C:\Windows"));
         let mut fonts = egui::FontDefinitions::default();
-        // Append CJK fonts so ASCII keeps the built-in monospace metrics.
+        // Append fallback fonts so ASCII keeps the built-in monospace metrics.
+        // Remote macOS apps use symbols such as ⌃/⌥/⌘ for keyboard shortcuts;
+        // the built-in and CJK fonts do not cover all of these glyphs.
         // FontData uses face zero, including for Windows TTC collections.
-        for filename in ["msyh.ttc", "simhei.ttf", "simsun.ttc"] {
+        for filename in ["seguisym.ttf", "msyh.ttc", "simhei.ttf", "simsun.ttc"] {
             let Ok(data) = std::fs::read(windows.join("Fonts").join(filename)) else {
                 continue;
             };
