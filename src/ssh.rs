@@ -40,10 +40,18 @@ impl Integration {
             let shim = bin.join(if cfg!(windows) { "ssh.exe" } else { "ssh" });
             #[cfg(unix)]
             std::os::unix::fs::symlink(executable, shim)?;
-            #[cfg(not(unix))]
-            if std::fs::hard_link(executable, &shim).is_err() {
-                std::fs::copy(executable, &shim)?;
+            #[cfg(windows)]
+            {
+                // The GUI executable must stay windowless, but its SSH shim
+                // must inherit ConPTY and make PowerShell wait for its exit.
+                // Write a private copy: changing a hard link would also change
+                // the original application's subsystem.
+                let mut image = std::fs::read(executable)?;
+                console_shim_image(&mut image)?;
+                std::fs::write(&shim, image)?;
             }
+            #[cfg(all(not(unix), not(windows)))]
+            std::fs::copy(executable, &shim)?;
         }
         Ok(Self {
             directory,
@@ -145,6 +153,40 @@ impl Integration {
         self.configure(&mut command)?;
         Ok(command)
     }
+}
+
+// PE32 and PE32+ both store Subsystem at optional-header offset 68.
+// https://learn.microsoft.com/en-us/windows/win32/debug/pe-format
+#[cfg(any(windows, test))]
+fn console_shim_image(image: &mut [u8]) -> Result<()> {
+    ensure!(image.get(..2) == Some(b"MZ"), "Invalid SSH shim DOS header");
+    let offset = image
+        .get(0x3c..0x40)
+        .context("Missing SSH shim PE offset")?;
+    let pe = u32::from_le_bytes(offset.try_into()?) as usize;
+    let header_end = pe.checked_add(24).context("Invalid SSH shim PE offset")?;
+    let header = image
+        .get(pe..header_end)
+        .context("Missing SSH shim PE header")?;
+    ensure!(&header[..4] == b"PE\0\0", "Invalid SSH shim PE signature");
+    let size = u16::from_le_bytes(header[20..22].try_into()?) as usize;
+    let end = header_end
+        .checked_add(size)
+        .context("Invalid SSH shim header size")?;
+    let optional = image
+        .get_mut(header_end..end)
+        .context("Missing SSH shim optional header")?;
+    ensure!(
+        optional.len() >= 70,
+        "SSH shim optional header is too short"
+    );
+    let magic = u16::from_le_bytes(optional[..2].try_into()?);
+    ensure!(
+        matches!(magic, 0x10b | 0x20b),
+        "Unsupported SSH shim PE format"
+    );
+    optional[68..70].copy_from_slice(&3u16.to_le_bytes());
+    Ok(())
 }
 
 fn find_program(name: &str) -> Option<PathBuf> {
@@ -531,6 +573,32 @@ pub fn target_is_alive(target: TargetIdentity, group: Option<i32>) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ssh_shim_uses_console_subsystem_for_both_pe_formats() {
+        for magic in [0x10bu16, 0x20b] {
+            let mut image = vec![0u8; 512];
+            image[..2].copy_from_slice(b"MZ");
+            image[0x3c..0x40].copy_from_slice(&128u32.to_le_bytes());
+            image[128..132].copy_from_slice(b"PE\0\0");
+            image[148..150].copy_from_slice(&240u16.to_le_bytes());
+            image[152..154].copy_from_slice(&magic.to_le_bytes());
+            image[220..222].copy_from_slice(&2u16.to_le_bytes());
+            let original = image.clone();
+            console_shim_image(&mut image).unwrap();
+            assert_eq!(&image[220..222], &3u16.to_le_bytes());
+            image[220..222].copy_from_slice(&2u16.to_le_bytes());
+            assert_eq!(image, original);
+            for length in [0, 63, 131, 151, 221, 391] {
+                assert!(console_shim_image(&mut original[..length].to_vec()).is_err());
+            }
+        }
+        let mut invalid = vec![0u8; 64];
+        invalid[..2].copy_from_slice(b"MZ");
+        invalid[0x3c..0x40].copy_from_slice(&u32::MAX.to_le_bytes());
+        assert!(console_shim_image(&mut invalid).is_err());
+    }
+
     fn args(values: &[&str]) -> Vec<String> {
         values.iter().map(|s| (*s).into()).collect()
     }
