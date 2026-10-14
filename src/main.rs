@@ -392,183 +392,578 @@ impl TerminalSession {
         true
     }
 
-    fn show(&mut self, ctx: &egui::Context) {
+    fn show(&mut self, ctx: &egui::Context, ui: &mut egui::Ui, focused: bool) {
         // Keep the cursor visible while typing and restart its blink on focus.
-        if ctx.input(|input| {
-            input.events.iter().any(|event| {
-                matches!(
-                    event,
-                    egui::Event::Key { pressed: true, .. }
-                        | egui::Event::Text(_)
-                        | egui::Event::Paste(_)
-                        | egui::Event::Ime(_)
-                        | egui::Event::WindowFocused(true)
-                )
+        if focused
+            && ctx.input(|input| {
+                input.events.iter().any(|event| {
+                    matches!(
+                        event,
+                        egui::Event::Key { pressed: true, .. }
+                            | egui::Event::Text(_)
+                            | egui::Event::Paste(_)
+                            | egui::Event::Ime(_)
+                            | egui::Event::WindowFocused(true)
+                    )
+                })
             })
-        }) {
+        {
             self.cursor_blink_started = Instant::now();
         }
-        egui::TopBottomPanel::bottom("status").show(ctx, |ui| {
-            ui.horizontal(|ui| {
-                if ui.button("Paste").clicked() {
-                    self.paste();
+        let rect = ui.available_rect_before_wrap();
+        let font = FontId::monospace(16.0);
+        let cell = Vec2::new(ui.fonts_mut(|f| f.glyph_width(&font, 'M')), 21.0);
+        let size = Size {
+            cols: ((rect.width() / cell.x) as usize).max(2),
+            rows: ((rect.height() / cell.y) as usize).max(1),
+        };
+        if size.cols != self.size.cols || size.rows != self.size.rows {
+            if let Err(error) = self.master.resize(PtySize {
+                cols: size.cols as u16,
+                rows: size.rows as u16,
+                pixel_width: 0,
+                pixel_height: 0,
+            }) {
+                tracing::warn!(%error, "PTY resize failed");
+                self.status = error.to_string();
+            }
+            self.term.resize(size);
+            self.size = size;
+        }
+        let hovered = ctx.input(|i| i.pointer.hover_pos().is_some_and(|pos| rect.contains(pos)));
+        let scroll = if hovered {
+            ctx.input(|i| i.smooth_scroll_delta.y)
+        } else {
+            0.0
+        };
+        let mouse_protocol = self.mouse_modes.protocol(*self.term.mode());
+        let mouse_mode = mouse_protocol.mode;
+        let report_mouse = mouse_mode.intersects(TermMode::MOUSE_MODE)
+            && !ctx.input(|i| i.modifiers.shift)
+            && self.term.grid().display_offset() == 0;
+        if !report_mouse {
+            self.mouse_wheel.reset();
+        }
+        if scroll != 0.0 && !report_mouse {
+            self.term
+                .scroll_display(Scroll::Delta((scroll / cell.y).round() as i32));
+        }
+        let content = self.term.renderable_content();
+        let offset = content.display_offset;
+        let cells: Vec<_> = content.display_iter.collect();
+        // Paint all backgrounds first: a wide glyph extends into its spacer
+        // cell, whose background would otherwise erase the glyph's right half.
+        for indexed in &cells {
+            let row = indexed.point.line.0 + offset as i32;
+            if row < 0 {
+                continue;
+            }
+            let pos =
+                rect.min + Vec2::new(indexed.point.column.0 as f32 * cell.x, row as f32 * cell.y);
+            let bg = if indexed.cell.flags.contains(Flags::INVERSE) {
+                color(indexed.cell.fg, true)
+            } else {
+                color(indexed.cell.bg, false)
+            };
+            ui.painter()
+                .rect_filled(Rect::from_min_size(pos, cell), 0.0, bg);
+        }
+        for indexed in &cells {
+            let row = indexed.point.line.0 + offset as i32;
+            if row < 0 {
+                continue;
+            }
+            let pos =
+                rect.min + Vec2::new(indexed.point.column.0 as f32 * cell.x, row as f32 * cell.y);
+            let fg = if indexed.cell.flags.contains(Flags::INVERSE) {
+                color(indexed.cell.bg, false)
+            } else {
+                color(indexed.cell.fg, true)
+            };
+            if !indexed.cell.flags.intersects(
+                Flags::HIDDEN | Flags::WIDE_CHAR_SPACER | Flags::LEADING_WIDE_CHAR_SPACER,
+            ) {
+                let mut text = indexed.cell.c.to_string();
+                if let Some(extra) = indexed.cell.zerowidth() {
+                    text.extend(extra);
                 }
-                ui.label(&self.status);
+                ui.painter()
+                    .text(pos, egui::Align2::LEFT_TOP, text, font.clone(), fg);
+                if indexed.cell.flags.contains(Flags::UNDERLINE) {
+                    let width = if indexed.cell.flags.contains(Flags::WIDE_CHAR) {
+                        2.0 * cell.x
+                    } else {
+                        cell.x
+                    };
+                    ui.painter().line_segment(
+                        [
+                            pos + Vec2::new(0.0, cell.y - 2.0),
+                            pos + Vec2::new(width, cell.y - 2.0),
+                        ],
+                        (1.0, fg),
+                    );
+                }
+            }
+        }
+        let blink_visible = !ctx.input(|input| input.focused)
+            || !self.term.cursor_style().blinking
+            || self.cursor_blink_started.elapsed().as_millis() % 1000 < 500;
+        if focused
+            && offset == 0
+            && self.term.mode().contains(TermMode::SHOW_CURSOR)
+            && blink_visible
+        {
+            let point = content.cursor.point;
+            let pos =
+                rect.min + Vec2::new(point.column.0 as f32 * cell.x, point.line.0 as f32 * cell.y);
+            ui.painter().rect_stroke(
+                Rect::from_min_size(pos, cell),
+                0.0,
+                (1.0, Color32::LIGHT_GRAY),
+                egui::StrokeKind::Inside,
+            );
+        }
+        let point = content.cursor.point;
+        let cursor_pos =
+            rect.min + Vec2::new(point.column.0 as f32 * cell.x, point.line.0 as f32 * cell.y);
+        let cursor_rect = Rect::from_min_size(cursor_pos, cell);
+        if focused {
+            ctx.output_mut(|output| {
+                output.ime = Some(egui::output::IMEOutput {
+                    rect: cursor_rect,
+                    cursor_rect,
+                });
             });
-        });
-        egui::CentralPanel::default().frame(egui::Frame::NONE.fill(Color32::from_rgb(24, 26, 32))).show(ctx, |ui| {
-            let rect = ui.available_rect_before_wrap();
-            let font = FontId::monospace(16.0);
-            let cell = Vec2::new(ui.fonts_mut(|f| f.glyph_width(&font, 'M')), 21.0);
-            let size = Size { cols: ((rect.width() / cell.x) as usize).max(2), rows: ((rect.height() / cell.y) as usize).max(1) };
-            if size.cols != self.size.cols || size.rows != self.size.rows {
-                if let Err(error) = self.master.resize(PtySize { cols: size.cols as u16, rows: size.rows as u16, pixel_width: 0, pixel_height: 0 }) { tracing::warn!(%error, "PTY resize failed"); self.status = error.to_string(); }
-                self.term.resize(size);
-                self.size = size;
-            }
-            let scroll = ctx.input(|i| i.smooth_scroll_delta.y);
-            let mouse_protocol = self.mouse_modes.protocol(*self.term.mode());
-            let mouse_mode = mouse_protocol.mode;
-            let report_mouse = mouse_mode.intersects(TermMode::MOUSE_MODE)
-                && !ctx.input(|i| i.modifiers.shift)
-                && self.term.grid().display_offset() == 0;
-            if !report_mouse { self.mouse_wheel.reset(); }
-            if scroll != 0.0 && !report_mouse {
-                self.term.scroll_display(Scroll::Delta((scroll / cell.y).round() as i32));
-            }
-            let content = self.term.renderable_content();
-            let offset = content.display_offset;
-            let cells: Vec<_> = content.display_iter.collect();
-            // Paint all backgrounds first: a wide glyph extends into its spacer
-            // cell, whose background would otherwise erase the glyph's right half.
-            for indexed in &cells {
-                let row = indexed.point.line.0 + offset as i32;
-                if row < 0 { continue; }
-                let pos = rect.min + Vec2::new(indexed.point.column.0 as f32 * cell.x, row as f32 * cell.y);
-                let bg = if indexed.cell.flags.contains(Flags::INVERSE) {
-                    color(indexed.cell.fg, true)
-                } else {
-                    color(indexed.cell.bg, false)
-                };
-                ui.painter().rect_filled(Rect::from_min_size(pos, cell), 0.0, bg);
-            }
-            for indexed in &cells {
-                let row = indexed.point.line.0 + offset as i32;
-                if row < 0 { continue; }
-                let pos = rect.min + Vec2::new(indexed.point.column.0 as f32 * cell.x, row as f32 * cell.y);
-                let fg = if indexed.cell.flags.contains(Flags::INVERSE) {
-                    color(indexed.cell.bg, false)
-                } else {
-                    color(indexed.cell.fg, true)
-                };
-                if !indexed.cell.flags.intersects(Flags::HIDDEN | Flags::WIDE_CHAR_SPACER | Flags::LEADING_WIDE_CHAR_SPACER) {
-                    let mut text = indexed.cell.c.to_string();
-                    if let Some(extra) = indexed.cell.zerowidth() { text.extend(extra); }
-                    ui.painter().text(pos, egui::Align2::LEFT_TOP, text, font.clone(), fg);
-                    if indexed.cell.flags.contains(Flags::UNDERLINE) {
-                        let width = if indexed.cell.flags.contains(Flags::WIDE_CHAR) { 2.0 * cell.x } else { cell.x };
-                        ui.painter().line_segment([pos + Vec2::new(0.0, cell.y - 2.0), pos + Vec2::new(width, cell.y - 2.0)], (1.0, fg));
+        }
+        let events = if focused {
+            ctx.input(|i| i.events.clone())
+        } else {
+            Vec::new()
+        };
+        // Consume candidate-selection keys even if Commit clears the preedit
+        // earlier in this frame. They must not execute a shell command.
+        let composing = ime_owns_keyboard(&self.ime_preedit, &events);
+        let paste_shortcut = events.iter().any(|event| matches!(event, egui::Event::Key { key, pressed: true, modifiers, .. } if is_paste_shortcut(*key, *modifiers)));
+        if paste_shortcut {
+            self.paste();
+        }
+        for event in events {
+            match event {
+                egui::Event::MouseWheel {
+                    unit,
+                    delta,
+                    modifiers,
+                } => {
+                    tracing::trace!(target: "yiterm::mouse", "wheel unit={unit:?} delta={} report={report_mouse}", delta.y);
+                    if !report_mouse || modifiers.shift || delta.y == 0.0 {
+                        continue;
+                    }
+                    let Some(pos) = ctx
+                        .input(|i| i.pointer.hover_pos())
+                        .filter(|pos| rect.contains(*pos))
+                    else {
+                        self.mouse_wheel.reset();
+                        continue;
+                    };
+                    let (units_per_step, multiplier) = match unit {
+                        egui::MouseWheelUnit::Line => (1.0, 1),
+                        egui::MouseWheelUnit::Point => (cell.y, 1),
+                        egui::MouseWheelUnit::Page => (1.0, size.rows as i32),
+                    };
+                    let steps = self.mouse_wheel.add(delta.y, units_per_step) * multiplier;
+                    let button = if steps > 0 { 64 } else { 65 };
+                    for _ in 0..steps.unsigned_abs() {
+                        if let Some(bytes) = mouse_bytes(
+                            mouse_protocol,
+                            rect,
+                            cell,
+                            size,
+                            pos,
+                            (button, true),
+                            modifiers,
+                        ) {
+                            self.write_mouse(&bytes);
+                        }
                     }
                 }
-            }
-            let blink_visible = !ctx.input(|input| input.focused)
-                || !self.term.cursor_style().blinking
-                || self.cursor_blink_started.elapsed().as_millis() % 1000 < 500;
-            if offset == 0 && self.term.mode().contains(TermMode::SHOW_CURSOR) && blink_visible {
-                let point = content.cursor.point;
-                let pos = rect.min + Vec2::new(point.column.0 as f32 * cell.x, point.line.0 as f32 * cell.y);
-                ui.painter().rect_stroke(Rect::from_min_size(pos, cell), 0.0, (1.0, Color32::LIGHT_GRAY), egui::StrokeKind::Inside);
-            }
-            let point = content.cursor.point;
-            let cursor_pos = rect.min + Vec2::new(point.column.0 as f32 * cell.x, point.line.0 as f32 * cell.y);
-            let cursor_rect = Rect::from_min_size(cursor_pos, cell);
-            ctx.output_mut(|output| {
-                output.ime = Some(egui::output::IMEOutput { rect: cursor_rect, cursor_rect });
-            });
-            let events = ctx.input(|i| i.events.clone());
-            // Consume candidate-selection keys even if Commit clears the preedit
-            // earlier in this frame. They must not execute a shell command.
-            let composing = ime_owns_keyboard(&self.ime_preedit, &events);
-            let paste_shortcut = events.iter().any(|event| matches!(event, egui::Event::Key { key, pressed: true, modifiers, .. } if is_paste_shortcut(*key, *modifiers)));
-            if paste_shortcut { self.paste(); }
-            for event in events {
-                match event {
-                    egui::Event::MouseWheel { unit, delta, modifiers } => {
-                        tracing::trace!(target: "yiterm::mouse", "wheel unit={unit:?} delta={} report={report_mouse}", delta.y);
-                        if !report_mouse || modifiers.shift || delta.y == 0.0 { continue; }
-                        let Some(pos) = ctx.input(|i| i.pointer.hover_pos()).filter(|pos| rect.contains(*pos)) else {
-                            self.mouse_wheel.reset();
-                            continue;
-                        };
-                        let (units_per_step, multiplier) = match unit {
-                            egui::MouseWheelUnit::Line => (1.0, 1),
-                            egui::MouseWheelUnit::Point => (cell.y, 1),
-                            egui::MouseWheelUnit::Page => (1.0, size.rows as i32),
-                        };
-                        let steps = self.mouse_wheel.add(delta.y, units_per_step) * multiplier;
-                        let button = if steps > 0 { 64 } else { 65 };
-                        for _ in 0..steps.unsigned_abs() {
-                            if let Some(bytes) = mouse_bytes(mouse_protocol, rect, cell, size, pos, (button, true), modifiers) {
-                                self.write_mouse(&bytes);
-                            }
+                egui::Event::PointerButton {
+                    pos,
+                    button,
+                    pressed,
+                    modifiers,
+                } => {
+                    let tracked = self.mouse_button == Some(button);
+                    tracing::trace!(target: "yiterm::mouse", "button={button:?} pressed={pressed} report={report_mouse} inside={} shift={} offset={} pos={pos:?} rect={rect:?} cell={cell:?} mode={mouse_mode:?}", rect.contains(pos), modifiers.shift, self.term.grid().display_offset());
+                    if report_mouse
+                        && (rect.contains(pos) || (!pressed && tracked))
+                        && let Some(code) = mouse_button_code(button)
+                    {
+                        if let Some(bytes) = mouse_bytes(
+                            mouse_protocol,
+                            rect,
+                            cell,
+                            size,
+                            pos,
+                            (code, pressed),
+                            modifiers,
+                        ) {
+                            self.write_mouse(&bytes);
                         }
-                    },
-                    egui::Event::PointerButton { pos, button, pressed, modifiers } => {
-                        let tracked = self.mouse_button == Some(button);
-                        tracing::trace!(target: "yiterm::mouse", "button={button:?} pressed={pressed} report={report_mouse} inside={} shift={} offset={} pos={pos:?} rect={rect:?} cell={cell:?} mode={mouse_mode:?}", rect.contains(pos), modifiers.shift, self.term.grid().display_offset());
-                        if report_mouse && (rect.contains(pos) || (!pressed && tracked))
-                            && let Some(code) = mouse_button_code(button) {
-                                if let Some(bytes) = mouse_bytes(mouse_protocol, rect, cell, size, pos, (code, pressed), modifiers) {
-                                    self.write_mouse(&bytes);
-                                }
-                                if pressed { self.mouse_button = Some(button); }
+                        if pressed {
+                            self.mouse_button = Some(button);
                         }
-                        if !pressed && tracked { self.mouse_button = None; }
-                    },
-                    egui::Event::PointerMoved(pos) if report_mouse => {
-                        if rect.contains(pos) && (mouse_mode.contains(TermMode::MOUSE_MOTION)
-                            || (mouse_mode.contains(TermMode::MOUSE_DRAG) && self.mouse_button.is_some())) {
-                            let code = self.mouse_button.and_then(mouse_button_code).unwrap_or(3) + 32;
-                            if let Some(bytes) = mouse_bytes(mouse_protocol, rect, cell, size, pos, (code, true), ctx.input(|i| i.modifiers)) {
-                                self.write(&bytes);
-                            }
-                        }
-                    },
-                    egui::Event::Paste(_) if paste_shortcut => {},
-                    egui::Event::Paste(_) => self.paste(),
-                    egui::Event::Ime(egui::ImeEvent::Preedit(text)) => { self.ime_preedit = text; },
-                    egui::Event::Ime(egui::ImeEvent::Commit(text)) => {
-                        self.ime_preedit.clear();
-                        self.term.scroll_display(Scroll::Bottom);
-                        self.write(text.as_bytes());
-                    },
-                    egui::Event::Ime(egui::ImeEvent::Disabled) | egui::Event::WindowFocused(false) => { self.ime_preedit.clear(); },
-                    egui::Event::Text(_) if composing => {},
-                    egui::Event::Text(text) => { self.term.scroll_display(Scroll::Bottom); self.write(text.as_bytes()); },
-                    egui::Event::Key { key, pressed: true, modifiers, .. } => {
-                        if composing { continue; }
-                        if is_paste_shortcut(key, modifiers) { continue; }
-                        let app_cursor = self.term.mode().contains(TermMode::APP_CURSOR);
-                        if let Some(bytes) = key_bytes(key, modifiers, app_cursor) {
-                            self.term.scroll_display(Scroll::Bottom);
+                    }
+                    if !pressed && tracked {
+                        self.mouse_button = None;
+                    }
+                }
+                egui::Event::PointerMoved(pos) if report_mouse => {
+                    if rect.contains(pos)
+                        && (mouse_mode.contains(TermMode::MOUSE_MOTION)
+                            || (mouse_mode.contains(TermMode::MOUSE_DRAG)
+                                && self.mouse_button.is_some()))
+                    {
+                        let code = self.mouse_button.and_then(mouse_button_code).unwrap_or(3) + 32;
+                        if let Some(bytes) = mouse_bytes(
+                            mouse_protocol,
+                            rect,
+                            cell,
+                            size,
+                            pos,
+                            (code, true),
+                            ctx.input(|i| i.modifiers),
+                        ) {
                             self.write(&bytes);
                         }
                     }
-                    _ => {},
                 }
+                egui::Event::Paste(_) if paste_shortcut => {}
+                egui::Event::Paste(_) => self.paste(),
+                egui::Event::Ime(egui::ImeEvent::Preedit(text)) => {
+                    self.ime_preedit = text;
+                }
+                egui::Event::Ime(egui::ImeEvent::Commit(text)) => {
+                    self.ime_preedit.clear();
+                    self.term.scroll_display(Scroll::Bottom);
+                    self.write(text.as_bytes());
+                }
+                egui::Event::Ime(egui::ImeEvent::Disabled) | egui::Event::WindowFocused(false) => {
+                    self.ime_preedit.clear();
+                }
+                egui::Event::Text(_) if composing => {}
+                egui::Event::Text(text) => {
+                    self.term.scroll_display(Scroll::Bottom);
+                    self.write(text.as_bytes());
+                }
+                egui::Event::Key {
+                    key,
+                    pressed: true,
+                    modifiers,
+                    ..
+                } => {
+                    if composing {
+                        continue;
+                    }
+                    if is_paste_shortcut(key, modifiers) {
+                        continue;
+                    }
+                    let app_cursor = self.term.mode().contains(TermMode::APP_CURSOR);
+                    if let Some(bytes) = key_bytes(key, modifiers, app_cursor) {
+                        self.term.scroll_display(Scroll::Bottom);
+                        self.write(&bytes);
+                    }
+                }
+                _ => {}
             }
-            if !self.ime_preedit.is_empty() {
-                let galley = ui.painter().layout_no_wrap(self.ime_preedit.clone(), font.clone(), Color32::WHITE);
-                ui.painter().rect_filled(Rect::from_min_size(cursor_pos, galley.size()), 0.0, Color32::from_rgb(24, 26, 32));
-                ui.painter().galley(cursor_pos, galley, Color32::WHITE);
+        }
+        if !self.ime_preedit.is_empty() {
+            let galley =
+                ui.painter()
+                    .layout_no_wrap(self.ime_preedit.clone(), font.clone(), Color32::WHITE);
+            ui.painter().rect_filled(
+                Rect::from_min_size(cursor_pos, galley.size()),
+                0.0,
+                Color32::from_rgb(24, 26, 32),
+            );
+            ui.painter().galley(cursor_pos, galley, Color32::WHITE);
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum SplitDirection {
+    Right,
+    Down,
+}
+
+#[derive(Debug, PartialEq)]
+enum PaneLayout {
+    Leaf(usize),
+    Split {
+        direction: SplitDirection,
+        ratio: f32,
+        first: Box<PaneLayout>,
+        second: Box<PaneLayout>,
+    },
+}
+
+impl PaneLayout {
+    fn split(&mut self, pane: usize, new_pane: usize, direction: SplitDirection) {
+        match self {
+            Self::Leaf(index) if *index == pane => {
+                *self = Self::Split {
+                    direction,
+                    ratio: 0.5,
+                    first: Box::new(Self::Leaf(pane)),
+                    second: Box::new(Self::Leaf(new_pane)),
+                };
             }
-        });
-        ctx.request_repaint_after(Duration::from_millis(16));
+            Self::Split { first, second, .. } => {
+                first.split(pane, new_pane, direction);
+                second.split(pane, new_pane, direction);
+            }
+            _ => {}
+        }
+    }
+
+    // Collapse the removed pane's split and renumber the surviving leaves.
+    fn remove(self, pane: usize) -> Option<Self> {
+        match self {
+            Self::Leaf(index) if index == pane => None,
+            Self::Leaf(index) => Some(Self::Leaf(index - usize::from(index > pane))),
+            Self::Split {
+                direction,
+                ratio,
+                first,
+                second,
+            } => match (first.remove(pane), second.remove(pane)) {
+                (Some(first), Some(second)) => Some(Self::Split {
+                    direction,
+                    ratio,
+                    first: Box::new(first),
+                    second: Box::new(second),
+                }),
+                (remaining, None) | (None, remaining) => remaining,
+            },
+        }
+    }
+
+    fn rectangles(
+        &mut self,
+        ui: &egui::Ui,
+        rect: Rect,
+        path: &str,
+        panes: &mut Vec<(usize, Rect)>,
+    ) {
+        match self {
+            Self::Leaf(index) => panes.push((*index, rect)),
+            Self::Split {
+                direction,
+                ratio,
+                first,
+                second,
+            } => {
+                let horizontal = *direction == SplitDirection::Right;
+                let length = if horizontal {
+                    rect.width()
+                } else {
+                    rect.height()
+                };
+                let available = (length - 5.0).max(0.0);
+                let minimum = 80.0_f32.min(available / 2.0);
+                let mut offset = (available * *ratio).clamp(minimum, available - minimum);
+                let divider = if horizontal {
+                    Rect::from_min_max(
+                        egui::pos2(rect.left() + offset, rect.top()),
+                        egui::pos2(rect.left() + offset + 5.0, rect.bottom()),
+                    )
+                } else {
+                    Rect::from_min_max(
+                        egui::pos2(rect.left(), rect.top() + offset),
+                        egui::pos2(rect.right(), rect.top() + offset + 5.0),
+                    )
+                };
+                let response = ui
+                    .interact(divider, ui.id().with(path), egui::Sense::drag())
+                    .on_hover_cursor(if horizontal {
+                        egui::CursorIcon::ResizeHorizontal
+                    } else {
+                        egui::CursorIcon::ResizeVertical
+                    });
+                if response.dragged() && available > 0.0 {
+                    offset = (offset
+                        + if horizontal {
+                            response.drag_delta().x
+                        } else {
+                            response.drag_delta().y
+                        })
+                    .clamp(minimum, available - minimum);
+                    *ratio = offset / available;
+                }
+                ui.painter().rect_filled(
+                    divider,
+                    0.0,
+                    if response.hovered() || response.dragged() {
+                        Color32::GRAY
+                    } else {
+                        Color32::from_gray(55)
+                    },
+                );
+                let (first_rect, second_rect) = if horizontal {
+                    (
+                        Rect::from_min_max(
+                            rect.min,
+                            egui::pos2(rect.left() + offset, rect.bottom()),
+                        ),
+                        Rect::from_min_max(
+                            egui::pos2(rect.left() + offset + 5.0, rect.top()),
+                            rect.max,
+                        ),
+                    )
+                } else {
+                    (
+                        Rect::from_min_max(rect.min, egui::pos2(rect.right(), rect.top() + offset)),
+                        Rect::from_min_max(
+                            egui::pos2(rect.left(), rect.top() + offset + 5.0),
+                            rect.max,
+                        ),
+                    )
+                };
+                first.rectangles(ui, first_rect, &format!("{path}/0"), panes);
+                second.rectangles(ui, second_rect, &format!("{path}/1"), panes);
+            }
+        }
+    }
+}
+
+struct TerminalTab {
+    panes: Vec<TerminalSession>,
+    layout: PaneLayout,
+    active: usize,
+}
+
+impl TerminalTab {
+    fn new(session: TerminalSession) -> Self {
+        Self {
+            panes: vec![session],
+            layout: PaneLayout::Leaf(0),
+            active: 0,
+        }
+    }
+
+    fn focused(&self) -> &TerminalSession {
+        &self.panes[self.active]
+    }
+    fn focused_mut(&mut self) -> &mut TerminalSession {
+        &mut self.panes[self.active]
+    }
+
+    fn select(&mut self, pane: usize) {
+        let previous = self.focused_mut();
+        previous.ime_preedit.clear();
+        previous.mouse_button = None;
+        previous.mouse_wheel.reset();
+        self.active = pane;
+        self.focused_mut().cursor_blink_started = Instant::now();
+    }
+
+    fn split(&mut self, session: TerminalSession, direction: SplitDirection) {
+        let index = self.panes.len();
+        self.panes.push(session);
+        self.layout.split(self.active, index, direction);
+        self.select(index);
+    }
+
+    fn close_pane(&mut self, index: usize) {
+        let was_active = self.active == index;
+        self.panes.remove(index);
+        let layout = std::mem::replace(&mut self.layout, PaneLayout::Leaf(0));
+        self.layout = layout.remove(index).unwrap_or(PaneLayout::Leaf(0));
+        self.active = active_after_close(self.active, index, self.panes.len());
+        if was_active && !self.panes.is_empty() {
+            self.select(self.active);
+        }
+    }
+
+    fn poll(&mut self) -> bool {
+        for index in (0..self.panes.len()).rev() {
+            if !self.panes[index].poll() {
+                self.close_pane(index);
+            }
+        }
+        !self.panes.is_empty()
+    }
+
+    fn show(&mut self, ctx: &egui::Context, ui: &mut egui::Ui) {
+        let mut rectangles = Vec::new();
+        self.layout.rectangles(
+            ui,
+            ui.available_rect_before_wrap(),
+            "split",
+            &mut rectangles,
+        );
+        let mut close = None;
+        // Resolve focus before delivering this frame's keyboard and clipboard events.
+        for &(index, rect) in &rectangles {
+            if ctx.input(|input| {
+                input.pointer.primary_pressed()
+                    && input
+                        .pointer
+                        .interact_pos()
+                        .is_some_and(|pos| rect.contains(pos))
+            }) {
+                self.select(index);
+            }
+            let header = Rect::from_min_size(rect.min, Vec2::new(rect.width(), 24.0));
+            let mut header_ui = ui.new_child(
+                egui::UiBuilder::new()
+                    .id_salt(("pane", index))
+                    .max_rect(header),
+            );
+            header_ui.set_clip_rect(header.intersect(ui.clip_rect()));
+            header_ui.horizontal(|ui| {
+                if ui.small_button("×").on_hover_text("Close pane").clicked() {
+                    close = Some(index);
+                }
+                ui.add(egui::Label::new(&self.panes[index].title).truncate())
+                    .on_hover_text(&self.panes[index].title);
+            });
+        }
+        for (index, rect) in rectangles {
+            let terminal_rect = Rect::from_min_max(
+                egui::pos2(rect.left(), (rect.top() + 24.0).min(rect.bottom())),
+                rect.max,
+            )
+            .shrink(2.0);
+            let mut pane_ui = ui.new_child(
+                egui::UiBuilder::new()
+                    .id_salt(("terminal", index))
+                    .max_rect(terminal_rect),
+            );
+            pane_ui.set_clip_rect(terminal_rect.intersect(ui.clip_rect()));
+            self.panes[index].show(ctx, &mut pane_ui, index == self.active);
+            ui.painter().rect_stroke(
+                rect.shrink(0.5),
+                0.0,
+                (
+                    1.0,
+                    if index == self.active {
+                        Color32::from_rgb(97, 175, 239)
+                    } else {
+                        Color32::from_gray(55)
+                    },
+                ),
+                egui::StrokeKind::Inside,
+            );
+        }
+        if let Some(index) = close {
+            self.close_pane(index);
+        }
     }
 }
 
 struct TerminalApp {
-    sessions: Vec<TerminalSession>,
+    tabs: Vec<TerminalTab>,
     active: usize,
     args: Args,
     log_directory: std::path::PathBuf,
@@ -580,7 +975,7 @@ impl TerminalApp {
     fn new(args: Args, logging: &logging::Logging) -> Result<Self> {
         let session = TerminalSession::new(&args, logging.warning.as_deref())?;
         Ok(Self {
-            sessions: vec![session],
+            tabs: vec![TerminalTab::new(session)],
             active: 0,
             args,
             log_directory: logging.directory.clone(),
@@ -592,8 +987,8 @@ impl TerminalApp {
     fn new_tab(&mut self) {
         match TerminalSession::new(&self.args, self.warning.as_deref()) {
             Ok(session) => {
-                self.sessions.push(session);
-                self.select(self.sessions.len() - 1);
+                self.tabs.push(TerminalTab::new(session));
+                self.select(self.tabs.len() - 1);
                 self.error = None;
             }
             Err(error) => {
@@ -603,21 +998,31 @@ impl TerminalApp {
         }
     }
 
+    fn split_pane(&mut self, direction: SplitDirection) {
+        match TerminalSession::new(&self.args, self.warning.as_deref()) {
+            Ok(session) => {
+                self.tabs[self.active].split(session, direction);
+                self.error = None;
+            }
+            Err(error) => self.error = Some(format!("Cannot split pane: {error:#}")),
+        }
+    }
+
     fn select(&mut self, index: usize) {
-        if let Some(previous) = self.sessions.get_mut(self.active) {
-            previous.ime_preedit.clear();
-            previous.mouse_button = None;
-            previous.mouse_wheel.reset();
+        if let Some(previous) = self.tabs.get_mut(self.active) {
+            previous.focused_mut().ime_preedit.clear();
+            previous.focused_mut().mouse_button = None;
+            previous.focused_mut().mouse_wheel.reset();
         }
         self.active = index;
-        self.sessions[index].cursor_blink_started = Instant::now();
+        self.tabs[index].focused_mut().cursor_blink_started = Instant::now();
     }
 
     fn close_tab(&mut self, index: usize) {
         let was_active = index == self.active;
-        self.sessions.remove(index);
-        self.active = active_after_close(self.active, index, self.sessions.len());
-        if was_active && !self.sessions.is_empty() {
+        self.tabs.remove(index);
+        self.active = active_after_close(self.active, index, self.tabs.len());
+        if was_active && !self.tabs.is_empty() {
             self.select(self.active);
         }
     }
@@ -649,17 +1054,17 @@ impl eframe::App for TerminalApp {
     fn update(&mut self, ctx: &egui::Context, _: &mut eframe::Frame) {
         // Drain every PTY, including background tabs, so output and paste results
         // cannot block and terminal queries are answered while another tab is active.
-        for index in (0..self.sessions.len()).rev() {
-            if !self.sessions[index].poll() {
+        for index in (0..self.tabs.len()).rev() {
+            if !self.tabs[index].poll() {
                 self.close_tab(index);
             }
         }
-        if self.sessions.is_empty() {
+        if self.tabs.is_empty() {
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
             return;
         }
         let composing = ctx.input(|input| {
-            ime_owns_keyboard(&self.sessions[self.active].ime_preedit, &input.events)
+            ime_owns_keyboard(&self.tabs[self.active].focused().ime_preedit, &input.events)
         });
         if !composing {
             let (new, close, next, previous) = ctx.input_mut(consume_tab_shortcuts);
@@ -669,16 +1074,32 @@ impl eframe::App for TerminalApp {
             if close {
                 self.close_tab(self.active);
             }
-            if !self.sessions.is_empty() && (next || previous) {
-                let count = self.sessions.len();
+            if !self.tabs.is_empty() && (next || previous) {
+                let count = self.tabs.len();
                 self.select((self.active + if previous { count - 1 } else { 1 }) % count);
             }
         }
         let mut selected = None;
         let mut closed = None;
         let mut new = false;
+        let mut split = None;
+        let mut close_pane = false;
         egui::TopBottomPanel::top("menu").show(ctx, |ui| {
             egui::MenuBar::new().ui(ui, |ui| {
+                ui.menu_button("Pane", |ui| {
+                    if ui.button("Split Right").clicked() {
+                        split = Some(SplitDirection::Right);
+                        ui.close();
+                    }
+                    if ui.button("Split Down").clicked() {
+                        split = Some(SplitDirection::Down);
+                        ui.close();
+                    }
+                    if ui.button("Close Pane").clicked() {
+                        close_pane = true;
+                        ui.close();
+                    }
+                });
                 ui.menu_button("Tools", |ui| {
                     if ui.button("Open Log Directory").clicked() {
                         if let Err(error) = logging::open_directory(&self.log_directory) {
@@ -692,18 +1113,18 @@ impl eframe::App for TerminalApp {
                 .id_salt("tabs")
                 .show(ui, |ui| {
                     ui.horizontal(|ui| {
-                        for (index, session) in self.sessions.iter().enumerate() {
+                        for (index, session) in self.tabs.iter().enumerate() {
                             ui.push_id(index, |ui| {
                                 if ui
                                     .add_sized(
                                         [180.0, ui.spacing().interact_size.y],
                                         egui::Button::selectable(
                                             index == self.active,
-                                            format!("{}: {}", index + 1, session.title),
+                                            format!("{}: {}", index + 1, session.focused().title),
                                         )
                                         .truncate(),
                                     )
-                                    .on_hover_text(&session.title)
+                                    .on_hover_text(&session.focused().title)
                                     .clicked()
                                 {
                                     selected = Some(index);
@@ -729,15 +1150,50 @@ impl eframe::App for TerminalApp {
         if new {
             self.new_tab();
         }
-        if self.sessions.is_empty() {
+        if self.tabs.is_empty() {
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
             return;
         }
         ctx.send_viewport_cmd(egui::ViewportCommand::Title(format!(
             "yiterm — {}",
-            self.sessions[self.active].title
+            self.tabs[self.active].focused().title
         )));
-        self.sessions[self.active].show(ctx);
+        if let Some(direction) = split {
+            self.split_pane(direction);
+        }
+        if close_pane {
+            let tab = &mut self.tabs[self.active];
+            tab.close_pane(tab.active);
+        }
+        if self.tabs[self.active].panes.is_empty() {
+            self.close_tab(self.active);
+            if self.tabs.is_empty() {
+                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                return;
+            }
+        }
+        egui::TopBottomPanel::bottom("status").show(ctx, |ui| {
+            let session = self.tabs[self.active].focused_mut();
+            ui.horizontal(|ui| {
+                if ui.button("Paste").clicked() {
+                    session.paste();
+                }
+                ui.label(&session.status);
+            });
+        });
+        egui::CentralPanel::default()
+            .frame(egui::Frame::NONE.fill(Color32::from_rgb(24, 26, 32)))
+            .show(ctx, |ui| {
+                self.tabs[self.active].show(ctx, ui);
+            });
+        // A pane can be closed from its header during rendering.
+        if self.tabs[self.active].panes.is_empty() {
+            self.close_tab(self.active);
+            if self.tabs.is_empty() {
+                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            }
+        }
+        ctx.request_repaint_after(Duration::from_millis(16));
     }
 }
 
@@ -921,6 +1377,125 @@ fn configure_fonts(ctx: &egui::Context) {
 mod tests {
     use super::*;
     #[test]
+    fn nested_splits_have_disjoint_rectangles_and_collapse_after_close() {
+        let mut layout = PaneLayout::Leaf(0);
+        layout.split(0, 1, SplitDirection::Right);
+        layout.split(1, 2, SplitDirection::Down);
+        let ctx = egui::Context::default();
+        let mut rectangles = Vec::new();
+        let _ = ctx.run(egui::RawInput::default(), |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                layout.rectangles(
+                    ui,
+                    Rect::from_min_size(egui::Pos2::ZERO, Vec2::new(805.0, 605.0)),
+                    "test",
+                    &mut rectangles,
+                );
+            });
+        });
+        assert_eq!(rectangles.len(), 3);
+        assert_eq!(rectangles[0].1.width(), 400.0);
+        assert_eq!(rectangles[1].1.height(), 300.0);
+        assert_eq!(rectangles[2].1.height(), 300.0);
+        assert!(rectangles[0].1.right() < rectangles[1].1.left());
+        assert!(rectangles[1].1.bottom() < rectangles[2].1.top());
+        let layout = layout.remove(1).unwrap();
+        assert_eq!(
+            layout,
+            PaneLayout::Split {
+                direction: SplitDirection::Right,
+                ratio: 0.5,
+                first: Box::new(PaneLayout::Leaf(0)),
+                second: Box::new(PaneLayout::Leaf(1)),
+            }
+        );
+        assert_eq!(layout.remove(0), Some(PaneLayout::Leaf(0)));
+        assert_eq!(PaneLayout::Leaf(0).remove(0), None);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn split_panes_route_keyboard_only_to_clicked_pane_and_preserve_survivors() {
+        let args = Args {
+            ssh: None,
+            config: None,
+            log_filter: None,
+            shell: Some("/bin/sh".into()),
+        };
+        let mut tab = TerminalTab::new(TerminalSession::new(&args, None).unwrap());
+        tab.split(
+            TerminalSession::new(&args, None).unwrap(),
+            SplitDirection::Right,
+        );
+        tab.split(
+            TerminalSession::new(&args, None).unwrap(),
+            SplitDirection::Down,
+        );
+        assert_eq!(tab.active, 2);
+        let ctx = egui::Context::default();
+        let pos = egui::pos2(100.0, 100.0);
+        let input = egui::RawInput {
+            screen_rect: Some(Rect::from_min_size(
+                egui::Pos2::ZERO,
+                Vec2::new(805.0, 605.0),
+            )),
+            events: vec![
+                egui::Event::PointerMoved(pos),
+                egui::Event::PointerButton {
+                    pos,
+                    button: egui::PointerButton::Primary,
+                    pressed: true,
+                    modifiers: egui::Modifiers::NONE,
+                },
+                egui::Event::Text("printf '\\033]0;focused-pane\\007'".into()),
+                egui::Event::Key {
+                    key: Key::Enter,
+                    physical_key: None,
+                    pressed: true,
+                    repeat: false,
+                    modifiers: egui::Modifiers::NONE,
+                },
+            ],
+            ..Default::default()
+        };
+        let _ = ctx.run(input, |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| tab.show(ctx, ui));
+        });
+        assert_eq!(tab.active, 0);
+        assert!(tab.panes[0].size.cols < 80);
+        assert!(tab.panes[1].size.rows < tab.panes[0].size.rows);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            assert!(tab.poll());
+            if tab.panes[0].title == "focused-pane" {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "Focused pane did not receive keyboard input"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert_ne!(tab.panes[1].title, "focused-pane");
+        assert_ne!(tab.panes[2].title, "focused-pane");
+        // Exiting one shell removes only its pane and collapses its parent split.
+        tab.panes[1].write(b"exit\n");
+        loop {
+            assert!(tab.poll());
+            if tab.panes.len() == 2 {
+                break;
+            }
+            assert!(Instant::now() < deadline, "Exited pane was not removed");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(tab.active, 0);
+        assert_eq!(tab.panes[0].title, "focused-pane");
+        tab.close_pane(0);
+        assert_eq!(tab.layout, PaneLayout::Leaf(0));
+        assert!(tab.focused_mut().child.try_wait().unwrap().is_none());
+    }
+
+    #[test]
     fn closing_tabs_preserves_selection_or_selects_a_neighbor() {
         assert_eq!(active_after_close(2, 0, 3), 1);
         assert_eq!(active_after_close(1, 3, 3), 1);
@@ -967,7 +1542,7 @@ mod tests {
         let first = TerminalSession::new(&args, None).unwrap();
         let second = TerminalSession::new(&args, None).unwrap();
         let mut app = TerminalApp {
-            sessions: vec![first, second],
+            tabs: vec![TerminalTab::new(first), TerminalTab::new(second)],
             active: 0,
             args,
             log_directory: std::env::temp_dir(),
@@ -976,14 +1551,18 @@ mod tests {
         };
         // Set different titles through each real PTY; the background session
         // must parse output too, without changing the foreground session title.
-        app.sessions[0].write(b"printf '\\033]0;first-session\\007'\n");
-        app.sessions[1].write(b"printf '\\033]0;background-session\\007'\n");
+        app.tabs[0]
+            .focused_mut()
+            .write(b"printf '\\033]0;first-session\\007'\n");
+        app.tabs[1]
+            .focused_mut()
+            .write(b"printf '\\033]0;background-session\\007'\n");
         let deadline = Instant::now() + Duration::from_secs(5);
         loop {
-            assert!(app.sessions[0].poll());
-            assert!(app.sessions[1].poll());
-            if app.sessions[0].title == "first-session"
-                && app.sessions[1].title == "background-session"
+            assert!(app.tabs[0].poll());
+            assert!(app.tabs[1].poll());
+            if app.tabs[0].focused().title == "first-session"
+                && app.tabs[1].focused().title == "background-session"
             {
                 break;
             }
@@ -992,14 +1571,21 @@ mod tests {
         }
         app.close_tab(0);
         assert_eq!(app.active, 0);
-        assert_eq!(app.sessions[0].title, "background-session");
-        assert!(app.sessions[0].child.try_wait().unwrap().is_none());
+        assert_eq!(app.tabs[0].focused().title, "background-session");
+        assert!(
+            app.tabs[0]
+                .focused_mut()
+                .child
+                .try_wait()
+                .unwrap()
+                .is_none()
+        );
         app.new_tab();
-        assert_eq!(app.sessions.len(), 2);
+        assert_eq!(app.tabs.len(), 2);
         assert_eq!(app.active, 1);
         app.args.shell = Some("/yiterm-nonexistent-shell".into());
         app.new_tab();
-        assert_eq!(app.sessions.len(), 2);
+        assert_eq!(app.tabs.len(), 2);
         assert_eq!(app.active, 1);
         assert!(app.error.is_some());
     }

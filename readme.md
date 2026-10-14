@@ -34,6 +34,12 @@ Windows 默认启动 `powershell.exe`；macOS 默认使用 `$SHELL`。`--shell` 
 | 下一个 tab | Ctrl+Tab | Ctrl+Tab |
 | 上一个 tab | Ctrl+Shift+Tab | Ctrl+Shift+Tab |
 
+## 分栏
+
+顶部 **Pane → Split Right** 把当前 pane 拆成左右两栏，**Split Down** 拆成上下两栏，可继续拆分任意 pane。新 pane 使用启动时的 shell / SSH 参数，并拥有独立会话。点击 pane 切换输入焦点，蓝色边框标记当前 pane；粘贴按钮和图片上传作用于当前 pane。
+
+拖动分隔线调整大小。点击 pane 标题旁的 **×** 或选择 **Pane → Close Pane** 关闭当前 pane，剩余区域自动合并。shell 退出也只关闭对应 pane；关闭最后一个 pane 时关闭该 tab。tab 的 **×** 和关闭 tab 快捷键会关闭整个 tab 的所有 pane。
+
 ## 日志
 
 统一使用 `tracing`，默认应用级别为 `info`、依赖库为 `warn`，仅输出到日志文件；Windows 启动时不再附带控制台窗口。顶部 **Tools → Open Log Directory** 菜单可打开实际日志目录。
