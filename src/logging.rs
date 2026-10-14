@@ -55,6 +55,8 @@ impl Default for LoggingConfig {
 #[serde(default, deny_unknown_fields)]
 struct Config {
     logging: LoggingConfig,
+    #[serde(rename = "cursor")]
+    _cursor: crate::settings::CursorSettings,
 }
 
 pub struct Logging {

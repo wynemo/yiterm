@@ -1,5 +1,6 @@
 #![cfg_attr(windows, windows_subsystem = "windows")]
 
+use yiterm::settings::{self, CursorSettings, CursorShape};
 use yiterm::{logging, mouse, paste, ssh};
 
 #[cfg(windows)]
@@ -103,6 +104,7 @@ struct TerminalSession {
     mouse_button: Option<egui::PointerButton>,
     selecting: bool,
     cursor_blink_started: Instant,
+    cursor_settings: CursorSettings,
     status: String,
     size: Size,
 }
@@ -195,6 +197,7 @@ impl TerminalSession {
             mouse_button: None,
             selecting: false,
             cursor_blink_started: Instant::now(),
+            cursor_settings: CursorSettings::default(),
             status: warning
                 .map(str::to_owned)
                 .unwrap_or_else(|| "Ready · paste: Cmd+V / Ctrl+Shift+V / Shift+Insert".into()),
@@ -477,7 +480,7 @@ impl TerminalSession {
             self.term.resize(size);
             self.size = size;
         }
-        let hovered = ctx.input(|i| i.pointer.hover_pos().is_some_and(|pos| rect.contains(pos)));
+        let hovered = ui.rect_contains_pointer(rect);
         let scroll = if hovered {
             ctx.input(|i| i.smooth_scroll_delta.y)
         } else {
@@ -561,7 +564,7 @@ impl TerminalSession {
             }
         }
         let blink_visible = !ctx.input(|input| input.focused)
-            || !self.term.cursor_style().blinking
+            || !self.cursor_settings.blinking
             || self.cursor_blink_started.elapsed().as_millis() % 1000 < 500;
         if focused
             && offset == 0
@@ -571,12 +574,32 @@ impl TerminalSession {
             let point = content.cursor.point;
             let pos =
                 rect.min + Vec2::new(point.column.0 as f32 * cell.x, point.line.0 as f32 * cell.y);
-            ui.painter().rect_stroke(
-                Rect::from_min_size(pos, cell),
-                0.0,
-                (1.0, Color32::LIGHT_GRAY),
-                egui::StrokeKind::Inside,
+            let wide = self.term.grid()[point].flags.contains(Flags::WIDE_CHAR);
+            let rect = Rect::from_min_size(
+                pos,
+                Vec2::new(cell.x * if wide { 2.0 } else { 1.0 }, cell.y),
             );
+            let shape = match self.cursor_settings.shape {
+                CursorShape::Block => rect,
+                CursorShape::Underline => {
+                    Rect::from_min_max(egui::pos2(rect.left(), rect.bottom() - 2.0), rect.max)
+                }
+                CursorShape::Beam => Rect::from_min_size(rect.min, Vec2::new(2.0, rect.height())),
+            };
+            ui.painter().rect_filled(shape, 0.0, Color32::LIGHT_GRAY);
+            if self.cursor_settings.shape == CursorShape::Block {
+                let cell_content = &self.term.grid()[point];
+                if !cell_content.flags.contains(Flags::HIDDEN) {
+                    let mut text = cell_content.c.to_string();
+                    if let Some(extra) = cell_content.zerowidth() {
+                        text.extend(extra);
+                    }
+                    let fg = Color32::from_rgb(24, 26, 32);
+                    let galley = ui.painter().layout_no_wrap(text, font.clone(), fg);
+                    let text_pos = pos + Vec2::new(0.0, (cell.y - galley.size().y) / 2.0);
+                    ui.painter().galley(text_pos, galley, fg);
+                }
+            }
         }
         let point = content.cursor.point;
         let cursor_pos =
@@ -590,7 +613,10 @@ impl TerminalSession {
                 });
             });
         }
-        let events = if focused && !egui::Popup::is_any_open(ctx) {
+        let events = if focused
+            && !egui::Popup::is_any_open(ctx)
+            && ctx.memory(|memory| memory.top_modal_layer().is_none())
+        {
             ctx.input(|i| i.events.clone())
         } else {
             Vec::new()
@@ -1079,11 +1105,21 @@ struct TerminalApp {
     log_directory: std::path::PathBuf,
     warning: Option<String>,
     error: Option<String>,
+    about_open: bool,
+    about_licenses: bool,
+    settings_open: bool,
+    cursor_settings: CursorSettings,
 }
 
 impl TerminalApp {
     fn new(args: Args, logging: &logging::Logging) -> Result<Self> {
         let session = TerminalSession::new(&args, logging.warning.as_deref())?;
+        let path = args
+            .config
+            .clone()
+            .map(Ok)
+            .unwrap_or_else(logging::config_path)?;
+        let cursor_settings = settings::load(&path)?;
         Ok(Self {
             tabs: vec![TerminalTab::new(session)],
             active: 0,
@@ -1091,6 +1127,10 @@ impl TerminalApp {
             log_directory: logging.directory.clone(),
             warning: logging.warning.clone(),
             error: None,
+            about_open: false,
+            about_licenses: false,
+            settings_open: false,
+            cursor_settings,
         })
     }
 
@@ -1161,7 +1201,7 @@ fn consume_tab_shortcuts(input: &mut egui::InputState) -> (bool, bool, bool, boo
 }
 
 fn reserve_terminal_keyboard(ctx: &egui::Context) {
-    if !egui::Popup::is_any_open(ctx) {
+    if !egui::Popup::is_any_open(ctx) && ctx.memory(|memory| memory.top_modal_layer().is_none()) {
         // egui resolves Tab/arrow navigation before update. The terminal owns
         // these keys, so cancel navigation before any menu buttons are rendered.
         ctx.memory_mut(|memory| {
@@ -1175,7 +1215,9 @@ fn reserve_terminal_keyboard(ctx: &egui::Context) {
 
 impl eframe::App for TerminalApp {
     fn update(&mut self, ctx: &egui::Context, _: &mut eframe::Frame) {
-        reserve_terminal_keyboard(ctx);
+        if !self.settings_open {
+            reserve_terminal_keyboard(ctx);
+        }
         // Drain every PTY, including background tabs, so output and paste results
         // cannot block and terminal queries are answered while another tab is active.
         for index in (0..self.tabs.len()).rev() {
@@ -1190,7 +1232,7 @@ impl eframe::App for TerminalApp {
         let composing = ctx.input(|input| {
             ime_owns_keyboard(&self.tabs[self.active].focused().ime_preedit, &input.events)
         });
-        if !composing {
+        if !composing && !self.about_open && !self.settings_open {
             let (new, close, next, previous) = ctx.input_mut(consume_tab_shortcuts);
             if new {
                 self.new_tab();
@@ -1210,6 +1252,9 @@ impl eframe::App for TerminalApp {
         let mut close_pane = false;
         egui::TopBottomPanel::top("menu").show(ctx, |ui| {
             egui::MenuBar::new().ui(ui, |ui| {
+                if ui.button("Settings").clicked() {
+                    self.settings_open = true;
+                }
                 ui.menu_button("Pane", |ui| {
                     if ui.button("Split Right").clicked() {
                         split = Some(SplitDirection::Right);
@@ -1232,6 +1277,10 @@ impl eframe::App for TerminalApp {
                         ui.close();
                     }
                 });
+                if ui.button("About").clicked() {
+                    self.about_open = true;
+                    self.about_licenses = false;
+                }
             });
             egui::ScrollArea::horizontal()
                 .id_salt("tabs")
@@ -1296,6 +1345,41 @@ impl eframe::App for TerminalApp {
                 return;
             }
         }
+        if self.settings_open {
+            let before = self.cursor_settings;
+            let modal = show_settings(ctx, &mut self.cursor_settings);
+            if modal.inner || modal.should_close() {
+                self.settings_open = false;
+            }
+            if before != self.cursor_settings {
+                let result = self
+                    .args
+                    .config
+                    .clone()
+                    .map(Ok)
+                    .unwrap_or_else(logging::config_path)
+                    .and_then(|path| settings::save(&path, self.cursor_settings));
+                if let Err(error) = result {
+                    self.error = Some(format!("Cannot save settings: {error:#}"));
+                }
+                for tab in &mut self.tabs {
+                    for pane in &mut tab.panes {
+                        pane.cursor_blink_started = Instant::now();
+                    }
+                }
+            }
+        }
+        for tab in &mut self.tabs {
+            for pane in &mut tab.panes {
+                pane.cursor_settings = self.cursor_settings;
+            }
+        }
+        if self.about_open {
+            let modal = show_about(ctx, &mut self.about_licenses);
+            if modal.inner || modal.should_close() {
+                self.about_open = false;
+            }
+        }
         egui::TopBottomPanel::bottom("status").show(ctx, |ui| {
             let session = self.tabs[self.active].focused_mut();
             ui.horizontal(|ui| {
@@ -1324,6 +1408,188 @@ impl eframe::App for TerminalApp {
         }
         ctx.request_repaint_after(Duration::from_millis(16));
     }
+}
+
+fn show_settings(ctx: &egui::Context, settings: &mut CursorSettings) -> egui::ModalResponse<bool> {
+    egui::Modal::new(egui::Id::new("settings")).show(ctx, |ui| {
+        ui.set_width(420.0);
+        ui.heading("Settings");
+        ui.add_space(18.0);
+        ui.weak("CURSOR");
+        ui.add_space(6.0);
+        egui::Frame::group(ui.style())
+            .corner_radius(12.0)
+            .inner_margin(16.0)
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label("Cursor Style");
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        ui.spacing_mut().item_spacing.x = 4.0;
+                        for (shape, label) in [
+                            (CursorShape::Beam, "Vertical bar"),
+                            (CursorShape::Underline, "Underline"),
+                            (CursorShape::Block, "Block"),
+                        ] {
+                            let (rect, response) =
+                                ui.allocate_exact_size(Vec2::new(58.0, 40.0), egui::Sense::click());
+                            if response.clicked() {
+                                settings.shape = shape;
+                            }
+                            let selected = settings.shape == shape;
+                            let visuals = ui.style().interact_selectable(&response, selected);
+                            ui.painter().rect_filled(rect, 8.0, visuals.bg_fill);
+                            let center = rect.center();
+                            let icon = match shape {
+                                CursorShape::Block => {
+                                    Rect::from_center_size(center, Vec2::new(13.0, 22.0))
+                                }
+                                CursorShape::Underline => Rect::from_center_size(
+                                    center + Vec2::new(0.0, 10.0),
+                                    Vec2::new(16.0, 3.0),
+                                ),
+                                CursorShape::Beam => {
+                                    Rect::from_center_size(center, Vec2::new(3.0, 22.0))
+                                }
+                            };
+                            ui.painter().rect_filled(icon, 0.0, visuals.text_color());
+                            response.on_hover_text(label).widget_info(|| {
+                                egui::WidgetInfo::selected(
+                                    egui::WidgetType::SelectableLabel,
+                                    true,
+                                    selected,
+                                    label,
+                                )
+                            });
+                        }
+                    });
+                });
+                ui.add_space(8.0);
+                ui.separator();
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    ui.label("Cursor Blinking");
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        let (rect, response) =
+                            ui.allocate_exact_size(Vec2::new(50.0, 30.0), egui::Sense::click());
+                        if response.clicked() {
+                            settings.blinking = !settings.blinking;
+                        }
+                        response.widget_info(|| {
+                            egui::WidgetInfo::selected(
+                                egui::WidgetType::Checkbox,
+                                true,
+                                settings.blinking,
+                                "Cursor Blinking",
+                            )
+                        });
+                        let on = ui.ctx().animate_bool(response.id, settings.blinking);
+                        ui.painter().rect_filled(
+                            rect,
+                            15.0,
+                            if settings.blinking {
+                                Color32::from_rgb(48, 199, 89)
+                            } else {
+                                ui.visuals().widgets.inactive.bg_fill
+                            },
+                        );
+                        ui.painter().circle_filled(
+                            egui::pos2(rect.left() + 15.0 + on * 20.0, rect.center().y),
+                            12.0,
+                            Color32::WHITE,
+                        );
+                    });
+                });
+            });
+        ui.add_space(12.0);
+        ui.weak("Changes apply immediately and are saved automatically.");
+        ui.add_space(12.0);
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            ui.button("Done").clicked()
+        })
+        .inner
+    })
+}
+
+fn show_about(ctx: &egui::Context, licenses: &mut bool) -> egui::ModalResponse<bool> {
+    egui::Modal::new(egui::Id::new("about-yiterm")).show(ctx, |ui| {
+        ui.set_width(360.0);
+        ui.vertical_centered(|ui| {
+            ui.add_space(18.0);
+            let (rect, _) = ui.allocate_exact_size(Vec2::splat(72.0), egui::Sense::hover());
+            ui.painter()
+                .rect_filled(rect, 18.0, Color32::from_rgb(40, 55, 75));
+            ui.painter().text(
+                rect.center(),
+                egui::Align2::CENTER_CENTER,
+                ">_",
+                FontId::monospace(30.0),
+                Color32::from_rgb(97, 175, 239),
+            );
+            ui.add_space(12.0);
+            ui.label(egui::RichText::new("YiTerm").size(28.0).strong());
+            ui.add_space(8.0);
+            ui.label("A lightweight terminal for macOS and Windows.");
+            ui.label("Tabs, split panes and image paste over SSH.");
+            ui.add_space(20.0);
+            ui.label(format!("Version  {}", env!("CARGO_PKG_VERSION")));
+            if let Some(revision) = option_env!("YITERM_BUILD_REV") {
+                let short = revision.get(..8).unwrap_or(revision);
+                ui.allocate_ui_with_layout(
+                    Vec2::new(ui.available_width(), ui.spacing().interact_size.y),
+                    egui::Layout::left_to_right(egui::Align::Center)
+                        .with_main_align(egui::Align::Center),
+                    |ui| {
+                        ui.label("Commit");
+                        ui.hyperlink_to(
+                            short,
+                            format!("https://github.com/wynemo/yiterm/commit/{revision}"),
+                        );
+                    },
+                );
+            } else {
+                ui.weak("Local development build");
+            }
+            ui.add_space(20.0);
+            ui.allocate_ui_with_layout(
+                Vec2::new(ui.available_width(), ui.spacing().interact_size.y),
+                egui::Layout::left_to_right(egui::Align::Center)
+                    .with_main_align(egui::Align::Center),
+                |ui| {
+                    ui.hyperlink_to(
+                        "Docs",
+                        "https://github.com/wynemo/yiterm/blob/main/TECHNICAL.md",
+                    );
+                    ui.separator();
+                    ui.hyperlink_to("GitHub", "https://github.com/wynemo/yiterm");
+                    ui.separator();
+                    if ui.button("Licenses").clicked() {
+                        *licenses = !*licenses;
+                    }
+                },
+            );
+            ui.add_space(12.0);
+        });
+        if *licenses {
+            egui::ScrollArea::vertical()
+                .max_height(220.0)
+                .show(ui, |ui| {
+                    ui.heading("Lilex · SIL Open Font License 1.1");
+                    ui.label(include_str!("../assets/fonts/lilex/OFL.txt"));
+                    ui.separator();
+                    ui.heading("egui-winit · MIT / Apache-2.0");
+                    ui.label(include_str!("../vendor/egui-winit/LICENSE-MIT"));
+                    ui.label(include_str!("../vendor/egui-winit/LICENSE-APACHE"));
+                    #[cfg(windows)]
+                    {
+                        ui.separator();
+                        ui.heading("Microsoft ConPTY");
+                        ui.label(include_str!("../licenses/conpty-LICENSE"));
+                    }
+                });
+        }
+        ui.vertical_centered(|ui| ui.button("Close").clicked())
+            .inner
+    })
 }
 
 fn mouse_button_code(button: egui::PointerButton) -> Option<u8> {
@@ -1536,6 +1802,96 @@ fn configure_fonts(ctx: &egui::Context) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn settings_dialog_keeps_controls_inside_window() {
+        let ctx = egui::Context::default();
+        let mut settings = CursorSettings::default();
+        for frame in 0..3 {
+            let screen = Rect::from_min_size(egui::Pos2::ZERO, Vec2::new(710.0, 650.0));
+            let mut dialog = Rect::NOTHING;
+            let output = ctx.run(
+                egui::RawInput {
+                    screen_rect: Some(screen),
+                    ..Default::default()
+                },
+                |ctx| {
+                    dialog = show_settings(ctx, &mut settings).response.rect;
+                },
+            );
+            if frame == 0 {
+                continue;
+            }
+            assert!(screen.contains_rect(dialog));
+            for text in ["Settings", "Cursor Style", "Cursor Blinking", "Done"] {
+                let bounds = output
+                    .shapes
+                    .iter()
+                    .find_map(|shape| match &shape.shape {
+                        egui::Shape::Text(shape) if shape.galley.text() == text => {
+                            Some(Rect::from_min_size(shape.pos, shape.galley.size()))
+                        }
+                        _ => None,
+                    })
+                    .unwrap_or_else(|| panic!("Missing settings text: {text}"));
+                assert!(
+                    dialog.contains_rect(bounds),
+                    "{text}: {bounds:?} outside {dialog:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn about_dialog_keeps_content_inside_a_compact_window() {
+        for size in [Vec2::new(710.0, 650.0), Vec2::new(1280.0, 900.0)] {
+            for licenses in [false, true] {
+                let ctx = egui::Context::default();
+                let mut licenses = licenses;
+                for frame in 0..3 {
+                    let mut dialog = Rect::NOTHING;
+                    let output = ctx.run(
+                        egui::RawInput {
+                            screen_rect: Some(Rect::from_min_size(egui::Pos2::ZERO, size)),
+                            ..Default::default()
+                        },
+                        |ctx| {
+                            dialog = show_about(ctx, &mut licenses).response.rect;
+                        },
+                    );
+                    assert!(dialog.width() < 420.0, "About width: {dialog:?}");
+                    assert!(dialog.height() < 610.0, "About height: {dialog:?}");
+                    if frame == 0 {
+                        continue; // egui's first area pass only measures the dialog.
+                    }
+                    for text in [
+                        "YiTerm",
+                        "Version  0.0.2",
+                        "Docs",
+                        "GitHub",
+                        "Licenses",
+                        "Close",
+                    ] {
+                        let shape = output
+                            .shapes
+                            .iter()
+                            .find_map(|shape| match &shape.shape {
+                                egui::Shape::Text(shape) if shape.galley.text() == text => {
+                                    Some(shape)
+                                }
+                                _ => None,
+                            })
+                            .unwrap_or_else(|| panic!("Missing About text: {text}"));
+                        let bounds = Rect::from_min_size(shape.pos, shape.galley.size());
+                        assert!(
+                            dialog.expand(1.0).contains_rect(bounds),
+                            "{text} outside About: {bounds:?}, {dialog:?}"
+                        );
+                    }
+                }
+            }
+        }
+    }
 
     #[test]
     fn selection_coordinates_include_scrollback_and_clamp_outside_drag() {
@@ -2052,6 +2408,10 @@ mod tests {
             log_directory: std::env::temp_dir(),
             warning: None,
             error: None,
+            about_open: false,
+            about_licenses: false,
+            settings_open: false,
+            cursor_settings: CursorSettings::default(),
         };
         // Set different titles through each real PTY; the background session
         // must parse output too, without changing the foreground session title.
