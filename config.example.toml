@@ -6,3 +6,8 @@ file = true
 # directory = "/path/to/logs"
 rotation = "daily"
 max_files = 14
+
+[cursor]
+# block / underline / beam
+shape = "block"
+blinking = true
