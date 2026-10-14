@@ -12,7 +12,6 @@ pub struct MouseModes {
 struct Requests {
     changes: Vec<(u16, bool)>,
     urxvt: bool,
-    fallback_allowed: bool,
 }
 
 impl Requests {
@@ -20,9 +19,6 @@ impl Requests {
         let mode = mode.raw();
         if mode == 1015 {
             self.urxvt = enabled;
-            self.fallback_allowed = enabled;
-        } else if matches!(mode, 1000 | 1002 | 1003) {
-            self.fallback_allowed = enabled;
         }
         if matches!(mode, 1000..=1007 | 1015 | 1016 | 9001) {
             self.changes.push((mode, enabled));
@@ -41,7 +37,6 @@ impl Handler for Requests {
 
     fn reset_state(&mut self) {
         self.urxvt = false;
-        self.fallback_allowed = false;
     }
 }
 
@@ -63,20 +58,7 @@ impl MouseModes {
         std::mem::take(&mut self.requests.changes)
     }
 
-    pub fn protocol(&self, mut mode: TermMode, windows: bool) -> Protocol {
-        // Older ConPTY consumes tracking and SGR requests but passes through
-        // 1015. Use that explicit mouse-encoding request as the Windows fallback
-        // instead of guessing from the application name or enabling it in shells.
-        if windows
-            && self.requests.urxvt
-            && self.requests.fallback_allowed
-            && !mode.intersects(TermMode::MOUSE_MODE)
-        {
-            // The usual capture request ends with 1015h then 1006h. ConPTY
-            // preserves the former but consumes the latter; restore the final
-            // SGR encoding, rather than selecting the intermediate URXVT one.
-            mode.insert(TermMode::MOUSE_DRAG | TermMode::SGR_MOUSE);
-        }
+    pub fn protocol(&self, mode: TermMode) -> Protocol {
         Protocol {
             mode,
             urxvt: self.requests.urxvt && !mode.contains(TermMode::SGR_MOUSE),
@@ -120,26 +102,24 @@ mod tests {
     use super::*;
 
     #[test]
-    fn windows_1015_fallback_is_bounded_by_the_application_request() {
+    fn encoding_requests_do_not_enable_mouse_tracking() {
         let shell = TermMode::SHOW_CURSOR | TermMode::BRACKETED_PASTE;
         let mut mouse = MouseModes::default();
-        assert_eq!(mouse.protocol(shell, true).mode, shell);
+        assert_eq!(mouse.protocol(shell).mode, shell);
         mouse.observe(b"\x1b[?101");
         mouse.observe(b"5h");
-        let protocol = mouse.protocol(shell, true);
-        assert!(protocol.mode.contains(TermMode::MOUSE_DRAG));
-        assert!(protocol.mode.contains(TermMode::SGR_MOUSE));
-        assert!(!protocol.urxvt);
-        assert_eq!(mouse.protocol(shell, false).mode, shell);
+        let protocol = mouse.protocol(shell);
+        assert_eq!(protocol.mode, shell);
+        assert!(protocol.urxvt);
         let sgr = shell | TermMode::MOUSE_MOTION | TermMode::SGR_MOUSE;
-        assert_eq!(mouse.protocol(sgr, true).mode, sgr);
-        assert!(!mouse.protocol(sgr, true).urxvt);
+        assert_eq!(mouse.protocol(sgr).mode, sgr);
+        assert!(!mouse.protocol(sgr).urxvt);
         mouse.observe(b"\x1b[?1015l");
-        assert_eq!(mouse.protocol(shell, true).mode, shell);
-        mouse.observe(b"\x1b[?1015h\x1b[?1003l");
-        assert_eq!(mouse.protocol(shell, true).mode, shell);
+        assert_eq!(mouse.protocol(shell).mode, shell);
+        assert!(!mouse.protocol(shell).urxvt);
         mouse.observe(b"\x1b[?1015h\x1bc");
-        assert_eq!(mouse.protocol(shell, true).mode, shell);
+        assert_eq!(mouse.protocol(shell).mode, shell);
+        assert!(!mouse.protocol(shell).urxvt);
     }
 
     #[test]

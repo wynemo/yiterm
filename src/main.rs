@@ -181,7 +181,7 @@ impl TerminalApp {
     fn write_mouse(&mut self, report: &[u8]) {
         mouse_trace!(
             "send protocol={:?} cols={} rows={} hex={}",
-            self.mouse_modes.protocol(*self.term.mode(), cfg!(windows)),
+            self.mouse_modes.protocol(*self.term.mode()),
             self.size.cols,
             self.size.rows,
             mouse::hex(report)
@@ -397,7 +397,7 @@ impl eframe::App for TerminalApp {
                 self.size = size;
             }
             let scroll = ctx.input(|i| i.smooth_scroll_delta.y);
-            let mouse_protocol = self.mouse_modes.protocol(*self.term.mode(), cfg!(windows));
+            let mouse_protocol = self.mouse_modes.protocol(*self.term.mode());
             let mouse_mode = mouse_protocol.mode;
             let report_mouse = mouse_mode.intersects(TermMode::MOUSE_MODE)
                 && !ctx.input(|i| i.modifiers.shift)
