@@ -211,20 +211,23 @@ impl TerminalSession {
             self.status = error.to_string();
         }
     }
-    fn copy_selection(&self, ctx: &egui::Context) {
+    fn copy_selection(&mut self, ctx: &egui::Context) {
         if let Some(text) = self
             .term
             .selection_to_string()
             .filter(|text| !text.is_empty())
         {
             ctx.copy_text(text);
+            self.term.selection = None;
+            self.selecting = false;
+            ctx.request_repaint();
         }
     }
-    fn copy_on_right_click(&self, response: &egui::Response, windows: bool) -> bool {
+    fn copy_on_right_click(&mut self, response: &egui::Response, windows: bool) -> bool {
         if !windows {
             return false;
         }
-        let Some(text) = self
+        let Some(_) = self
             .term
             .selection_to_string()
             .filter(|text| !text.is_empty())
@@ -232,7 +235,7 @@ impl TerminalSession {
             return false;
         };
         if response.secondary_clicked() {
-            response.ctx.copy_text(text);
+            self.copy_selection(&response.ctx);
         }
         true
     }
@@ -1620,6 +1623,10 @@ mod tests {
             let copies_selection = windows && selected;
             assert_eq!(copies, usize::from(copies_selection));
             assert_eq!(egui::Popup::is_any_open(&ctx), !copies_selection);
+            assert_eq!(
+                session.term.selection.is_some(),
+                selected && !copies_selection
+            );
         }
     }
 
@@ -1693,6 +1700,11 @@ mod tests {
         assert!(output.platform_output.commands.iter().any(
             |command| matches!(command, egui::OutputCommand::CopyText(text) if text == "hello")
         ));
+        assert!(session.term.selection.is_none());
+        let cleared = ctx.run(egui::RawInput::default(), |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| session.show(ctx, ui, true));
+        });
+        assert!(!cleared.shapes.iter().any(|shape| matches!(&shape.shape, egui::Shape::Rect(rect) if rect.fill == Color32::from_rgb(65, 90, 125))));
         assert!(output.shapes.iter().any(|shape| matches!(&shape.shape, egui::Shape::Rect(rect) if rect.fill == Color32::from_rgb(65, 90, 125))));
         session.writer = Box::new(Vec::<u8>::new());
         session.parser.advance(&mut session.term, b"\x1b[?1000h");

@@ -29,7 +29,7 @@ Windows 默认启动 `powershell.exe`；macOS 默认使用 `$SHELL`。`--shell` 
 
 按住鼠标左键拖动选择文字，选区会高亮，松开后保留。macOS 使用 **Cmd+C** 复制；Windows / Linux 使用 **Ctrl+Shift+C** 或 **Ctrl+Insert**。**Ctrl+C** 保留为终端中断命令。
 
-Windows 有选中文字时，右键点击该 pane 直接复制，不打开分栏菜单；没有选区时右键仍打开菜单。
+Windows 有选中文字时，右键点击该 pane 直接复制，不打开分栏菜单；没有选区时右键仍打开菜单。通过右键或快捷键复制后，自动取消选区。
 
 终端程序开启鼠标模式时，普通鼠标操作发送给程序；按住 **Shift** 拖动可选择文字。选择也支持滚动历史中的内容。
 
