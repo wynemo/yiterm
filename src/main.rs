@@ -1077,8 +1077,22 @@ fn consume_tab_shortcuts(input: &mut egui::InputState) -> (bool, bool, bool, boo
     )
 }
 
+fn reserve_terminal_keyboard(ctx: &egui::Context) {
+    if !egui::Popup::is_any_open(ctx) {
+        // egui resolves Tab/arrow navigation before update. The terminal owns
+        // these keys, so cancel navigation before any menu buttons are rendered.
+        ctx.memory_mut(|memory| {
+            memory.move_focus(egui::FocusDirection::None);
+            if let Some(id) = memory.focused() {
+                memory.surrender_focus(id);
+            }
+        });
+    }
+}
+
 impl eframe::App for TerminalApp {
     fn update(&mut self, ctx: &egui::Context, _: &mut eframe::Frame) {
+        reserve_terminal_keyboard(ctx);
         // Drain every PTY, including background tabs, so output and paste results
         // cannot block and terminal queries are answered while another tab is active.
         for index in (0..self.tabs.len()).rev() {
@@ -1638,6 +1652,42 @@ mod tests {
             assert_eq!(
                 input.events.len(),
                 usize::from(modifiers == egui::Modifiers::NONE)
+            );
+        }
+    }
+
+    #[test]
+    fn terminal_keys_do_not_move_focus_to_menu_buttons() {
+        let ctx = egui::Context::default();
+        for (key, modifiers, bytes) in [
+            (Key::Tab, egui::Modifiers::NONE, "\t"),
+            (Key::Tab, egui::Modifiers::SHIFT, "\x1b[Z"),
+            (Key::ArrowDown, egui::Modifiers::NONE, "\x1b[B"),
+        ] {
+            let _ = ctx.run(
+                egui::RawInput {
+                    events: vec![egui::Event::Key {
+                        key,
+                        physical_key: None,
+                        pressed: true,
+                        repeat: false,
+                        modifiers,
+                    }],
+                    ..Default::default()
+                },
+                |ctx| {
+                    reserve_terminal_keyboard(ctx);
+                    egui::TopBottomPanel::top("menu").show(ctx, |ui| {
+                        ui.menu_button("Pane", |_| {});
+                        let _ = ui.button("+");
+                    });
+                    assert_eq!(ctx.memory(|memory| memory.focused()), None);
+                    assert!(ctx.input(|input| input.key_pressed(key)));
+                    assert_eq!(
+                        key_bytes(key, modifiers, false),
+                        Some(bytes.as_bytes().to_vec())
+                    );
+                },
             );
         }
     }
