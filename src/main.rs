@@ -9,6 +9,8 @@ use alacritty_terminal::{
     Term,
     event::{Event, EventListener},
     grid::{Dimensions, Scroll},
+    index::{Column, Line, Point, Side},
+    selection::{Selection, SelectionType},
     term::{Config, TermMode, cell::Flags},
     vte::ansi::{Color, NamedColor, Processor},
 };
@@ -99,6 +101,7 @@ struct TerminalSession {
     paste_busy: bool,
     ime_preedit: String,
     mouse_button: Option<egui::PointerButton>,
+    selecting: bool,
     cursor_blink_started: Instant,
     status: String,
     size: Size,
@@ -190,6 +193,7 @@ impl TerminalSession {
             paste_busy: false,
             ime_preedit: String::new(),
             mouse_button: None,
+            selecting: false,
             cursor_blink_started: Instant::now(),
             status: warning
                 .map(str::to_owned)
@@ -206,6 +210,31 @@ impl TerminalSession {
             tracing::error!(%error, "PTY write failed");
             self.status = error.to_string();
         }
+    }
+    fn copy_selection(&self, ctx: &egui::Context) {
+        if let Some(text) = self
+            .term
+            .selection_to_string()
+            .filter(|text| !text.is_empty())
+        {
+            ctx.copy_text(text);
+        }
+    }
+    fn copy_on_right_click(&self, response: &egui::Response, windows: bool) -> bool {
+        if !windows {
+            return false;
+        }
+        let Some(text) = self
+            .term
+            .selection_to_string()
+            .filter(|text| !text.is_empty())
+        else {
+            return false;
+        };
+        if response.secondary_clicked() {
+            response.ctx.copy_text(text);
+        }
+        true
     }
     fn write_mouse(&mut self, report: &[u8]) {
         tracing::trace!(target: "yiterm::mouse",
@@ -464,6 +493,7 @@ impl TerminalSession {
                 .scroll_display(Scroll::Delta((scroll / cell.y).round() as i32));
         }
         let content = self.term.renderable_content();
+        let selection = content.selection;
         let offset = content.display_offset;
         let cells: Vec<_> = content.display_iter.collect();
         // Paint all backgrounds first: a wide glyph extends into its spacer
@@ -473,7 +503,9 @@ impl TerminalSession {
             if row < 0 {
                 continue;
             }
-            let bg = if indexed.cell.flags.contains(Flags::INVERSE) {
+            let bg = if selection.is_some_and(|range| range.contains(indexed.point)) {
+                Color32::from_rgb(65, 90, 125)
+            } else if indexed.cell.flags.contains(Flags::INVERSE) {
                 color(indexed.cell.fg, true)
             } else {
                 color(indexed.cell.bg, false)
@@ -491,7 +523,9 @@ impl TerminalSession {
             }
             let pos =
                 rect.min + Vec2::new(indexed.point.column.0 as f32 * cell.x, row as f32 * cell.y);
-            let fg = if indexed.cell.flags.contains(Flags::INVERSE) {
+            let fg = if selection.is_some_and(|range| range.contains(indexed.point)) {
+                Color32::WHITE
+            } else if indexed.cell.flags.contains(Flags::INVERSE) {
                 color(indexed.cell.bg, false)
             } else {
                 color(indexed.cell.fg, true)
@@ -615,6 +649,26 @@ impl TerminalSession {
                     modifiers,
                 } => {
                     let tracked = self.mouse_button == Some(button);
+                    if button == egui::PointerButton::Primary {
+                        if pressed && !report_mouse && rect.contains(pos) {
+                            let (point, side) = selection_point(rect, cell, size, offset, pos);
+                            self.term.selection =
+                                Some(Selection::new(SelectionType::Simple, point, side));
+                            self.selecting = true;
+                            ctx.request_repaint();
+                        } else if !pressed && self.selecting {
+                            let (point, side) = selection_point(rect, cell, size, offset, pos);
+                            if let Some(selection) = &mut self.term.selection {
+                                selection.update(point, side);
+                            }
+                            self.selecting = false;
+                            ctx.request_repaint();
+                            continue;
+                        }
+                        if self.selecting {
+                            continue;
+                        }
+                    }
                     tracing::trace!(target: "yiterm::mouse", "button={button:?} pressed={pressed} report={report_mouse} inside={} shift={} offset={} pos={pos:?} rect={rect:?} cell={cell:?} mode={mouse_mode:?}", rect.contains(pos), modifiers.shift, self.term.grid().display_offset());
                     if report_mouse
                         && (rect.contains(pos) || (!pressed && tracked))
@@ -639,6 +693,13 @@ impl TerminalSession {
                         self.mouse_button = None;
                     }
                 }
+                egui::Event::PointerMoved(pos) if self.selecting => {
+                    let (point, side) = selection_point(rect, cell, size, offset, pos);
+                    if let Some(selection) = &mut self.term.selection {
+                        selection.update(point, side);
+                    }
+                    ctx.request_repaint();
+                }
                 egui::Event::PointerMoved(pos) if report_mouse => {
                     if rect.contains(pos)
                         && (mouse_mode.contains(TermMode::MOUSE_MOTION)
@@ -660,6 +721,7 @@ impl TerminalSession {
                     }
                 }
                 egui::Event::Paste(_) if paste_shortcut => {}
+                egui::Event::Copy => self.copy_selection(ctx),
                 egui::Event::Paste(_) => self.paste(),
                 egui::Event::Ime(egui::ImeEvent::Preedit(text)) => {
                     self.ime_preedit = text;
@@ -671,6 +733,7 @@ impl TerminalSession {
                 }
                 egui::Event::Ime(egui::ImeEvent::Disabled) | egui::Event::WindowFocused(false) => {
                     self.ime_preedit.clear();
+                    self.selecting = false;
                 }
                 egui::Event::Text(_) if composing => {}
                 egui::Event::Text(text) => {
@@ -684,6 +747,10 @@ impl TerminalSession {
                     ..
                 } => {
                     if composing {
+                        continue;
+                    }
+                    if is_copy_shortcut(key, modifiers) {
+                        self.copy_selection(ctx);
                         continue;
                     }
                     if is_paste_shortcut(key, modifiers) {
@@ -884,6 +951,7 @@ impl TerminalTab {
         let previous = self.focused_mut();
         previous.ime_preedit.clear();
         previous.mouse_button = None;
+        previous.selecting = false;
         previous.mouse_wheel.reset();
         self.active = pane;
         self.focused_mut().cursor_blink_started = Instant::now();
@@ -939,16 +1007,18 @@ impl TerminalTab {
                 ui.id().with(("pane-menu", index)),
                 egui::Sense::click(),
             );
-            response.context_menu(|ui| {
-                if ui.button("Split Right").clicked() {
-                    split = Some((index, SplitDirection::Right));
-                    ui.close();
-                }
-                if ui.button("Split Down").clicked() {
-                    split = Some((index, SplitDirection::Down));
-                    ui.close();
-                }
-            });
+            if !self.panes[index].copy_on_right_click(&response, cfg!(windows)) {
+                response.context_menu(|ui| {
+                    if ui.button("Split Right").clicked() {
+                        split = Some((index, SplitDirection::Right));
+                        ui.close();
+                    }
+                    if ui.button("Split Down").clicked() {
+                        split = Some((index, SplitDirection::Down));
+                        ui.close();
+                    }
+                });
+            }
             let header = Rect::from_min_size(rect.min, Vec2::new(rect.width(), 24.0));
             let mut header_ui = ui.new_child(
                 egui::UiBuilder::new()
@@ -1318,6 +1388,30 @@ fn is_paste_shortcut(key: Key, modifiers: egui::Modifiers) -> bool {
             && !modifiers.mac_cmd)
 }
 
+fn is_copy_shortcut(key: Key, modifiers: egui::Modifiers) -> bool {
+    key == Key::Copy
+        || (key == Key::C && (modifiers.mac_cmd || modifiers.ctrl && modifiers.shift))
+        || (key == Key::Insert && modifiers.ctrl && !modifiers.shift)
+}
+
+fn selection_point(
+    rect: Rect,
+    cell: Vec2,
+    size: Size,
+    offset: usize,
+    pos: egui::Pos2,
+) -> (Point, Side) {
+    let x = ((pos.x - rect.min.x) / cell.x).clamp(0.0, size.cols as f32);
+    let column = (x.floor() as usize).min(size.cols - 1);
+    let row = (((pos.y - rect.min.y) / cell.y).floor() as i32).clamp(0, size.rows as i32 - 1);
+    let side = if x - (column as f32) < 0.5 {
+        Side::Left
+    } else {
+        Side::Right
+    };
+    (Point::new(Line(row - offset as i32), Column(column)), side)
+}
+
 fn key_bytes(key: Key, modifiers: egui::Modifiers, app_cursor: bool) -> Option<Vec<u8>> {
     if modifiers.ctrl && !modifiers.shift {
         let name = format!("{key:?}");
@@ -1439,6 +1533,209 @@ fn configure_fonts(ctx: &egui::Context) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn selection_coordinates_include_scrollback_and_clamp_outside_drag() {
+        let rect = Rect::from_min_size(egui::pos2(10.0, 20.0), Vec2::new(100.0, 60.0));
+        let cell = Vec2::new(10.0, 20.0);
+        let size = Size { cols: 10, rows: 3 };
+        assert_eq!(
+            selection_point(rect, cell, size, 5, egui::pos2(11.0, 21.0)),
+            (Point::new(Line(-5), Column(0)), Side::Left)
+        );
+        assert_eq!(
+            selection_point(rect, cell, size, 5, egui::pos2(500.0, 500.0)),
+            (Point::new(Line(-3), Column(9)), Side::Right)
+        );
+        assert!(!is_copy_shortcut(Key::C, egui::Modifiers::CTRL));
+        assert_eq!(
+            key_bytes(Key::C, egui::Modifiers::CTRL, false),
+            Some(vec![3])
+        );
+        assert!(is_copy_shortcut(Key::C, egui::Modifiers::MAC_CMD));
+        assert!(is_copy_shortcut(
+            Key::C,
+            egui::Modifiers::CTRL | egui::Modifiers::SHIFT
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn windows_right_click_copies_selection_instead_of_opening_menu() {
+        let args = Args {
+            ssh: None,
+            config: None,
+            log_filter: None,
+            shell: Some("/bin/sh".into()),
+        };
+        let mut session = TerminalSession::new(&args, None).unwrap();
+        session.parser.advance(&mut session.term, b"hello");
+        for (windows, selected) in [(true, true), (true, false), (false, true)] {
+            session.term.selection = if selected {
+                let mut selection = Selection::new(
+                    SelectionType::Simple,
+                    Point::new(Line(0), Column(0)),
+                    Side::Left,
+                );
+                selection.update(Point::new(Line(0), Column(4)), Side::Right);
+                Some(selection)
+            } else {
+                None
+            };
+            let ctx = egui::Context::default();
+            let mut copies = 0;
+            let pos = egui::pos2(40.0, 40.0);
+            for pressed in [None, Some(true), Some(false)] {
+                let mut events = vec![egui::Event::PointerMoved(pos)];
+                if let Some(pressed) = pressed {
+                    events.push(egui::Event::PointerButton {
+                        pos,
+                        button: egui::PointerButton::Secondary,
+                        pressed,
+                        modifiers: egui::Modifiers::NONE,
+                    });
+                }
+                let output = ctx.run(
+                    egui::RawInput {
+                        events,
+                        ..Default::default()
+                    },
+                    |ctx| {
+                        egui::CentralPanel::default().show(ctx, |ui| {
+                            let response = ui.interact(
+                                Rect::from_min_size(egui::Pos2::ZERO, Vec2::splat(100.0)),
+                                ui.id().with("pane"),
+                                egui::Sense::click(),
+                            );
+                            if !session.copy_on_right_click(&response, windows) {
+                                response.context_menu(|ui| {
+                                    ui.label("Split Right");
+                                });
+                            }
+                        });
+                    },
+                );
+                copies += output.platform_output.commands.iter().filter(|command| matches!(command, egui::OutputCommand::CopyText(text) if text == "hello")).count();
+            }
+            let copies_selection = windows && selected;
+            assert_eq!(copies, usize::from(copies_selection));
+            assert_eq!(egui::Popup::is_any_open(&ctx), !copies_selection);
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn dragging_terminal_text_highlights_and_copies_without_mouse_reports() {
+        let args = Args {
+            ssh: None,
+            config: None,
+            log_filter: None,
+            shell: Some("/bin/sh".into()),
+        };
+        let mut session = TerminalSession::new(&args, None).unwrap();
+        session.parser.advance(&mut session.term, b"hello world");
+        let ctx = egui::Context::default();
+        configure_fonts(&ctx);
+        let mut origin = egui::Pos2::ZERO;
+        let mut cell = Vec2::ZERO;
+        let _ = ctx.run(egui::RawInput::default(), |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                origin = ui.available_rect_before_wrap().min;
+                cell = Vec2::new(
+                    ui.fonts_mut(|fonts| {
+                        fonts.glyph_width(&FontId::monospace(TERMINAL_FONT_SIZE), 'M')
+                    }),
+                    TERMINAL_FONT_SIZE * TERMINAL_LINE_HEIGHT,
+                );
+                session.show(ctx, ui, true);
+            });
+        });
+        let start = origin + Vec2::new(cell.x * 0.1, cell.y * 0.5);
+        let end = origin + Vec2::new(cell.x * 4.9, cell.y * 0.5);
+        for events in [
+            vec![egui::Event::PointerButton {
+                pos: start,
+                button: egui::PointerButton::Primary,
+                pressed: true,
+                modifiers: egui::Modifiers::NONE,
+            }],
+            vec![
+                egui::Event::PointerMoved(end),
+                egui::Event::PointerButton {
+                    pos: end,
+                    button: egui::PointerButton::Primary,
+                    pressed: false,
+                    modifiers: egui::Modifiers::NONE,
+                },
+            ],
+        ] {
+            let _ = ctx.run(
+                egui::RawInput {
+                    events,
+                    ..Default::default()
+                },
+                |ctx| {
+                    egui::CentralPanel::default().show(ctx, |ui| session.show(ctx, ui, true));
+                },
+            );
+        }
+        assert!(!session.selecting);
+        assert_eq!(session.term.selection_to_string().as_deref(), Some("hello"));
+        let output = ctx.run(
+            egui::RawInput {
+                events: vec![egui::Event::Copy],
+                ..Default::default()
+            },
+            |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| session.show(ctx, ui, true));
+            },
+        );
+        assert!(output.platform_output.commands.iter().any(
+            |command| matches!(command, egui::OutputCommand::CopyText(text) if text == "hello")
+        ));
+        assert!(output.shapes.iter().any(|shape| matches!(&shape.shape, egui::Shape::Rect(rect) if rect.fill == Color32::from_rgb(65, 90, 125))));
+        session.writer = Box::new(Vec::<u8>::new());
+        session.parser.advance(&mut session.term, b"\x1b[?1000h");
+        for modifiers in [egui::Modifiers::NONE, egui::Modifiers::SHIFT] {
+            session.term.selection = None;
+            for events in [
+                vec![egui::Event::PointerButton {
+                    pos: start,
+                    button: egui::PointerButton::Primary,
+                    pressed: true,
+                    modifiers,
+                }],
+                vec![
+                    egui::Event::PointerMoved(end),
+                    egui::Event::PointerButton {
+                        pos: end,
+                        button: egui::PointerButton::Primary,
+                        pressed: false,
+                        modifiers,
+                    },
+                ],
+            ] {
+                let _ = ctx.run(
+                    egui::RawInput {
+                        events,
+                        modifiers,
+                        ..Default::default()
+                    },
+                    |ctx| {
+                        egui::CentralPanel::default().show(ctx, |ui| session.show(ctx, ui, true));
+                    },
+                );
+            }
+            if modifiers.shift {
+                assert_eq!(session.term.selection_to_string().as_deref(), Some("hello"));
+            } else {
+                assert!(
+                    session.term.selection.is_none(),
+                    "Application mouse mode must receive ordinary drags"
+                );
+            }
+        }
+    }
 
     #[test]
     fn terminal_background_cells_share_pixel_edges() {
