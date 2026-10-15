@@ -405,10 +405,9 @@ impl TerminalSession {
                         );
                         self.status = "Remote clipboard request exceeds 1 MiB".into();
                     } else {
-                        let chars = text.chars().count();
                         self.pending_clipboard = Some(text);
-                        self.status = format!("Copied {chars} chars to host clipboard");
-                        tracing::info!(chars, "Remote application copied text to host clipboard");
+                        self.status = "Writing remote text to host clipboard…".into();
+                        tracing::debug!("Remote application requested a host clipboard write");
                     }
                 }
                 _ => {}
@@ -448,9 +447,29 @@ impl TerminalSession {
         true
     }
 
-    fn flush_clipboard(&mut self, ctx: &egui::Context) {
+    fn flush_clipboard(&mut self) {
+        self.flush_clipboard_with(|text| {
+            let mut clipboard = arboard::Clipboard::new().context("opening host clipboard")?;
+            clipboard
+                .set_text(text)
+                .context("writing to host clipboard")?;
+            Ok(())
+        });
+    }
+
+    fn flush_clipboard_with(&mut self, write: impl FnOnce(String) -> Result<()>) {
         if let Some(text) = self.pending_clipboard.take() {
-            ctx.copy_text(text);
+            let chars = text.chars().count();
+            match write(text) {
+                Ok(()) => {
+                    self.status = format!("Copied {chars} chars to host clipboard");
+                    tracing::info!(chars, "Remote application copied text to host clipboard");
+                }
+                Err(error) => {
+                    tracing::warn!(chars, error = %format!("{error:#}"), "Host clipboard write failed");
+                    self.status = format!("Host clipboard write failed: {error:#}");
+                }
+            }
         }
     }
 
@@ -1248,7 +1267,7 @@ impl eframe::App for TerminalApp {
         }
         for tab in &mut self.tabs {
             for pane in &mut tab.panes {
-                pane.flush_clipboard(ctx);
+                pane.flush_clipboard();
             }
         }
         if self.tabs.is_empty() {
@@ -2033,17 +2052,20 @@ mod tests {
             .advance(&mut session.term, b"\x1b]52;c;SGVsbG8=\x07");
         assert!(session.poll());
 
-        let ctx = egui::Context::default();
-        let output = ctx.run(egui::RawInput::default(), |ctx| {
-            session.flush_clipboard(ctx)
+        let mut copied = None;
+        session.flush_clipboard_with(|text| {
+            copied = Some(text);
+            Ok(())
         });
-        assert!(
-            output
-                .platform_output
-                .commands
-                .contains(&egui::OutputCommand::CopyText("Hello".into()))
-        );
+        assert_eq!(copied.as_deref(), Some("Hello"));
         assert_eq!(session.status, "Copied 5 chars to host clipboard");
+
+        session.pending_clipboard = Some("again".into());
+        session.flush_clipboard_with(|_| Err(anyhow::anyhow!("clipboard unavailable")));
+        assert_eq!(
+            session.status,
+            "Host clipboard write failed: clipboard unavailable"
+        );
     }
 
     #[cfg(unix)]
