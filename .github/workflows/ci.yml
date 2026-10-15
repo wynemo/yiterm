@@ -3,7 +3,6 @@ name: Build YiTerm
 on:
   push:
     branches: ['**']
-    tags: ['**']
   pull_request:
   workflow_dispatch:
 
@@ -20,7 +19,6 @@ env:
 jobs:
   build:
     name: ${{ matrix.platform }}
-    if: github.ref_type != 'tag'
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 30
     strategy:
@@ -92,64 +90,45 @@ jobs:
 
   release:
     name: Publish GitHub Release
-    if: github.ref_type == 'tag' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+    needs: build
+    if: github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
     runs-on: ubuntu-latest
-    timeout-minutes: 40
+    timeout-minutes: 10
     permissions:
-      actions: read
       contents: write
     steps:
-      - name: Find the main build for this commit
-        id: main-build
-        env:
-          GH_TOKEN: ${{ github.token }}
-          GH_REPO: ${{ github.repository }}
-          COMMIT_SHA: ${{ github.sha }}
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Find version tag on this commit
+        id: release-tag
         shell: bash
         run: |
-          for attempt in $(seq 1 180); do
-            runs="$(gh api --method GET "repos/${GH_REPO}/actions/workflows/ci.yml/runs" \
-              -f head_sha="$COMMIT_SHA" -f branch=main -f event=push -F per_page=100)"
-            run_id="$(jq -r --arg sha "$COMMIT_SHA" '
-              .workflow_runs
-              | map(select(.head_sha == $sha and .head_branch == "main" and .event == "push"))
-              | sort_by(.created_at)
-              | last
-              | .id // empty
-            ' <<< "$runs")"
-            if [[ -n "$run_id" ]]; then
-              run="$(gh api "repos/${GH_REPO}/actions/runs/${run_id}")"
-              status="$(jq -r '.status' <<< "$run")"
-              conclusion="$(jq -r '.conclusion // ""' <<< "$run")"
-              if [[ "$status" == completed ]]; then
-                if [[ "$conclusion" != success ]]; then
-                  echo "Main build $run_id for $COMMIT_SHA finished with '$conclusion'" >&2
-                  exit 1
-                fi
-                echo "run_id=$run_id" >> "$GITHUB_OUTPUT"
-                exit 0
-              fi
-            fi
-            sleep 10
-          done
-          echo "No successful main build found for tagged commit $COMMIT_SHA" >&2
-          exit 1
+          version="$(python3 -c 'import tomllib; print(tomllib.load(open("Cargo.toml", "rb"))["package"]["version"])')"
+          tag="v$version"
+          if git rev-parse --verify "refs/tags/$tag" >/dev/null 2>&1 && \
+             [[ "$(git rev-parse "refs/tags/$tag^{commit}")" == "$GITHUB_SHA" ]]; then
+            echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          else
+            echo "No version tag on this commit; skipping release."
+          fi
 
-      - name: Download packages from the main build
+      - name: Download packages from this build
+        if: steps.release-tag.outputs.tag != ''
         uses: actions/download-artifact@v8
         with:
           pattern: yiterm-*
-          github-token: ${{ github.token }}
-          repository: ${{ github.repository }}
-          run-id: ${{ steps.main-build.outputs.run_id }}
           path: dist
           merge-multiple: true
 
       - name: Create release and upload packages
+        if: steps.release-tag.outputs.tag != ''
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
-          RELEASE_TAG: ${{ github.ref_name }}
+          RELEASE_TAG: ${{ steps.release-tag.outputs.tag }}
         shell: bash
         run: |
           shopt -s nullglob
