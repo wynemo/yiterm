@@ -148,9 +148,9 @@ impl Console {
                     & !(ENABLE_ECHO_INPUT
                         | ENABLE_LINE_INPUT
                         | ENABLE_PROCESSED_INPUT
-                        | ENABLE_QUICK_EDIT_MODE))
-                    | ENABLE_EXTENDED_FLAGS
-                    | ENABLE_VIRTUAL_TERMINAL_INPUT,
+                        | ENABLE_QUICK_EDIT_MODE
+                        | ENABLE_VIRTUAL_TERMINAL_INPUT))
+                    | ENABLE_EXTENDED_FLAGS,
             ))?;
             check(SetConsoleMode(
                 output,
