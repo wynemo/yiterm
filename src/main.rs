@@ -138,6 +138,8 @@ struct TerminalSession {
     master: Box<dyn MasterPty + Send>,
     child: Box<dyn portable_pty::Child + Send + Sync>,
     integration: ssh::Integration,
+    #[cfg(windows)]
+    clipboard_requests: yiterm::native_ssh::ClipboardRequests,
     paste_result: mpsc::Receiver<Result<PasteResult>>,
     paste_sender: mpsc::Sender<Result<PasteResult>>,
     paste_busy: bool,
@@ -161,6 +163,8 @@ impl TerminalSession {
             "Starting terminal session"
         );
         let integration = ssh::Integration::new(&std::env::current_exe()?)?;
+        #[cfg(windows)]
+        let clipboard_requests = integration.listen_for_osc52()?;
         if let Some(host) = &args.ssh {
             ssh::parse(std::slice::from_ref(host))?;
         }
@@ -232,6 +236,8 @@ impl TerminalSession {
             master: pair.master,
             child,
             integration,
+            #[cfg(windows)]
+            clipboard_requests,
             paste_result,
             paste_sender,
             paste_busy: false,
@@ -428,6 +434,14 @@ impl TerminalSession {
                 tracing::trace!(target: "yiterm::mouse", "state {:?}", self.term.mode());
             }
             self.cursor_blink_started = Instant::now();
+        }
+        #[cfg(windows)]
+        while let Ok(sequence) = self.clipboard_requests.try_recv() {
+            tracing::info!(
+                bytes = sequence.len(),
+                "Received OSC 52 request from built-in SSH"
+            );
+            self.parser.advance(&mut self.term, &sequence);
         }
         while let Ok(event) = self.events.try_recv() {
             match event {

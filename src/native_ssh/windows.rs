@@ -1,6 +1,12 @@
 use super::{auth::Prompt, config, transfer};
 use anyhow::{Context, Result, bail, ensure};
-use std::{ffi::OsString, path::Path, sync::Arc, time::Duration};
+use std::{
+    ffi::OsString,
+    path::Path,
+    sync::{Arc, mpsc},
+    thread,
+    time::{Duration, Instant},
+};
 use tokio::net::windows::named_pipe::{ClientOptions, NamedPipeServer, ServerOptions};
 use windows_sys::Win32::{
     Foundation::{CloseHandle, HANDLE, INVALID_HANDLE_VALUE, LocalFree},
@@ -106,6 +112,165 @@ impl Drop for PipeSecurity {
             LocalFree(self.0);
         }
     }
+}
+
+const MAX_OSC52_FRAME_BYTES: usize = 2 * 1024 * 1024;
+
+pub struct ClipboardRequests {
+    receiver: mpsc::Receiver<Vec<u8>>,
+    shutdown: tokio::sync::watch::Sender<bool>,
+    _thread: thread::JoinHandle<()>,
+}
+
+impl ClipboardRequests {
+    pub fn listen(pipe_name: String) -> Result<Self> {
+        let (sender, receiver) = mpsc::sync_channel(16);
+        let (ready_sender, ready_receiver) = mpsc::sync_channel(1);
+        let (shutdown, shutdown_receiver) = tokio::sync::watch::channel(false);
+        let worker_ready = ready_sender.clone();
+        let worker = thread::Builder::new()
+            .name("yiterm-osc52-pipe".into())
+            .spawn(move || {
+                let runtime = match tokio::runtime::Builder::new_current_thread()
+                    .enable_io()
+                    .build()
+                {
+                    Ok(runtime) => runtime,
+                    Err(error) => {
+                        let _ = worker_ready.send(Err(error.to_string()));
+                        tracing::error!(%error, "Could not start OSC 52 pipe runtime");
+                        return;
+                    }
+                };
+                if let Err(error) = runtime.block_on(serve_clipboard_requests(
+                    pipe_name,
+                    sender,
+                    ready_sender,
+                    shutdown_receiver,
+                )) {
+                    tracing::error!(error = %format!("{error:#}"), "OSC 52 pipe listener stopped");
+                }
+            })?;
+
+        match ready_receiver.recv_timeout(Duration::from_secs(5)) {
+            Ok(Ok(())) => Ok(Self {
+                receiver,
+                shutdown,
+                _thread: worker,
+            }),
+            Ok(Err(error)) => anyhow::bail!("starting OSC 52 pipe listener: {error}"),
+            Err(error) => anyhow::bail!("waiting for OSC 52 pipe listener: {error}"),
+        }
+    }
+
+    pub fn try_recv(&self) -> std::result::Result<Vec<u8>, mpsc::TryRecvError> {
+        self.receiver.try_recv()
+    }
+}
+
+impl Drop for ClipboardRequests {
+    fn drop(&mut self) {
+        let _ = self.shutdown.send(true);
+    }
+}
+
+async fn serve_clipboard_requests(
+    pipe_name: String,
+    sender: mpsc::SyncSender<Vec<u8>>,
+    ready: mpsc::SyncSender<std::result::Result<(), String>>,
+    mut shutdown: tokio::sync::watch::Receiver<bool>,
+) -> Result<()> {
+    use tokio::io::AsyncWriteExt;
+
+    let security = PipeSecurity::new()?;
+    let mut pipe = security.server(&pipe_name, true)?;
+    drop(security);
+    let _ = ready.send(Ok(()));
+    tracing::info!("OSC 52 named pipe listener ready");
+
+    loop {
+        tokio::select! {
+            result = pipe.connect() => result.context("accepting OSC 52 pipe client")?,
+            _ = shutdown.changed() => return Ok(()),
+        }
+
+        // Arm the next instance before acknowledging this request so a burst
+        // of OSC 52 writes can reconnect without racing pipe creation.
+        let security = PipeSecurity::new()?;
+        let next_pipe = security.server(&pipe_name, false)?;
+        drop(security);
+
+        let request = tokio::select! {
+            result = read_osc52_request(&mut pipe) => result,
+            _ = shutdown.changed() => return Ok(()),
+        };
+        match request {
+            Ok(bytes) => {
+                let accepted = sender.send(bytes).is_ok();
+                pipe.write_u8(u8::from(!accepted)).await?;
+                pipe.flush().await?;
+                if !accepted {
+                    return Ok(());
+                }
+            }
+            Err(error) => {
+                tracing::warn!(error = %format!("{error:#}"), "Rejected OSC 52 pipe request");
+                pipe.write_u8(1).await?;
+                pipe.flush().await?;
+            }
+        }
+        pipe = next_pipe;
+    }
+}
+
+async fn read_osc52_request(pipe: &mut NamedPipeServer) -> Result<Vec<u8>> {
+    use tokio::io::AsyncReadExt;
+
+    let size = pipe.read_u32_le().await? as usize;
+    ensure!(
+        (6..=MAX_OSC52_FRAME_BYTES).contains(&size),
+        "Invalid OSC 52 pipe frame size"
+    );
+    let mut bytes = vec![0; size];
+    pipe.read_exact(&mut bytes).await?;
+    ensure!(
+        bytes.starts_with(b"\x1b]52;"),
+        "Pipe frame is not an OSC 52 sequence"
+    );
+    ensure!(
+        bytes.ends_with(b"\x07") || bytes.ends_with(b"\x1b\\") || bytes.ends_with(&[0x9c]),
+        "OSC 52 sequence has no string terminator"
+    );
+    Ok(bytes)
+}
+
+async fn forward_osc52_request(pipe_name: &str, bytes: &[u8]) -> Result<()> {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let mut pipe = loop {
+        match ClientOptions::new().open(pipe_name) {
+            Ok(pipe) => break pipe,
+            Err(error)
+                if matches!(error.raw_os_error(), Some(2 | 231)) && Instant::now() < deadline =>
+            {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+            Err(error) => return Err(error).context("connecting to YiTerm OSC 52 pipe"),
+        }
+    };
+
+    tokio::time::timeout(Duration::from_secs(5), async {
+        pipe.write_u32_le(bytes.len() as u32).await?;
+        pipe.write_all(bytes).await?;
+        pipe.flush().await?;
+        match pipe.read_u8().await? {
+            0 => Ok(()),
+            status => anyhow::bail!("YiTerm rejected OSC 52 pipe request with status {status}"),
+        }
+    })
+    .await
+    .context("waiting for YiTerm OSC 52 pipe response")?
 }
 
 struct Console {
@@ -280,6 +445,7 @@ pub fn run(real_ssh: &Path, directory: &Path, args: Vec<OsString>) -> Result<i32
 
 fn run_inner(real_ssh: &Path, directory: &Path, args: Vec<OsString>) -> Result<i32> {
     let config = config::resolve(real_ssh, &args)?;
+    let osc52_pipe = super::osc52_pipe_name(directory)?;
     let console = Console::enter()?;
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -378,6 +544,7 @@ fn run_inner(real_ssh: &Path, directory: &Path, args: Vec<OsString>) -> Result<i
         let mut exit_status = 255;
         let mut input_open = true;
         let mut shell_reply_pending = true;
+        let mut osc52_filter = super::osc52::Filter::default();
         let result = async {
             loop {
                 tokio::select! {
@@ -395,16 +562,34 @@ fn run_inner(real_ssh: &Path, directory: &Path, args: Vec<OsString>) -> Result<i
                                     continue;
                                 }
                                 match message {
-                                    russh::ChannelMsg::Data { data } | russh::ChannelMsg::ExtendedData { data, .. } => output(&data)?,
+                                    russh::ChannelMsg::Data { data } | russh::ChannelMsg::ExtendedData { data, .. } => {
+                                        let (terminal_bytes, requests) = osc52_filter.advance(&data);
+                                        for request in requests {
+                                            match forward_osc52_request(&osc52_pipe, &request).await {
+                                                Ok(()) => tracing::info!(bytes = request.len(), "Forwarded OSC 52 request to YiTerm"),
+                                                Err(error) => {
+                                                    tracing::warn!(bytes = request.len(), error = %format!("{error:#}"), "Could not forward OSC 52 request to YiTerm");
+                                                    output(&request)?;
+                                                }
+                                            }
+                                        }
+                                        output(&terminal_bytes)?;
+                                    }
                                     russh::ChannelMsg::ExitStatus { exit_status: status } => exit_status = status as i32,
                                     russh::ChannelMsg::ExitSignal { .. } => exit_status = 128,
                                     russh::ChannelMsg::Close if shell_reply_pending => bail!("SSH channel closed before the shell request was accepted"),
-                                    russh::ChannelMsg::Close => break,
+                                    russh::ChannelMsg::Close => {
+                                        output(&osc52_filter.finish())?;
+                                        break;
+                                    }
                                     _ => {},
                                 }
                             }
                             None if shell_reply_pending => bail!("SSH channel closed before the shell request was accepted"),
-                            None => break,
+                            None => {
+                                output(&osc52_filter.finish())?;
+                                break;
+                            }
                         }
                     }
                     _ = resize.tick() => {

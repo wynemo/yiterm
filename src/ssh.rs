@@ -84,6 +84,13 @@ impl Integration {
         }
         Ok(())
     }
+
+    #[cfg(windows)]
+    pub fn listen_for_osc52(&self) -> Result<crate::native_ssh::ClipboardRequests> {
+        crate::native_ssh::ClipboardRequests::listen(crate::native_ssh::osc52_pipe_name(
+            self.directory.path(),
+        )?)
+    }
     pub fn shell(&self, shell: &str) -> Result<portable_pty::CommandBuilder> {
         let mut command = portable_pty::CommandBuilder::new(shell);
         let bin = self

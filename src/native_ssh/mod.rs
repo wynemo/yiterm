@@ -2,11 +2,12 @@
 //! image transfers use independent channels; credentials never cross GUI IPC.
 pub mod auth;
 pub mod config;
+pub mod osc52;
 pub mod transfer;
 #[cfg(windows)]
 mod windows;
 #[cfg(windows)]
-pub use windows::{run, upload};
+pub use windows::{ClipboardRequests, run, upload};
 
 use anyhow::{Context, Result, bail};
 use auth::{Handler, Prompt};
@@ -201,6 +202,16 @@ fn shell_request_reply(message: &ChannelMsg, pending: &mut bool) -> Result<bool>
 /// Stable only within this pane's private integration directory and process.
 /// A new process receives a fresh pipe, and the client also checks the server PID.
 pub fn pipe_name(directory: &std::path::Path, pid: u32) -> Result<String> {
+    let name = integration_name(directory)?;
+    Ok(format!(r"\\.\pipe\{name}-ssh-{pid}"))
+}
+
+pub fn osc52_pipe_name(directory: &std::path::Path) -> Result<String> {
+    let name = integration_name(directory)?;
+    Ok(format!(r"\\.\pipe\{name}-osc52"))
+}
+
+fn integration_name(directory: &std::path::Path) -> Result<&str> {
     let name = directory
         .file_name()
         .and_then(|s| s.to_str())
@@ -209,7 +220,7 @@ pub fn pipe_name(directory: &std::path::Path, pid: u32) -> Result<String> {
         name.starts_with("yiterm-") && name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-'),
         "Invalid SSH integration directory"
     );
-    Ok(format!(r"\\.\pipe\{name}-ssh-{pid}"))
+    Ok(name)
 }
 
 #[cfg(test)]
