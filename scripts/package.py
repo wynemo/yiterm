@@ -108,6 +108,11 @@ def main() -> None:
     if github_output := os.environ.get("GITHUB_OUTPUT"):
         with open(github_output, "a", encoding="utf-8") as outputs:
             outputs.write(f"version={version}\n")
+            tags = subprocess.check_output(
+                ["git", "tag", "--points-at", "HEAD"], cwd=ROOT, text=True,
+            ).splitlines()
+            if f"v{version}" in tags:
+                outputs.write(f"tag=v{version}\n")
     print(f"Packaged {archive.name}")
 
 

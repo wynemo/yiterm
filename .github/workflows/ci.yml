@@ -21,6 +21,8 @@ jobs:
     name: ${{ matrix.platform }}
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 30
+    outputs:
+      tag: ${{ steps.package.outputs.tag }}
     strategy:
       fail-fast: false
       matrix:
@@ -34,6 +36,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
         with:
+          fetch-depth: 0
           persist-credentials: false
 
       - uses: dtolnay/rust-toolchain@stable
@@ -91,32 +94,13 @@ jobs:
   release:
     name: Publish GitHub Release
     needs: build
-    if: github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+    if: github.ref == 'refs/heads/main' && needs.build.outputs.tag != ''
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v7
-        with:
-          fetch-depth: 0
-          persist-credentials: false
-
-      - name: Find version tag on this commit
-        id: release-tag
-        shell: bash
-        run: |
-          version="$(python3 -c 'import tomllib; print(tomllib.load(open("Cargo.toml", "rb"))["package"]["version"])')"
-          tag="v$version"
-          if git rev-parse --verify "refs/tags/$tag" >/dev/null 2>&1 && \
-             [[ "$(git rev-parse "refs/tags/$tag^{commit}")" == "$GITHUB_SHA" ]]; then
-            echo "tag=$tag" >> "$GITHUB_OUTPUT"
-          else
-            echo "No version tag on this commit; skipping release."
-          fi
-
       - name: Download packages from this build
-        if: steps.release-tag.outputs.tag != ''
         uses: actions/download-artifact@v8
         with:
           pattern: yiterm-*
@@ -124,11 +108,10 @@ jobs:
           merge-multiple: true
 
       - name: Create release and upload packages
-        if: steps.release-tag.outputs.tag != ''
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
-          RELEASE_TAG: ${{ steps.release-tag.outputs.tag }}
+          RELEASE_TAG: ${{ needs.build.outputs.tag }}
         shell: bash
         run: |
           shopt -s nullglob

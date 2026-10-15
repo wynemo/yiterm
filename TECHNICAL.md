@@ -148,4 +148,4 @@ Windows CI 额外保存 `profiling-windows-<commit>` artifact，内含同次优�
 
 版本号同步更新 `Cargo.toml` 和 `Cargo.lock`，提交后创建对应的 `v<版本号>` tag，并用 `git push --atomic origin main v<版本号>` 一起推送。
 
-只有分支推送触发 CI，tag 推送不单独触发。一次 main 流水线完成 macOS、Windows 构建与测试；全部通过后，如果当前提交有对应版本 tag，就直接使用本次构建产物发布 GitHub Release。没有对应 tag 时只构建，不发布。若 tag 在 main 流水线结束后才推送，可在 main 上手动运行该工作流完成发布。
+只有分支推送触发 CI，tag 推送不单独触发。一次 main 流水线完成 macOS、Windows 构建与测试；全部通过后，如果当前提交有对应版本 tag，就直接使用本次构建产物发布 GitHub Release。构建的打包步骤输出当前提交的版本 tag，发布 job 通过 `needs.build.outputs.tag` 判断是否运行；没有对应 tag 时跳过整个发布 job。若 tag 在 main 流水线结束后才推送，可在 main 上手动运行该工作流完成发布。
