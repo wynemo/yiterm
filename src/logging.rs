@@ -2,11 +2,16 @@
 use anyhow::{Context, Result, bail};
 use serde::Deserialize;
 use std::{
+    fs::OpenOptions,
+    io::{self, Write},
     path::{Path, PathBuf},
     process::Command,
+    sync::{Arc, Mutex},
 };
-use tracing_appender::non_blocking::{ErrorCounter, WorkerGuard};
-use tracing_subscriber::{EnvFilter, layer::SubscriberExt, util::SubscriberInitExt};
+use tracing_appender::non_blocking::{ErrorCounter, NonBlocking, WorkerGuard};
+use tracing_subscriber::{
+    EnvFilter, fmt::writer::MakeWriter, layer::SubscriberExt, util::SubscriberInitExt,
+};
 
 struct ProcessFormat;
 impl<S, N> tracing_subscriber::fmt::FormatEvent<S, N> for ProcessFormat
@@ -113,30 +118,77 @@ fn load(path: &Path, explicit: bool) -> Result<LoggingConfig> {
         }
     }
 }
-// Retention is shared across PID-specific files; never delete another live process's logs.
+fn utc_date() -> String {
+    let date = time::OffsetDateTime::now_utc().date();
+    format!(
+        "{:04}-{:02}-{:02}",
+        date.year(),
+        date.month() as u8,
+        date.day()
+    )
+}
+
+pub fn current_log_path(directory: &Path) -> PathBuf {
+    directory.join(format!("yiterm-{}.log", utc_date()))
+}
+
+fn legacy_pid(name: &str) -> Option<u32> {
+    let rest = name.strip_prefix("yiterm-")?.strip_suffix(".log")?;
+    let (pid, date) = rest.split_once('.')?;
+    if date.len() != 10
+        || !date.bytes().enumerate().all(|(index, byte)| match index {
+            4 | 7 => byte == b'-',
+            _ => byte.is_ascii_digit(),
+        })
+    {
+        return None;
+    }
+    pid.parse().ok()
+}
+
+fn is_daily_log(name: &str) -> bool {
+    let Some(date) = name
+        .strip_prefix("yiterm-")
+        .and_then(|name| name.strip_suffix(".log"))
+    else {
+        return false;
+    };
+    date.len() == 10
+        && date.bytes().enumerate().all(|(index, byte)| match index {
+            4 | 7 => byte == b'-',
+            _ => byte.is_ascii_digit(),
+        })
+}
+
+// New logs are shared by every YiTerm process. Old per-PID logs are kept only
+// while that process is still alive, so a running older instance can finish.
 fn prune(directory: &Path, max_files: usize) -> Result<()> {
     let mut files = Vec::new();
+    let current = current_log_path(directory);
     let mut system = sysinfo::System::new();
     system.refresh_processes(sysinfo::ProcessesToUpdate::All, true);
     for entry in std::fs::read_dir(directory)? {
         let entry = entry?;
         let name = entry.file_name();
         let name = name.to_string_lossy();
-        let Some(rest) = name.strip_prefix("yiterm-") else {
+        if !name.starts_with("yiterm-") {
             continue;
-        };
-        let Some((pid, _)) = rest.split_once('.') else {
+        }
+        if !name.ends_with(".log") {
             continue;
-        };
-        let Ok(pid) = pid.parse::<u32>() else {
+        }
+        if let Some(pid) = legacy_pid(&name)
+            && system.process(sysinfo::Pid::from_u32(pid)).is_some()
+        {
             continue;
-        };
-        if !name.ends_with(".log") || system.process(sysinfo::Pid::from_u32(pid)).is_some() {
+        }
+        if !is_daily_log(&name) && legacy_pid(&name).is_none() {
             continue;
         }
         let metadata = entry.metadata()?;
-        if metadata.is_file() {
-            files.push((metadata.modified()?, entry.path()));
+        let path = entry.path();
+        if metadata.is_file() && path != current {
+            files.push((metadata.modified()?, path));
         }
     }
     files.sort_by_key(|(time, _)| *time);
@@ -145,6 +197,93 @@ fn prune(directory: &Path, max_files: usize) -> Result<()> {
         std::fs::remove_file(path)?;
     }
     Ok(())
+}
+
+/// One formatted event is buffered before it enters the non-blocking worker.
+/// This lets the shared file writer hold its cross-process lock for the full
+/// record, rather than allowing two processes to interleave formatter writes.
+#[derive(Clone)]
+struct BufferedMakeWriter(NonBlocking);
+
+struct EventBuffer {
+    writer: NonBlocking,
+    bytes: Vec<u8>,
+}
+
+impl Write for EventBuffer {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        self.bytes.extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+impl Drop for EventBuffer {
+    fn drop(&mut self) {
+        if !self.bytes.is_empty() {
+            let _ = self.writer.write_all(&self.bytes);
+        }
+    }
+}
+
+impl<'a> MakeWriter<'a> for BufferedMakeWriter {
+    type Writer = EventBuffer;
+
+    fn make_writer(&'a self) -> Self::Writer {
+        EventBuffer {
+            writer: self.0.clone(),
+            bytes: Vec::new(),
+        }
+    }
+}
+
+#[derive(Clone)]
+struct SharedFileAppender {
+    directory: PathBuf,
+    thread_lock: Arc<Mutex<()>>,
+}
+
+impl SharedFileAppender {
+    fn new(directory: PathBuf) -> Result<Self> {
+        let path = current_log_path(&directory);
+        OpenOptions::new().create(true).append(true).open(path)?;
+        Ok(Self {
+            directory,
+            thread_lock: Arc::new(Mutex::new(())),
+        })
+    }
+
+    fn append_record(&self, bytes: &[u8]) -> io::Result<()> {
+        let _thread_lock = self
+            .thread_lock
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let path = current_log_path(&self.directory);
+        let mut file = OpenOptions::new().create(true).append(true).open(path)?;
+        file.lock()?;
+        let result = file.write_all(bytes);
+        let unlock = file.unlock();
+        result?;
+        unlock
+    }
+}
+
+impl Write for SharedFileAppender {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        self.append_record(bytes)?;
+        Ok(bytes.len())
+    }
+
+    fn write_all(&mut self, bytes: &[u8]) -> io::Result<()> {
+        self.append_record(bytes)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
 }
 pub fn init(path: Option<&Path>, override_filter: Option<&str>) -> Result<Logging> {
     let default_path = config_path()?;
@@ -162,9 +301,9 @@ pub fn init(path: Option<&Path>, override_filter: Option<&str>) -> Result<Loggin
             .unwrap_or(&config.filter),
     )
     .context("Invalid logging filter")?;
-    let directory = config
-        .directory
-        .clone()
+    let directory = std::env::var_os("YITERM_LOG_DIRECTORY")
+        .map(PathBuf::from)
+        .or_else(|| config.directory.clone())
         .map(Ok)
         .unwrap_or_else(default_directory)?;
     let directory = std::path::absolute(directory)?;
@@ -174,13 +313,9 @@ pub fn init(path: Option<&Path>, override_filter: Option<&str>) -> Result<Loggin
     let writer = if config.file {
         let result = (|| -> Result<_> {
             std::fs::create_dir_all(&directory)?;
+            let appender = SharedFileAppender::new(directory.clone())?;
             prune(&directory, config.max_files)?;
-            Ok(tracing_appender::rolling::RollingFileAppender::builder()
-                .rotation(tracing_appender::rolling::Rotation::DAILY)
-                .filename_prefix(format!("yiterm-{}", std::process::id()))
-                .filename_suffix("log")
-                .max_log_files(config.max_files)
-                .build(&directory)?)
+            Ok(appender)
         })();
         match result {
             Ok(appender) => {
@@ -203,7 +338,7 @@ pub fn init(path: Option<&Path>, override_filter: Option<&str>) -> Result<Loggin
     };
     let file = writer.map(|writer| {
         tracing_subscriber::fmt::layer()
-            .with_writer(writer)
+            .with_writer(BufferedMakeWriter(writer))
             .with_ansi(false)
             .event_format(ProcessFormat)
     });
@@ -223,7 +358,7 @@ pub fn init(path: Option<&Path>, override_filter: Option<&str>) -> Result<Loggin
         _guard: guard,
     })
 }
-pub fn open_directory(directory: &Path) -> Result<()> {
+pub fn open_current_file(directory: &Path) -> Result<()> {
     std::fs::create_dir_all(directory).context("Cannot create log directory")?;
     let program = if cfg!(target_os = "macos") {
         "open"
@@ -232,10 +367,16 @@ pub fn open_directory(directory: &Path) -> Result<()> {
     } else {
         "xdg-open"
     };
+    let path = current_log_path(directory);
+    OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+        .with_context(|| format!("Cannot open log file {}", path.display()))?;
     Command::new(program)
-        .arg(directory)
+        .arg(&path)
         .spawn()
-        .context("Cannot open log directory")?;
+        .context("Cannot open log file")?;
     Ok(())
 }
 
@@ -280,17 +421,42 @@ mod tests {
     #[test]
     fn retention_preserves_unrelated_files() {
         let dir = tempfile::tempdir().unwrap();
+        std::fs::write(current_log_path(dir.path()), "current").unwrap();
         for day in ["01", "02", "03"] {
-            std::fs::write(
-                dir.path()
-                    .join(format!("yiterm-4294967294.2026-10-{day}.log")),
-                "log",
-            )
-            .unwrap();
+            std::fs::write(dir.path().join(format!("yiterm-2026-10-{day}.log")), "log").unwrap();
         }
         std::fs::write(dir.path().join("keep.txt"), "keep").unwrap();
         prune(dir.path(), 2).unwrap();
-        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 2);
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 3);
         assert!(dir.path().join("keep.txt").exists());
+        assert!(current_log_path(dir.path()).exists());
+    }
+
+    #[test]
+    fn concurrent_writers_keep_complete_records_in_one_daily_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let writer = SharedFileAppender::new(dir.path().to_path_buf()).unwrap();
+        let mut threads = Vec::new();
+        for process in 0..4 {
+            let mut writer = writer.clone();
+            threads.push(std::thread::spawn(move || {
+                for record in 0..50 {
+                    let line = format!("pid={process} record={record}\n");
+                    writer.write_all(line.as_bytes()).unwrap();
+                }
+            }));
+        }
+        for thread in threads {
+            thread.join().unwrap();
+        }
+
+        let text = std::fs::read_to_string(current_log_path(dir.path())).unwrap();
+        let lines: Vec<_> = text.lines().collect();
+        assert_eq!(lines.len(), 200);
+        assert!(
+            lines
+                .iter()
+                .all(|line| line.starts_with("pid=") && line.contains(" record="))
+        );
     }
 }

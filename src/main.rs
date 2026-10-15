@@ -153,7 +153,16 @@ struct TerminalSession {
     size: Size,
 }
 impl TerminalSession {
+    #[cfg(test)]
     fn new(args: &Args, warning: Option<&str>) -> Result<Self> {
+        Self::new_with_log_directory(args, warning, None)
+    }
+
+    fn new_with_log_directory(
+        args: &Args,
+        warning: Option<&str>,
+        log_directory: Option<&std::path::Path>,
+    ) -> Result<Self> {
         tracing::trace!(target: "yiterm::mouse",
             "build={} transport=raw_vt",
             option_env!("YITERM_BUILD_REV").unwrap_or("local")
@@ -162,7 +171,8 @@ impl TerminalSession {
             session_kind = if args.ssh.is_some() { "ssh" } else { "local" },
             "Starting terminal session"
         );
-        let integration = ssh::Integration::new(&std::env::current_exe()?)?;
+        let integration =
+            ssh::Integration::new_with_log_directory(&std::env::current_exe()?, log_directory)?;
         #[cfg(windows)]
         let clipboard_requests = integration.listen_for_osc52()?;
         if let Some(host) = &args.ssh {
@@ -1217,7 +1227,11 @@ struct TerminalApp {
 
 impl TerminalApp {
     fn new(args: Args, logging: &logging::Logging) -> Result<Self> {
-        let session = TerminalSession::new(&args, logging.warning.as_deref())?;
+        let session = TerminalSession::new_with_log_directory(
+            &args,
+            logging.warning.as_deref(),
+            Some(&logging.directory),
+        )?;
         let path = args
             .config
             .clone()
@@ -1240,7 +1254,11 @@ impl TerminalApp {
     }
 
     fn new_tab(&mut self) {
-        match TerminalSession::new(&self.args, self.warning.as_deref()) {
+        match TerminalSession::new_with_log_directory(
+            &self.args,
+            self.warning.as_deref(),
+            Some(&self.log_directory),
+        ) {
             Ok(session) => {
                 self.tabs.push(TerminalTab::new(session));
                 self.select(self.tabs.len() - 1);
@@ -1254,7 +1272,11 @@ impl TerminalApp {
     }
 
     fn split_pane(&mut self, direction: SplitDirection) {
-        match TerminalSession::new(&self.args, self.warning.as_deref()) {
+        match TerminalSession::new_with_log_directory(
+            &self.args,
+            self.warning.as_deref(),
+            Some(&self.log_directory),
+        ) {
             Ok(session) => {
                 self.tabs[self.active].split(session, direction);
                 self.error = None;
@@ -1386,8 +1408,8 @@ impl eframe::App for TerminalApp {
                     }
                 });
                 ui.menu_button("Tools", |ui| {
-                    if ui.button("Open Log Directory").clicked() {
-                        if let Err(error) = logging::open_directory(&self.log_directory) {
+                    if ui.button("Open Log File").clicked() {
+                        if let Err(error) = logging::open_current_file(&self.log_directory) {
                             self.error = Some(format!("{error:#}"));
                         }
                         ui.close();
