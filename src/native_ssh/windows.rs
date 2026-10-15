@@ -434,7 +434,18 @@ impl Prompt for ConsolePrompt {
 }
 
 pub fn run(real_ssh: &Path, directory: &Path, args: Vec<OsString>) -> Result<i32> {
-    let _logging = crate::logging::init(None, None).ok();
+    let _logging = match crate::logging::init(None, None) {
+        Ok(logging) => {
+            if let Some(warning) = &logging.warning {
+                eprintln!("SSH diagnostic logging: {warning}");
+            }
+            Some(logging)
+        }
+        Err(error) => {
+            eprintln!("SSH diagnostic logging unavailable: {error:#}");
+            None
+        }
+    };
     tracing::info!("Built-in SSH wrapper started");
     let result = run_inner(real_ssh, directory, args);
     if let Err(error) = &result {

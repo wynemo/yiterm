@@ -19,6 +19,29 @@ fn logging_child() {
     tracing::trace!(target: "yiterm::mouse", "mouse-marker");
     tracing::trace!(target: "yiterm::test", "hidden-marker");
     tracing::error!(target: "yiterm::test", "error-marker");
+    if mode == "relay-parent" {
+        let mut children = Vec::new();
+        for _ in 0..4 {
+            let mut command = Command::new(std::env::current_exe().unwrap());
+            command
+                .args(["--exact", "logging_child", "--nocapture"])
+                .env("YITERM_TEST_LOG_DIRECTORY", &directory)
+                .env("YITERM_TEST_LOG_MODE", "file")
+                .envs(yiterm::logging::child_environment())
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped());
+            children.push(command.spawn().unwrap());
+        }
+        for child in children {
+            let output = child.wait_with_output().unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert!(output.stderr.is_empty());
+        }
+    }
     drop(logging);
 }
 
@@ -85,25 +108,19 @@ fn app_and_child_processes_share_one_log_file() {
     )
     .unwrap();
 
-    let mut children = Vec::new();
-    for _ in 0..4 {
-        let mut command = Command::new(std::env::current_exe().unwrap());
-        command
-            .args(["--exact", "logging_child", "--nocapture"])
-            .env("YITERM_TEST_LOG_DIRECTORY", directory.path())
-            .env("YITERM_TEST_LOG_MODE", "file")
-            .env_remove("YITERM_LOG");
-        children.push(command.spawn().unwrap());
-    }
-    for child in children {
-        let output = child.wait_with_output().unwrap();
-        assert!(
-            output.status.success(),
-            "{}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-        assert!(output.stderr.is_empty());
-    }
+    let output = Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", "logging_child", "--nocapture"])
+        .env("YITERM_TEST_LOG_DIRECTORY", directory.path())
+        .env("YITERM_TEST_LOG_MODE", "relay-parent")
+        .env_remove("YITERM_LOG")
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(output.stderr.is_empty());
 
     let files: Vec<_> = std::fs::read_dir(&logs)
         .unwrap()
@@ -112,12 +129,12 @@ fn app_and_child_processes_share_one_log_file() {
     assert_eq!(files.len(), 1);
     let text = std::fs::read_to_string(&files[0]).unwrap();
     let lines: Vec<_> = text.lines().collect();
-    assert_eq!(lines.len(), 16);
+    assert_eq!(lines.len(), 20);
     assert!(
         lines
             .iter()
             .all(|line| { line.starts_with("pid=") && line.matches("ThreadId(").count() == 1 })
     );
-    assert_eq!(text.matches("info-marker").count(), 4);
-    assert_eq!(text.matches("error-marker").count(), 4);
+    assert_eq!(text.matches("info-marker").count(), 5);
+    assert_eq!(text.matches("error-marker").count(), 5);
 }

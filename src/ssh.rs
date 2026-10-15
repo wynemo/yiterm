@@ -19,19 +19,9 @@ pub struct Integration {
     directory: tempfile::TempDir,
     real_ssh: Option<PathBuf>,
     pub real_scp: PathBuf,
-    #[cfg(windows)]
-    log_directory: Option<PathBuf>,
 }
 impl Integration {
     pub fn new(executable: &Path) -> Result<Self> {
-        Self::new_with_log_directory(executable, None)
-    }
-
-    pub fn new_with_log_directory(executable: &Path, log_directory: Option<&Path>) -> Result<Self> {
-        #[cfg(windows)]
-        let log_directory = log_directory.map(Path::to_path_buf);
-        #[cfg(not(windows))]
-        let _ = log_directory;
         // Keep Unix socket paths short, and all sockets/scripts user-private.
         #[cfg(unix)]
         let directory = tempfile::Builder::new()
@@ -67,8 +57,6 @@ impl Integration {
             directory,
             real_ssh,
             real_scp,
-            #[cfg(windows)]
-            log_directory,
         })
     }
     pub fn direct(&self, host: &str) -> Result<portable_pty::CommandBuilder> {
@@ -81,10 +69,6 @@ impl Integration {
         let mut command = portable_pty::CommandBuilder::new(executable);
         command.args(["-tt", "--", host]);
         self.configure(&mut command)?;
-        #[cfg(windows)]
-        if let Some(directory) = &self.log_directory {
-            command.env("YITERM_LOG_DIRECTORY", directory);
-        }
         Ok(command)
     }
     pub fn configure(&self, command: &mut portable_pty::CommandBuilder) -> Result<()> {
@@ -95,6 +79,10 @@ impl Integration {
         ));
         command.env("PATH", std::env::join_paths(paths)?);
         command.env("YITERM_SSH_DIRECTORY", self.directory.path());
+        #[cfg(windows)]
+        for (key, value) in crate::logging::child_environment() {
+            command.env(key, value);
+        }
         if let Some(real_ssh) = &self.real_ssh {
             command.env("YITERM_REAL_SSH", real_ssh);
         }

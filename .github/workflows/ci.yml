@@ -51,6 +51,11 @@ jobs:
           YITERM_BUILD_REV: ${{ github.sha }}
         run: cargo build --locked --release --target ${{ matrix.target }}
 
+      - name: Test logging and child process forwarding
+        env:
+          YITERM_BUILD_REV: ${{ github.sha }}
+        run: cargo test --locked --release --target ${{ matrix.target }} --test logging
+
       - uses: actions/setup-python@v7
         with:
           python-version: '3.13'
