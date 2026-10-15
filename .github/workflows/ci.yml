@@ -68,8 +68,10 @@ jobs:
           YITERM_BUILD_REV: ${{ github.sha }}
         run: cargo test --locked --release --target ${{ matrix.target }} --test logging
 
-      - name: Test profiling aggregates
-        run: cargo test --locked --release --target ${{ matrix.target }} --bin yiterm profiling::tests
+      - name: Test profiling aggregates and idle repaint regression
+        run: |
+          cargo test --locked --release --target ${{ matrix.target }} --bin yiterm profiling::tests
+          cargo test --locked --release --target ${{ matrix.target }} --bin yiterm repaint_tests
 
       - uses: actions/setup-python@v7
         with:

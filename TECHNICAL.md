@@ -121,7 +121,7 @@ theme = "dark" # 或 "light"
 
 ## 空闲刷新与 CPU 占用
 
-PTY 收到输出时会唤醒界面；空闲时每 250 毫秒检查一次进程退出、异步粘贴和 Windows 剪贴板请求，不再固定以约 60 FPS 重绘。光标闪烁按 500 毫秒的边界安排刷新。后台标签页仍会处理输出。
+PTY 收到输出时会唤醒界面；空闲时每 250 毫秒检查一次进程退出、异步粘贴和 Windows 剪贴板请求，不再固定以约 60 FPS 重绘。光标闪烁按 500 毫秒的边界安排刷新。后台标签页仍会处理输出。窗口标题只在内容变化时发送更新，避免标题命令触发持续重绘。
 
 Windows 性能验证：使用 Release 构建，启动后等待提示符稳定，在任务管理器观察空闲 CPU，并检查持续输出、后台标签页、光标闪烁、粘贴和关闭 shell 的响应。实际占用取决于设备和图形驱动，需要在 Windows 上测量。
 
@@ -140,6 +140,6 @@ $env:YITERM_PROFILE = "1"
 
 启动日志包含构建版本、OpenGL vendor、renderer 和 version；每约 5 秒汇总 UI update 次数、update/会话轮询耗时、上一帧框架耗时（包括渲染，不包括等待垂直同步）、PTY 读取次数和字节数、窗口焦点以及 egui 报告的重绘请求调用位置。耗时是墙钟时间，不等于线程 CPU 时间；框架耗时包含 update，不能与 update 耗时相加。`updates_per_s` 是 update 调用频率，不是显示器实际呈现帧率。日志不记录终端内容、按键或剪贴板正文。
 
-`process_cpu_core_percent` 仅统计 YiTerm 当前进程，100% 表示使用一个逻辑核，不是任务管理器的进程组百分比；与系统总 CPU 百分比比较时需考虑逻辑核数量。采样依赖 UI update：若图形调用长时间卡住，日志可能延迟，此时需要外部采样。
+`process_cpu_core_percent` 通过两次采样的进程累计 CPU 毫秒差除以墙钟时间计算，仅统计 YiTerm 当前进程，100% 表示使用一个逻辑核，不是任务管理器的进程组百分比；与系统总 CPU 百分比比较时需考虑逻辑核数量。采样依赖 UI update：若图形调用长时间卡住，日志可能延迟，此时需要外部采样。
 
 Windows CI 额外保存 `profiling-windows-<commit>` artifact，内含同次优化构建的 `yiterm.exe` 和 `yiterm.pdb`。使用这一对文件进行诊断，不要混用其他版本的符号。通过 WPR 录制约 30 秒 CPU Usage，在 WPA 的 **CPU Usage (Sampled)** 中按 PID、线程和调用栈展开；配置该 PDB 所在目录和微软符号服务器后分析热点。可对比正常窗口/最小化、光标闪烁开/关，以及远程桌面/本机桌面。Windows 构建和采样在 Windows runner 或 Windows 设备进行，macOS 不交叉编译。

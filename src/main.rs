@@ -1226,8 +1226,18 @@ impl TerminalTab {
     }
 }
 
+// Sending even an unchanged viewport title requests another egui repaint.
+fn update_window_title(ctx: &egui::Context, previous: &mut String, title: &str) {
+    let title = format!("yiterm — {title}");
+    if *previous != title {
+        ctx.send_viewport_cmd(egui::ViewportCommand::Title(title.clone()));
+        *previous = title;
+    }
+}
+
 struct TerminalApp {
     profile: Option<profiling::Profile>,
+    window_title: String,
     tabs: Vec<TerminalTab>,
     active: usize,
     args: Args,
@@ -1252,6 +1262,7 @@ impl TerminalApp {
         let cursor_settings = settings::load(&path)?;
         Ok(Self {
             profile: profiling::Profile::new(),
+            window_title: String::new(),
             tabs: vec![TerminalTab::new(session)],
             active: 0,
             args,
@@ -1478,10 +1489,11 @@ impl eframe::App for TerminalApp {
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
             return;
         }
-        ctx.send_viewport_cmd(egui::ViewportCommand::Title(format!(
-            "yiterm — {}",
-            self.tabs[self.active].focused().title
-        )));
+        update_window_title(
+            ctx,
+            &mut self.window_title,
+            &self.tabs[self.active].focused().title,
+        );
         if let Some(direction) = split {
             self.split_pane(direction);
         }
@@ -2679,6 +2691,7 @@ mod tests {
         let second = TerminalSession::new(&args, None).unwrap();
         let mut app = TerminalApp {
             profile: None,
+            window_title: String::new(),
             tabs: vec![TerminalTab::new(first), TerminalTab::new(second)],
             active: 0,
             args,
@@ -2918,5 +2931,35 @@ mod tests {
             key_bytes(Key::Insert, egui::Modifiers::NONE, false),
             Some(b"\x1b[2~".to_vec())
         );
+    }
+}
+
+#[cfg(test)]
+mod repaint_tests {
+    use super::*;
+
+    #[test]
+    fn unchanged_title_does_not_enqueue_another_viewport_command() {
+        let ctx = egui::Context::default();
+        let mut previous = String::new();
+        for (title, expected) in [
+            ("Terminal", 1),
+            ("Terminal", 0),
+            ("remote", 1),
+            ("remote", 0),
+        ] {
+            let output = ctx.run(Default::default(), |ctx| {
+                update_window_title(ctx, &mut previous, title);
+            });
+            let commands = &output.viewport_output[&egui::ViewportId::ROOT].commands;
+            assert_eq!(
+                commands
+                    .iter()
+                    .filter(|cmd| matches!(cmd, egui::ViewportCommand::Title(_)))
+                    .count(),
+                expected
+            );
+        }
+        assert_eq!(previous, "yiterm — remote");
     }
 }

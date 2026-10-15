@@ -27,6 +27,7 @@ pub fn pty_read(bytes: usize) {
 pub struct Profile {
     since: Instant,
     system: System,
+    cpu_baseline: Option<(Instant, u64)>,
     frames: u64,
     update_ms: f64,
     poll_ms: f64,
@@ -48,6 +49,7 @@ impl Profile {
         let mut profile = Self {
             since: Instant::now(),
             system: System::new(),
+            cpu_baseline: None,
             frames: 0,
             update_ms: 0.0,
             poll_ms: 0.0,
@@ -64,12 +66,19 @@ impl Profile {
         profile
     }
 
-    fn refresh_cpu(&mut self) {
+    fn refresh_cpu(&mut self) -> Option<f64> {
         self.system.refresh_processes_specifics(
             ProcessesToUpdate::Some(&[Pid::from_u32(std::process::id())]),
             true,
             ProcessRefreshKind::nothing().with_cpu().without_tasks(),
         );
+        let now = Instant::now();
+        let total_ms = self
+            .system
+            .process(Pid::from_u32(std::process::id()))?
+            .accumulated_cpu_time();
+        let previous = self.cpu_baseline.replace((now, total_ms));
+        previous.and_then(|(at, ms)| cpu_percent(ms, total_ms, now.duration_since(at)))
     }
 
     pub fn frame(
@@ -95,11 +104,7 @@ impl Profile {
         if elapsed < 5.0 {
             return;
         }
-        self.refresh_cpu();
-        let cpu = self
-            .system
-            .process(Pid::from_u32(std::process::id()))
-            .map(|p| p.cpu_usage());
+        let cpu = self.refresh_cpu();
         let logical_cpus = std::thread::available_parallelism().map_or(1, |n| n.get());
         tracing::info!(target: "yiterm::profile",
             interval_s = elapsed, frames = self.frames, updates_per_s = self.frames as f64 / elapsed,
@@ -122,9 +127,30 @@ impl Profile {
     }
 }
 
+fn cpu_percent(previous_ms: u64, current_ms: u64, elapsed: Duration) -> Option<f64> {
+    let delta = current_ms.checked_sub(previous_ms)?;
+    let seconds = elapsed.as_secs_f64();
+    (seconds > 0.0).then(|| delta as f64 / (seconds * 10.0))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cpu_percentage_uses_interval_deltas_and_supports_multiple_cores() {
+        assert_eq!(
+            cpu_percent(70000, 75000, Duration::from_secs(5)),
+            Some(100.0)
+        );
+        assert_eq!(
+            cpu_percent(70000, 90000, Duration::from_secs(5)),
+            Some(400.0)
+        );
+        assert_eq!(cpu_percent(70000, 70000, Duration::from_secs(5)), Some(0.0));
+        assert_eq!(cpu_percent(70000, 1, Duration::from_secs(5)), None);
+        assert_eq!(cpu_percent(70000, 75000, Duration::ZERO), None);
+    }
 
     #[test]
     fn profiling_emits_aggregates_only_at_interval_and_resets() {
