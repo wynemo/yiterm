@@ -248,12 +248,14 @@ struct SharedFileAppender {
 
 impl SharedFileAppender {
     fn new(directory: PathBuf) -> Result<Self> {
-        let path = current_log_path(&directory);
-        OpenOptions::new().create(true).append(true).open(path)?;
-        Ok(Self {
+        let appender = Self {
             directory,
             thread_lock: Arc::new(Mutex::new(())),
-        })
+        };
+        // Validate locking synchronously so failures reach the status bar,
+        // rather than disappearing in the background logging worker.
+        appender.append_record(b"")?;
+        Ok(appender)
     }
 
     fn append_record(&self, bytes: &[u8]) -> io::Result<()> {
@@ -262,7 +264,12 @@ impl SharedFileAppender {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let path = current_log_path(&self.directory);
-        let mut file = OpenOptions::new().create(true).append(true).open(path)?;
+        // Windows cannot lock an append-only handle; read access is required.
+        let mut file = OpenOptions::new()
+            .create(true)
+            .read(true)
+            .append(true)
+            .open(path)?;
         file.lock()?;
         let result = file.write_all(bytes);
         let unlock = file.unlock();
