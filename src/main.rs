@@ -1,6 +1,7 @@
 #![cfg_attr(windows, windows_subsystem = "windows")]
 
 use yiterm::settings::{self, CursorSettings, CursorShape};
+use yiterm::theme::ThemeMode;
 use yiterm::{logging, mouse, paste, ssh};
 
 #[cfg(windows)]
@@ -339,34 +340,16 @@ impl Drop for TerminalSession {
     }
 }
 
-fn color(color: Color, foreground: bool) -> Color32 {
-    const PALETTE: [Color32; 16] = [
-        Color32::from_rgb(24, 26, 32),
-        Color32::from_rgb(224, 108, 117),
-        Color32::from_rgb(152, 195, 121),
-        Color32::from_rgb(229, 192, 123),
-        Color32::from_rgb(97, 175, 239),
-        Color32::from_rgb(198, 120, 221),
-        Color32::from_rgb(86, 182, 194),
-        Color32::from_rgb(171, 178, 191),
-        Color32::from_rgb(92, 99, 112),
-        Color32::from_rgb(255, 128, 139),
-        Color32::from_rgb(178, 219, 147),
-        Color32::from_rgb(255, 218, 149),
-        Color32::from_rgb(123, 201, 255),
-        Color32::from_rgb(224, 146, 247),
-        Color32::from_rgb(112, 208, 220),
-        Color32::from_rgb(230, 230, 230),
-    ];
+fn color(color: Color, foreground: bool, theme: ThemeMode) -> Color32 {
     let index = match color {
         Color::Spec(rgb) => return Color32::from_rgb(rgb.r, rgb.g, rgb.b),
-        Color::Named(NamedColor::Foreground) => return PALETTE[7],
-        Color::Named(NamedColor::Background) => return PALETTE[0],
+        Color::Named(NamedColor::Foreground) => return theme.foreground(),
+        Color::Named(NamedColor::Background) => return theme.background(),
         Color::Named(named) => named as usize,
         Color::Indexed(index) => index as usize,
     };
     if index < 16 {
-        PALETTE[index]
+        theme.palette(index)
     } else if index < 232 {
         let n = index - 16;
         let level = |n| if n == 0 { 0 } else { 55 + n as u8 * 40 };
@@ -374,9 +357,9 @@ fn color(color: Color, foreground: bool) -> Color32 {
     } else if index < 256 {
         Color32::from_gray(8 + (index - 232) as u8 * 10)
     } else if foreground {
-        PALETTE[7]
+        theme.foreground()
     } else {
-        PALETTE[0]
+        theme.background()
     }
 }
 
@@ -440,6 +423,7 @@ impl TerminalSession {
     }
 
     fn show(&mut self, ctx: &egui::Context, ui: &mut egui::Ui, focused: bool) {
+        let theme = ThemeMode::from_context(ctx);
         // Keep the cursor visible while typing and restart its blink on focus.
         if focused
             && ctx.input(|input| {
@@ -510,11 +494,11 @@ impl TerminalSession {
                 continue;
             }
             let bg = if selection.is_some_and(|range| range.contains(indexed.point)) {
-                Color32::from_rgb(65, 90, 125)
+                theme.selection()
             } else if indexed.cell.flags.contains(Flags::INVERSE) {
-                color(indexed.cell.fg, true)
+                color(indexed.cell.fg, true, theme)
             } else {
-                color(indexed.cell.bg, false)
+                color(indexed.cell.bg, false, theme)
             };
             ui.painter().rect_filled(
                 terminal_cell_rect(rect.min, cell, indexed.point.column.0, row as usize),
@@ -530,11 +514,11 @@ impl TerminalSession {
             let pos =
                 rect.min + Vec2::new(indexed.point.column.0 as f32 * cell.x, row as f32 * cell.y);
             let fg = if selection.is_some_and(|range| range.contains(indexed.point)) {
-                Color32::WHITE
+                theme.selection_foreground()
             } else if indexed.cell.flags.contains(Flags::INVERSE) {
-                color(indexed.cell.bg, false)
+                color(indexed.cell.bg, false, theme)
             } else {
-                color(indexed.cell.fg, true)
+                color(indexed.cell.fg, true, theme)
             };
             if !indexed.cell.flags.intersects(
                 Flags::HIDDEN | Flags::WIDE_CHAR_SPACER | Flags::LEADING_WIDE_CHAR_SPACER,
@@ -586,7 +570,7 @@ impl TerminalSession {
                 }
                 CursorShape::Beam => Rect::from_min_size(rect.min, Vec2::new(2.0, rect.height())),
             };
-            ui.painter().rect_filled(shape, 0.0, Color32::LIGHT_GRAY);
+            ui.painter().rect_filled(shape, 0.0, theme.cursor());
             if self.cursor_settings.shape == CursorShape::Block {
                 let cell_content = &self.term.grid()[point];
                 if !cell_content.flags.contains(Flags::HIDDEN) {
@@ -594,7 +578,7 @@ impl TerminalSession {
                     if let Some(extra) = cell_content.zerowidth() {
                         text.extend(extra);
                     }
-                    let fg = Color32::from_rgb(24, 26, 32);
+                    let fg = theme.background();
                     let galley = ui.painter().layout_no_wrap(text, font.clone(), fg);
                     let text_pos = pos + Vec2::new(0.0, (cell.y - galley.size().y) / 2.0);
                     ui.painter().galley(text_pos, galley, fg);
@@ -795,15 +779,17 @@ impl TerminalSession {
             }
         }
         if !self.ime_preedit.is_empty() {
-            let galley =
-                ui.painter()
-                    .layout_no_wrap(self.ime_preedit.clone(), font.clone(), Color32::WHITE);
+            let galley = ui.painter().layout_no_wrap(
+                self.ime_preedit.clone(),
+                font.clone(),
+                theme.foreground(),
+            );
             ui.painter().rect_filled(
                 Rect::from_min_size(cursor_pos, galley.size()),
                 0.0,
-                Color32::from_rgb(24, 26, 32),
+                theme.background(),
             );
-            ui.painter().galley(cursor_pos, galley, Color32::WHITE);
+            ui.painter().galley(cursor_pos, galley, theme.foreground());
         }
     }
 }
@@ -922,9 +908,9 @@ impl PaneLayout {
                     divider,
                     0.0,
                     if response.hovered() || response.dragged() {
-                        Color32::GRAY
+                        ThemeMode::from_context(ui.ctx()).accent()
                     } else {
-                        Color32::from_gray(55)
+                        ThemeMode::from_context(ui.ctx()).border()
                     },
                 );
                 let (first_rect, second_rect) = if horizontal {
@@ -1082,9 +1068,9 @@ impl TerminalTab {
                 (
                     1.0,
                     if index == self.active {
-                        Color32::from_rgb(97, 175, 239)
+                        ThemeMode::from_context(ui.ctx()).accent()
                     } else {
-                        Color32::from_gray(55)
+                        ThemeMode::from_context(ui.ctx()).border()
                     },
                 ),
                 egui::StrokeKind::Inside,
@@ -1108,6 +1094,7 @@ struct TerminalApp {
     about_open: bool,
     about_licenses: bool,
     settings_open: bool,
+    theme: ThemeMode,
     cursor_settings: CursorSettings,
 }
 
@@ -1130,6 +1117,7 @@ impl TerminalApp {
             about_open: false,
             about_licenses: false,
             settings_open: false,
+            theme: settings::load_theme(&path)?,
             cursor_settings,
         })
     }
@@ -1215,6 +1203,7 @@ fn reserve_terminal_keyboard(ctx: &egui::Context) {
 
 impl eframe::App for TerminalApp {
     fn update(&mut self, ctx: &egui::Context, _: &mut eframe::Frame) {
+        ctx.set_visuals(self.theme.visuals());
         if !self.settings_open {
             reserve_terminal_keyboard(ctx);
         }
@@ -1311,7 +1300,7 @@ impl eframe::App for TerminalApp {
                     });
                 });
             if let Some(error) = &self.error {
-                ui.colored_label(Color32::LIGHT_RED, error);
+                ui.colored_label(self.theme.palette(1), error);
             }
         });
         if let Some(index) = selected {
@@ -1346,19 +1335,20 @@ impl eframe::App for TerminalApp {
             }
         }
         if self.settings_open {
-            let before = self.cursor_settings;
-            let modal = show_settings(ctx, &mut self.cursor_settings);
+            let before = (self.cursor_settings, self.theme);
+            let modal = show_settings(ctx, &mut self.cursor_settings, &mut self.theme);
             if modal.inner || modal.should_close() {
                 self.settings_open = false;
             }
-            if before != self.cursor_settings {
+            if before != (self.cursor_settings, self.theme) {
+                ctx.set_visuals(self.theme.visuals());
                 let result = self
                     .args
                     .config
                     .clone()
                     .map(Ok)
                     .unwrap_or_else(logging::config_path)
-                    .and_then(|path| settings::save(&path, self.cursor_settings));
+                    .and_then(|path| settings::save_all(&path, self.cursor_settings, self.theme));
                 if let Err(error) = result {
                     self.error = Some(format!("Cannot save settings: {error:#}"));
                 }
@@ -1391,7 +1381,7 @@ impl eframe::App for TerminalApp {
         });
         let mut pane_split = None;
         egui::CentralPanel::default()
-            .frame(egui::Frame::NONE.fill(Color32::from_rgb(24, 26, 32)))
+            .frame(egui::Frame::NONE.fill(self.theme.background()))
             .show(ctx, |ui| {
                 pane_split = self.tabs[self.active].show(ctx, ui);
             });
@@ -1410,10 +1400,21 @@ impl eframe::App for TerminalApp {
     }
 }
 
-fn show_settings(ctx: &egui::Context, settings: &mut CursorSettings) -> egui::ModalResponse<bool> {
+fn show_settings(
+    ctx: &egui::Context,
+    settings: &mut CursorSettings,
+    theme: &mut ThemeMode,
+) -> egui::ModalResponse<bool> {
     egui::Modal::new(egui::Id::new("settings")).show(ctx, |ui| {
         ui.set_width(420.0);
         ui.heading("Settings");
+        ui.add_space(18.0);
+        ui.weak("APPEARANCE");
+        ui.horizontal(|ui| {
+            ui.label("Theme");
+            ui.selectable_value(theme, ThemeMode::Dark, "Dark");
+            ui.selectable_value(theme, ThemeMode::Light, "Light");
+        });
         ui.add_space(18.0);
         ui.weak("CURSOR");
         ui.add_space(6.0);
@@ -1517,13 +1518,13 @@ fn show_about(ctx: &egui::Context, licenses: &mut bool) -> egui::ModalResponse<b
             ui.add_space(18.0);
             let (rect, _) = ui.allocate_exact_size(Vec2::splat(72.0), egui::Sense::hover());
             ui.painter()
-                .rect_filled(rect, 18.0, Color32::from_rgb(40, 55, 75));
+                .rect_filled(rect, 18.0, ThemeMode::from_context(ctx).selection());
             ui.painter().text(
                 rect.center(),
                 egui::Align2::CENTER_CENTER,
                 ">_",
                 FontId::monospace(30.0),
-                Color32::from_rgb(97, 175, 239),
+                ThemeMode::from_context(ui.ctx()).accent(),
             );
             ui.add_space(12.0);
             ui.label(egui::RichText::new("YiTerm").size(28.0).strong());
@@ -1804,40 +1805,82 @@ mod tests {
     use super::*;
 
     #[test]
-    fn settings_dialog_keeps_controls_inside_window() {
-        let ctx = egui::Context::default();
-        let mut settings = CursorSettings::default();
-        for frame in 0..3 {
-            let screen = Rect::from_min_size(egui::Pos2::ZERO, Vec2::new(710.0, 650.0));
-            let mut dialog = Rect::NOTHING;
-            let output = ctx.run(
-                egui::RawInput {
-                    screen_rect: Some(screen),
-                    ..Default::default()
-                },
-                |ctx| {
-                    dialog = show_settings(ctx, &mut settings).response.rect;
-                },
+    fn theme_colors_preserve_explicit_terminal_colors() {
+        use alacritty_terminal::vte::ansi::Rgb;
+        let rgb = Color::Spec(Rgb {
+            r: 12,
+            g: 34,
+            b: 56,
+        });
+        for theme in [ThemeMode::Dark, ThemeMode::Light] {
+            assert_eq!(
+                color(Color::Named(NamedColor::Background), false, theme),
+                theme.background()
             );
-            if frame == 0 {
-                continue;
-            }
-            assert!(screen.contains_rect(dialog));
-            for text in ["Settings", "Cursor Style", "Cursor Blinking", "Done"] {
-                let bounds = output
-                    .shapes
-                    .iter()
-                    .find_map(|shape| match &shape.shape {
-                        egui::Shape::Text(shape) if shape.galley.text() == text => {
-                            Some(Rect::from_min_size(shape.pos, shape.galley.size()))
-                        }
-                        _ => None,
-                    })
-                    .unwrap_or_else(|| panic!("Missing settings text: {text}"));
-                assert!(
-                    dialog.contains_rect(bounds),
-                    "{text}: {bounds:?} outside {dialog:?}"
+            assert_eq!(
+                color(Color::Named(NamedColor::Foreground), true, theme),
+                theme.foreground()
+            );
+            assert_eq!(color(rgb, true, theme), Color32::from_rgb(12, 34, 56));
+            for index in 16..=255 {
+                assert_eq!(
+                    color(Color::Indexed(index), true, theme),
+                    color(Color::Indexed(index), true, ThemeMode::Dark)
                 );
+            }
+        }
+        assert_ne!(
+            color(Color::Indexed(1), true, ThemeMode::Dark),
+            color(Color::Indexed(1), true, ThemeMode::Light)
+        );
+    }
+
+    #[test]
+    fn settings_dialog_keeps_controls_inside_window() {
+        for mut theme in [ThemeMode::Dark, ThemeMode::Light] {
+            let ctx = egui::Context::default();
+            ctx.set_visuals(theme.visuals());
+            let mut settings = CursorSettings::default();
+            for frame in 0..3 {
+                let screen = Rect::from_min_size(egui::Pos2::ZERO, Vec2::new(710.0, 650.0));
+                let mut dialog = Rect::NOTHING;
+                let output = ctx.run(
+                    egui::RawInput {
+                        screen_rect: Some(screen),
+                        ..Default::default()
+                    },
+                    |ctx| {
+                        dialog = show_settings(ctx, &mut settings, &mut theme).response.rect;
+                    },
+                );
+                if frame == 0 {
+                    continue;
+                }
+                assert!(screen.contains_rect(dialog));
+                for text in [
+                    "Settings",
+                    "Theme",
+                    "Dark",
+                    "Light",
+                    "Cursor Style",
+                    "Cursor Blinking",
+                    "Done",
+                ] {
+                    let bounds = output
+                        .shapes
+                        .iter()
+                        .find_map(|shape| match &shape.shape {
+                            egui::Shape::Text(shape) if shape.galley.text() == text => {
+                                Some(Rect::from_min_size(shape.pos, shape.galley.size()))
+                            }
+                            _ => None,
+                        })
+                        .unwrap_or_else(|| panic!("Missing settings text: {text}"));
+                    assert!(
+                        dialog.contains_rect(bounds),
+                        "{text}: {bounds:?} outside {dialog:?}"
+                    );
+                }
             }
         }
     }
@@ -2411,6 +2454,7 @@ mod tests {
             about_open: false,
             about_licenses: false,
             settings_open: false,
+            theme: ThemeMode::Dark,
             cursor_settings: CursorSettings::default(),
         };
         // Set different titles through each real PTY; the background session

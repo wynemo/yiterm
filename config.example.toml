@@ -11,3 +11,7 @@ max_files = 14
 # block / underline / beam
 shape = "block"
 blinking = true
+
+[appearance]
+# dark / light
+theme = "dark"
