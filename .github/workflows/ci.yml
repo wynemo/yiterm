@@ -49,12 +49,27 @@ jobs:
       - name: Build release
         env:
           YITERM_BUILD_REV: ${{ github.sha }}
+          CARGO_PROFILE_RELEASE_DEBUG: "1"
         run: cargo build --locked --release --target ${{ matrix.target }}
+
+      - name: Upload Windows profiling symbols and matching executable
+        if: runner.os == 'Windows'
+        uses: actions/upload-artifact@v7
+        with:
+          name: profiling-windows-${{ github.sha }}
+          path: |
+            target/${{ matrix.target }}/release/yiterm.exe
+            target/${{ matrix.target }}/release/yiterm.pdb
+          if-no-files-found: error
+          retention-days: 30
 
       - name: Test logging and child process forwarding
         env:
           YITERM_BUILD_REV: ${{ github.sha }}
         run: cargo test --locked --release --target ${{ matrix.target }} --test logging
+
+      - name: Test profiling aggregates
+        run: cargo test --locked --release --target ${{ matrix.target }} --bin yiterm profiling::tests
 
       - uses: actions/setup-python@v7
         with:

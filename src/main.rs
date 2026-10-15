@@ -1,5 +1,7 @@
 #![cfg_attr(windows, windows_subsystem = "windows")]
 
+mod profiling;
+
 use yiterm::settings::{self, CursorSettings, CursorShape};
 use yiterm::theme::ThemeMode;
 use yiterm::{logging, mouse, paste, ssh};
@@ -24,7 +26,7 @@ use portable_pty::CommandBuilder;
 use portable_pty::{MasterPty, PtySize};
 use std::{
     io::{Read, Write},
-    sync::mpsc,
+    sync::{Arc, OnceLock, mpsc},
     time::{Duration, Instant},
 };
 
@@ -133,6 +135,7 @@ struct TerminalSession {
     mouse_modes: mouse::MouseModes,
     mouse_wheel: mouse::Wheel,
     output: mpsc::Receiver<Vec<u8>>,
+    repaint: Arc<OnceLock<egui::Context>>,
     events: mpsc::Receiver<Event>,
     writer: Box<dyn Write + Send>,
     master: Box<dyn MasterPty + Send>,
@@ -197,6 +200,8 @@ impl TerminalSession {
         let mut reader = pair.master.try_clone_reader()?;
         let writer = pair.master.take_writer()?;
         let (tx, output) = mpsc::sync_channel(64);
+        let repaint = Arc::new(OnceLock::<egui::Context>::new());
+        let output_repaint = repaint.clone();
         std::thread::spawn(move || {
             let mut buffer = [0; 16384];
             loop {
@@ -210,8 +215,12 @@ impl TerminalSession {
                         break;
                     }
                     Ok(n) => {
+                        profiling::pty_read(n);
                         if tx.send(buffer[..n].to_vec()).is_err() {
                             break;
+                        }
+                        if let Some(ctx) = output_repaint.get() {
+                            ctx.request_repaint();
                         }
                     }
                 }
@@ -231,6 +240,7 @@ impl TerminalSession {
             mouse_modes: mouse::MouseModes::default(),
             mouse_wheel: mouse::Wheel::default(),
             output,
+            repaint,
             events,
             writer,
             master: pair.master,
@@ -420,7 +430,7 @@ fn color(color: Color, foreground: bool, theme: ThemeMode) -> Color32 {
 
 impl TerminalSession {
     fn poll(&mut self) -> bool {
-        for _ in 0..128 {
+        for batch in 0..128 {
             let Ok(bytes) = self.output.try_recv() else {
                 break;
             };
@@ -434,6 +444,12 @@ impl TerminalSession {
                 tracing::trace!(target: "yiterm::mouse", "state {:?}", self.term.mode());
             }
             self.cursor_blink_started = Instant::now();
+            // Continue draining bounded batches even if the producer has stopped.
+            if batch == 127 {
+                if let Some(ctx) = self.repaint.get() {
+                    ctx.request_repaint();
+                }
+            }
         }
         #[cfg(windows)]
         while let Ok(sequence) = self.clipboard_requests.try_recv() {
@@ -663,6 +679,15 @@ impl TerminalSession {
                     );
                 }
             }
+        }
+        if focused
+            && offset == 0
+            && self.term.mode().contains(TermMode::SHOW_CURSOR)
+            && self.cursor_settings.blinking
+            && ctx.input(|input| input.focused)
+        {
+            let elapsed = self.cursor_blink_started.elapsed().as_millis();
+            ctx.request_repaint_after(Duration::from_millis(500 - (elapsed % 500) as u64));
         }
         let blink_visible = !ctx.input(|input| input.focused)
             || !self.cursor_settings.blinking
@@ -1202,6 +1227,7 @@ impl TerminalTab {
 }
 
 struct TerminalApp {
+    profile: Option<profiling::Profile>,
     tabs: Vec<TerminalTab>,
     active: usize,
     args: Args,
@@ -1225,6 +1251,7 @@ impl TerminalApp {
             .unwrap_or_else(logging::config_path)?;
         let cursor_settings = settings::load(&path)?;
         Ok(Self {
+            profile: profiling::Profile::new(),
             tabs: vec![TerminalTab::new(session)],
             active: 0,
             args,
@@ -1320,17 +1347,25 @@ fn reserve_terminal_keyboard(ctx: &egui::Context) {
 
 impl eframe::App for TerminalApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        let profile_start = self.profile.as_ref().map(|_| Instant::now());
         ctx.set_visuals(self.theme.visuals());
         if !self.settings_open {
             reserve_terminal_keyboard(ctx);
         }
+        let poll_start = self.profile.as_ref().map(|_| Instant::now());
         // Drain every PTY, including background tabs, so output and paste results
         // cannot block and terminal queries are answered while another tab is active.
+        for tab in &self.tabs {
+            for pane in &tab.panes {
+                pane.repaint.get_or_init(|| ctx.clone());
+            }
+        }
         for index in (0..self.tabs.len()).rev() {
             if !self.tabs[index].poll() {
                 self.close_tab(index);
             }
         }
+        let profile_poll = poll_start.map(|start| start.elapsed());
         #[cfg(windows)]
         let clipboard_owner = windows_clipboard_owner(_frame).map_err(|error| format!("{error:#}"));
         for tab in &mut self.tabs {
@@ -1523,7 +1558,14 @@ impl eframe::App for TerminalApp {
                 ctx.send_viewport_cmd(egui::ViewportCommand::Close);
             }
         }
-        ctx.request_repaint_after(Duration::from_millis(16));
+        // PTY output wakes the UI directly. Keep a low-frequency fallback for
+        // child exit, asynchronous paste results and Windows clipboard IPC.
+        ctx.request_repaint_after(Duration::from_millis(250));
+        if let (Some(profile), Some(start), Some(poll)) =
+            (&mut self.profile, profile_start, profile_poll)
+        {
+            profile.frame(ctx, start.elapsed(), poll, _frame.info().cpu_usage);
+        }
     }
 }
 
@@ -1860,6 +1902,19 @@ fn run(args: Args, logging: &logging::Logging) -> Result<()> {
             ..Default::default()
         },
         Box::new(move |cc| {
+            if profiling::enabled() {
+                if let Some(gl) = &cc.gl {
+                    use eframe::glow::HasContext;
+                    // eframe has made this GL context current for app creation.
+                    unsafe {
+                        tracing::info!(target: "yiterm::profile",
+                            vendor = %gl.get_parameter_string(eframe::glow::VENDOR),
+                            renderer = %gl.get_parameter_string(eframe::glow::RENDERER),
+                            version = %gl.get_parameter_string(eframe::glow::VERSION),
+                            "OpenGL renderer");
+                    }
+                }
+            }
             configure_fonts(&cc.egui_ctx);
             Ok(Box::new(app))
         }),
@@ -2623,6 +2678,7 @@ mod tests {
         let first = TerminalSession::new(&args, None).unwrap();
         let second = TerminalSession::new(&args, None).unwrap();
         let mut app = TerminalApp {
+            profile: None,
             tabs: vec![TerminalTab::new(first), TerminalTab::new(second)],
             active: 0,
             args,
