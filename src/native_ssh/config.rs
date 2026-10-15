@@ -195,9 +195,9 @@ impl Config {
             let mut result = Vec::new();
             if let Some(entries) = values.get(key) {
                 for entry in entries {
-                    // IdentityFile occupies a whole line. OpenSSH loses quotes
-                    // when dumping known-host lists, so reject ambiguous paths
-                    // rather than trusting/writing a different known_hosts file.
+                    // IdentityFile occupies a whole line. OpenSSH may lose
+                    // quotes on known-host lists; path_words preserves spaces
+                    // and only splits lists at unambiguous absolute roots.
                     let entries = if key == "identityfile" {
                         vec![entry.clone()]
                     } else {
@@ -291,35 +291,49 @@ impl Config {
 }
 
 fn path_words(text: &str) -> Result<Vec<String>> {
-    if !text.contains('"') {
-        let words: Vec<_> = text.split_whitespace().collect();
-        let rooted = |path: &str| {
-            path.starts_with('/')
-                || path.starts_with('~')
-                || path.starts_with("\\\\")
-                || (path.as_bytes().get(1) == Some(&b':')
-                    && path
-                        .as_bytes()
-                        .get(2)
-                        .is_some_and(|b| matches!(b, b'/' | b'\\')))
-        };
-        ensure!(
-            words.len() <= 1 || words.iter().all(|word| rooted(word)),
-            "Ambiguous known_hosts paths in ssh -G output; use paths without spaces. {HELP}"
-        );
-    }
+    let rooted = |path: &str| {
+        path.starts_with('/')
+            || path.starts_with('~')
+            || path.starts_with("\\\\")
+            || (path.as_bytes().get(1) == Some(&b':')
+                && path
+                    .as_bytes()
+                    .get(2)
+                    .is_some_and(|b| matches!(b, b'/' | b'\\')))
+    };
     let mut words = Vec::new();
     let mut word = String::new();
     let mut quoted = false;
-    for c in text.chars() {
+    let mut closed_quote = false;
+    for (index, c) in text.char_indices() {
         match c {
-            '"' => quoted = !quoted,
+            '"' => {
+                quoted = !quoted;
+                closed_quote = !quoted;
+            }
             c if c.is_whitespace() && !quoted => {
                 if !word.is_empty() {
-                    words.push(std::mem::take(&mut word));
+                    let rest = &text[index + c.len_utf8()..];
+                    let next = rest.trim_start();
+                    if closed_quote || (rooted(&word) && rooted(next)) {
+                        words.push(std::mem::take(&mut word));
+                        closed_quote = false;
+                    } else {
+                        ensure!(
+                            rooted(&word) || closed_quote,
+                            "Ambiguous known_hosts paths in ssh -G output. {HELP}"
+                        );
+                        word.push(c);
+                        closed_quote = false;
+                    }
                 }
             }
-            _ => word.push(c),
+            _ => {
+                word.push(c);
+                if !c.is_whitespace() {
+                    closed_quote = false;
+                }
+            }
         }
     }
     if quoted {
@@ -348,6 +362,31 @@ mod tests {
             PathBuf::from("C:\\Users\\A B\\.ssh\\id_ed25519")
         );
         assert_eq!(config.host_key_name, "127.0.0.1");
+    }
+
+    #[test]
+    fn known_hosts_lists_preserve_spaces_inside_absolute_paths() {
+        assert_eq!(
+            path_words(
+                r"C:\Users\DB Zhang\.ssh\known_hosts C:\Program Files\OpenSSH\ssh_known_hosts"
+            )
+            .unwrap(),
+            [
+                r"C:\Users\DB Zhang\.ssh\known_hosts",
+                r"C:\Program Files\OpenSSH\ssh_known_hosts"
+            ]
+        );
+        assert_eq!(
+            path_words(
+                r#""C:\Users\DB Zhang\.ssh\known_hosts" C:\ProgramData\ssh\ssh_known_hosts"#
+            )
+            .unwrap(),
+            [
+                r"C:\Users\DB Zhang\.ssh\known_hosts",
+                r"C:\ProgramData\ssh\ssh_known_hosts"
+            ]
+        );
+        assert!(path_words("known_hosts global_known_hosts").is_err());
     }
     #[test]
     fn unsupported_routes_and_security_settings_fail_closed() {
