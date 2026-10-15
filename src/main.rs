@@ -13,7 +13,7 @@ use alacritty_terminal::{
     grid::{Dimensions, Scroll},
     index::{Column, Line, Point, Side},
     selection::{Selection, SelectionType},
-    term::{Config, TermMode, cell::Flags},
+    term::{ClipboardType, Config, TermMode, cell::Flags},
     vte::ansi::{Color, NamedColor, Processor},
 };
 use anyhow::{Context, Result};
@@ -30,6 +30,7 @@ use std::{
 
 const TERMINAL_FONT_SIZE: f32 = 16.0;
 const TERMINAL_LINE_HEIGHT: f32 = 1.3;
+const MAX_OSC52_CLIPBOARD_BYTES: usize = 1024 * 1024;
 
 fn terminal_cell_rect(origin: egui::Pos2, cell: Vec2, column: usize, row: usize) -> Rect {
     // Compute both sides from grid coordinates. Adding cell height to the top
@@ -104,6 +105,7 @@ struct TerminalSession {
     ime_preedit: String,
     mouse_button: Option<egui::PointerButton>,
     selecting: bool,
+    pending_clipboard: Option<String>,
     cursor_blink_started: Instant,
     cursor_settings: CursorSettings,
     status: String,
@@ -197,6 +199,7 @@ impl TerminalSession {
             ime_preedit: String::new(),
             mouse_button: None,
             selecting: false,
+            pending_clipboard: None,
             cursor_blink_started: Instant::now(),
             cursor_settings: CursorSettings::default(),
             status: warning
@@ -392,6 +395,22 @@ impl TerminalSession {
                 Event::PtyWrite(text) => self.write(text.as_bytes()),
                 Event::Title(title) => self.title = title,
                 Event::ResetTitle => self.title = "Terminal".into(),
+                Event::ClipboardStore(ClipboardType::Clipboard, text) => {
+                    if text.len() > MAX_OSC52_CLIPBOARD_BYTES {
+                        self.pending_clipboard = None;
+                        tracing::warn!(
+                            bytes = text.len(),
+                            limit = MAX_OSC52_CLIPBOARD_BYTES,
+                            "Ignored oversized OSC 52 clipboard request"
+                        );
+                        self.status = "Remote clipboard request exceeds 1 MiB".into();
+                    } else {
+                        let chars = text.chars().count();
+                        self.pending_clipboard = Some(text);
+                        self.status = format!("Copied {chars} chars to host clipboard");
+                        tracing::info!(chars, "Remote application copied text to host clipboard");
+                    }
+                }
                 _ => {}
             }
         }
@@ -427,6 +446,12 @@ impl TerminalSession {
             return false;
         }
         true
+    }
+
+    fn flush_clipboard(&mut self, ctx: &egui::Context) {
+        if let Some(text) = self.pending_clipboard.take() {
+            ctx.copy_text(text);
+        }
     }
 
     fn show(&mut self, ctx: &egui::Context, ui: &mut egui::Ui, focused: bool) {
@@ -1221,6 +1246,11 @@ impl eframe::App for TerminalApp {
                 self.close_tab(index);
             }
         }
+        for tab in &mut self.tabs {
+            for pane in &mut tab.panes {
+                pane.flush_clipboard(ctx);
+            }
+        }
         if self.tabs.is_empty() {
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
             return;
@@ -1986,6 +2016,34 @@ mod tests {
             Key::C,
             egui::Modifiers::CTRL | egui::Modifiers::SHIFT
         ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn osc52_copy_request_reaches_the_host_clipboard() {
+        let args = Args {
+            ssh: None,
+            config: None,
+            log_filter: None,
+            shell: Some("/bin/sh".into()),
+        };
+        let mut session = TerminalSession::new(&args, None).unwrap();
+        session
+            .parser
+            .advance(&mut session.term, b"\x1b]52;c;SGVsbG8=\x07");
+        assert!(session.poll());
+
+        let ctx = egui::Context::default();
+        let output = ctx.run(egui::RawInput::default(), |ctx| {
+            session.flush_clipboard(ctx)
+        });
+        assert!(
+            output
+                .platform_output
+                .commands
+                .contains(&egui::OutputCommand::CopyText("Hello".into()))
+        );
+        assert_eq!(session.status, "Copied 5 chars to host clipboard");
     }
 
     #[cfg(unix)]
