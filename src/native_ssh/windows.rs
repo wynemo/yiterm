@@ -259,6 +259,16 @@ impl Prompt for ConsolePrompt {
 }
 
 pub fn run(real_ssh: &Path, directory: &Path, args: Vec<OsString>) -> Result<i32> {
+    let _logging = crate::logging::init(None, None).ok();
+    tracing::info!("Built-in SSH wrapper started");
+    let result = run_inner(real_ssh, directory, args);
+    if let Err(error) = &result {
+        tracing::error!(error = %format!("{error:#}"), "Built-in SSH session failed");
+    }
+    result
+}
+
+fn run_inner(real_ssh: &Path, directory: &Path, args: Vec<OsString>) -> Result<i32> {
     let config = config::resolve(real_ssh, &args)?;
     let console = Console::enter()?;
     let runtime = tokio::runtime::Builder::new_multi_thread()

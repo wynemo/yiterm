@@ -191,6 +191,7 @@ impl Config {
             "Unsupported SSH SessionType. {HELP}"
         );
         let home = std::env::home_dir().context("Cannot locate home directory")?;
+        let program_data = std::env::var_os("ProgramData").map(PathBuf::from);
         let paths = |key: &str| -> Result<Vec<PathBuf>> {
             let mut result = Vec::new();
             if let Some(entries) = values.get(key) {
@@ -201,25 +202,19 @@ impl Config {
                     let entries = if key == "identityfile" {
                         vec![entry.clone()]
                     } else {
-                        path_words(entry)?
+                        path_words(entry).with_context(|| {
+                            format!("Cannot parse {key} entry from ssh -G: {entry:?}")
+                        })?
                     };
                     for entry in entries {
                         if entry == "none" {
                             continue;
                         }
                         let path = entry.trim_matches('"');
-                        ensure!(
-                            !path.contains('%') && !path.contains("${"),
-                            "Unexpanded path tokens in {key}. {HELP}"
-                        );
                         result.push(
-                            if let Some(tail) =
-                                path.strip_prefix("~/").or_else(|| path.strip_prefix("~\\"))
-                            {
-                                home.join(tail)
-                            } else {
-                                PathBuf::from(path)
-                            },
+                            resolve_path(path, key, &home, program_data.as_deref()).with_context(
+                                || format!("Cannot resolve {key} entry from ssh -G: {entry:?}"),
+                            )?,
                         );
                     }
                 }
@@ -292,7 +287,8 @@ impl Config {
 
 fn path_words(text: &str) -> Result<Vec<String>> {
     let rooted = |path: &str| {
-        path.starts_with('/')
+        programdata_tail(path).is_some()
+            || path.starts_with('/')
             || path.starts_with('~')
             || path.starts_with("\\\\")
             || (path.as_bytes().get(1) == Some(&b':')
@@ -345,6 +341,45 @@ fn path_words(text: &str) -> Result<Vec<String>> {
     Ok(words)
 }
 
+fn programdata_tail(path: &str) -> Option<&str> {
+    const TOKEN: &str = "__PROGRAMDATA__";
+    let (prefix, remainder) = path.split_at_checked(TOKEN.len())?;
+    if !prefix.eq_ignore_ascii_case(TOKEN) {
+        return None;
+    }
+    remainder
+        .strip_prefix('/')
+        .or_else(|| remainder.strip_prefix('\\'))
+}
+
+fn resolve_path(
+    path: &str,
+    key: &str,
+    home: &Path,
+    program_data: Option<&Path>,
+) -> Result<PathBuf> {
+    if let Some(tail) = programdata_tail(path) {
+        ensure!(
+            !tail.contains('%') && !tail.contains("${"),
+            "Unexpanded path tokens in {key}. {HELP}"
+        );
+        return Ok(program_data
+            .context("Windows OpenSSH __PROGRAMDATA__ path has no ProgramData directory")?
+            .join(tail));
+    }
+    ensure!(
+        !path.contains('%') && !path.contains("${"),
+        "Unexpanded path tokens in {key}. {HELP}"
+    );
+    Ok(
+        if let Some(tail) = path.strip_prefix("~/").or_else(|| path.strip_prefix("~\\")) {
+            home.join(tail)
+        } else {
+            PathBuf::from(path)
+        },
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -387,6 +422,35 @@ mod tests {
             ]
         );
         assert!(path_words("known_hosts global_known_hosts").is_err());
+    }
+
+    #[test]
+    fn windows_programdata_known_hosts_tokens_are_split_and_expanded() {
+        let paths =
+            path_words("__PROGRAMDATA__/ssh/ssh_known_hosts __PROGRAMDATA__/ssh/ssh_known_hosts2")
+                .unwrap();
+        assert_eq!(paths.len(), 2);
+        let program_data = Path::new(r"C:\ProgramData");
+        assert_eq!(
+            resolve_path(
+                &paths[0],
+                "globalknownhostsfile",
+                Path::new(r"C:\Users\alice"),
+                Some(program_data)
+            )
+            .unwrap(),
+            PathBuf::from(r"C:\ProgramData/ssh/ssh_known_hosts")
+        );
+        assert_eq!(
+            resolve_path(
+                &paths[1],
+                "globalknownhostsfile",
+                Path::new(r"C:\Users\alice"),
+                Some(program_data)
+            )
+            .unwrap(),
+            PathBuf::from(r"C:\ProgramData/ssh/ssh_known_hosts2")
+        );
     }
     #[test]
     fn unsupported_routes_and_security_settings_fail_closed() {
