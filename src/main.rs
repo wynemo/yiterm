@@ -48,7 +48,7 @@ fn windows_clipboard_owner(frame: &eframe::Frame) -> Result<isize> {
 
 #[cfg(windows)]
 fn write_windows_clipboard(text: String, owner: isize) -> Result<()> {
-    use clipboard_win::{Clipboard, Setter, formats::Unicode};
+    use clipboard_win::{Clipboard, Getter, Setter, formats::Unicode};
 
     let owner = owner as clipboard_win::types::HWND;
     let clipboard = Clipboard::new_attempts_for(owner, 5)
