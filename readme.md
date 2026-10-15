@@ -2,6 +2,8 @@
 
 轻量原生终端，支持 macOS 和 Windows。
 
+![YiTerm 在 Windows 上运行，使用浅色主题连接远端会话](assets/screenshots/yiterm-windows.png)
+
 ## 下载运行
 
 从 [Releases](https://github.com/wynemo/yiterm/releases) 下载对应平台的压缩包并解压，无需安装 Rust。
