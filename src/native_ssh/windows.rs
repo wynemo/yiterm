@@ -170,6 +170,16 @@ impl Console {
             (info.srWindow.Bottom - info.srWindow.Top + 1).max(1) as u32,
         ))
     }
+
+    fn enable_terminal_input(&self) -> Result<()> {
+        // Keep VT input disabled while reading passwords: terminal mouse reports
+        // begin with ESC and must not be mistaken for prompt cancellation. Once
+        // authentication is complete, translate special keys (arrows, Home,
+        // function keys) into VT sequences for the remote terminal.
+        let mut mode = 0;
+        check(unsafe { GetConsoleMode(self.input, &mut mode) })?;
+        check(unsafe { SetConsoleMode(self.input, mode | ENABLE_VIRTUAL_TERMINAL_INPUT) })
+    }
 }
 impl Drop for Console {
     fn drop(&mut self) {
@@ -281,6 +291,7 @@ fn run_inner(real_ssh: &Path, directory: &Path, args: Vec<OsString>) -> Result<i
         } else {
             super::connect(config, prompt).await?
         });
+        console.enable_terminal_input()?;
         let mut size = console.size()?;
         let mut channel = super::shell(&handle, size.0, size.1).await?;
         let name = super::pipe_name(directory, std::process::id())?;
