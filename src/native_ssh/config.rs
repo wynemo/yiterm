@@ -13,6 +13,7 @@ pub struct Config {
     pub host: String,
     pub user: String,
     pub port: u16,
+    pub proxy_jump: Option<String>,
     pub host_key_name: String,
     pub known_hosts: Vec<PathBuf>,
     pub save_host_key: PathBuf,
@@ -64,7 +65,7 @@ pub fn validate_args(args: &[OsString]) -> Result<()> {
         ensure!(arg.len() > 1, "Missing SSH destination");
         let flags = &arg[1..];
         for (offset, flag) in flags.char_indices() {
-            if "pliFo".contains(flag) {
+            if "pliFoJ".contains(flag) {
                 let value = if offset + 1 < flags.len() {
                     &flags[offset + 1..]
                 } else {
@@ -101,6 +102,7 @@ pub fn validate_args(args: &[OsString]) -> Result<()> {
                             "serveralivecountmax",
                             "identitiesonly",
                             "identityagent",
+                            "proxyjump",
                         ]
                         .contains(&key.as_str()),
                         "Unsupported SSH option {key}. {HELP}"
@@ -156,7 +158,6 @@ impl Config {
         };
         for key in [
             "proxycommand",
-            "proxyjump",
             "localforward",
             "remoteforward",
             "dynamicforward",
@@ -249,9 +250,17 @@ impl Config {
         };
         let interval: u64 = get("serveraliveinterval", "0").parse()?;
         let agent = get("identityagent", "SSH_AUTH_SOCK");
+        let proxy_jump = get("proxyjump", "none");
+        ensure!(
+            proxy_jump == "none"
+                || proxy_jump.is_empty()
+                || proxy_jump.split(',').all(|hop| !hop.trim().is_empty()),
+            "Invalid ProxyJump configuration"
+        );
         Ok(Self {
             host,
             user,
+            proxy_jump: (proxy_jump != "none" && !proxy_jump.is_empty()).then_some(proxy_jump),
             host_key_name,
             known_hosts,
             save_host_key,
@@ -343,7 +352,6 @@ mod tests {
     #[test]
     fn unsupported_routes_and_security_settings_fail_closed() {
         for setting in [
-            "proxyjump bastion",
             "proxycommand ssh -W %h:%p gateway",
             "forwardagent yes",
             "stricthostkeychecking no",
@@ -358,7 +366,6 @@ mod tests {
         for args in [
             vec!["-L8080:host:80", "host"],
             vec!["host", "ls"],
-            vec!["-oProxyJump=bastion", "host"],
             vec!["-oStrictHostKeyChecking=no", "host", "ls"],
         ] {
             assert!(
@@ -367,5 +374,15 @@ mod tests {
         }
         validate_args(&["-tt", "-p2222", "-i", "C:\\key path", "host"].map(OsString::from))
             .unwrap();
+        validate_args(&["-Jbastion", "host"].map(OsString::from)).unwrap();
+        validate_args(&["-oProxyJump=bastion", "host"].map(OsString::from)).unwrap();
+    }
+
+    #[test]
+    fn proxy_jump_is_resolved_and_preserved() {
+        let config = Config::parse(&format!("{BASE}proxyjump bastion,jump2\n")).unwrap();
+        assert_eq!(config.proxy_jump.as_deref(), Some("bastion,jump2"));
+        let config = Config::parse(&format!("{BASE}proxyjump none\n")).unwrap();
+        assert_eq!(config.proxy_jump, None);
     }
 }

@@ -265,7 +265,12 @@ pub fn run(real_ssh: &Path, directory: &Path, args: Vec<OsString>) -> Result<i32
         .enable_all()
         .build()?;
     let result = runtime.block_on(async {
-        let handle = Arc::new(super::connect(config, Arc::new(ConsolePrompt)).await?);
+        let prompt: Arc<dyn Prompt> = Arc::new(ConsolePrompt);
+        let handle = Arc::new(if config.proxy_jump.is_some() {
+            super::connect_via_proxyjump(config, prompt, real_ssh).await?
+        } else {
+            super::connect(config, prompt).await?
+        });
         let mut size = console.size()?;
         let mut channel = super::shell(&handle, size.0, size.1).await?;
         let name = super::pipe_name(directory, std::process::id())?;

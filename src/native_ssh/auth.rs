@@ -27,6 +27,7 @@ pub async fn ask(
 pub struct Handler {
     pub config: Config,
     pub prompt: Arc<dyn Prompt>,
+    pub(crate) _proxy_process: Option<tokio::process::Child>,
 }
 impl client::Handler for Handler {
     type Error = anyhow::Error;
