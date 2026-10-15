@@ -4,6 +4,10 @@ on:
   push:
     branches: ['**']
     tags: ['**']
+    # Release tags build these version-only commits, so skip the duplicate branch run.
+    paths-ignore:
+      - 'Cargo.toml'
+      - 'Cargo.lock'
   pull_request:
   workflow_dispatch:
 
