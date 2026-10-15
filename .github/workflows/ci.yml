@@ -46,7 +46,7 @@ jobs:
           key: ${{ matrix.target }}
 
       - name: Test on native platform
-        run: cargo test --locked
+        run: cargo test --locked --release -- --test-threads=1
 
       - name: Build release
         env:
