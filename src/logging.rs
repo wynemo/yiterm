@@ -57,6 +57,8 @@ struct Config {
     logging: LoggingConfig,
     #[serde(rename = "cursor")]
     _cursor: crate::settings::CursorSettings,
+    #[serde(rename = "appearance")]
+    _appearance: crate::settings::AppearanceSettings,
 }
 
 pub struct Logging {
@@ -240,6 +242,23 @@ pub fn open_directory(directory: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn startup_accepts_saved_settings_and_example_configuration() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, include_str!("../config.example.toml")).unwrap();
+        assert!(load(&path, true).is_ok());
+        for theme in [
+            crate::theme::ThemeMode::Dark,
+            crate::theme::ThemeMode::Light,
+        ] {
+            crate::settings::save_all(&path, crate::settings::CursorSettings::default(), theme)
+                .unwrap();
+            assert!(load(&path, true).is_ok());
+            assert_eq!(crate::settings::load_theme(&path).unwrap(), theme);
+        }
+    }
+
     #[test]
     fn configuration_defaults_and_validation() {
         let dir = tempfile::tempdir().unwrap();

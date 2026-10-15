@@ -115,7 +115,7 @@ mod tests {
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
-struct AppearanceSettings {
+pub(crate) struct AppearanceSettings {
     theme: crate::theme::ThemeMode,
 }
 
