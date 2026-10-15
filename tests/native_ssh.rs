@@ -47,6 +47,10 @@ async fn password_once_shell_and_repeated_uploads_share_one_connection() {
             shell.wait().await,
             Some(russh::ChannelMsg::Data { .. })
         ));
+        assert!(matches!(
+            shell.wait().await,
+            Some(russh::ChannelMsg::Success)
+        ));
         let bytes = image();
         let first = upload(handle.clone(), &bytes).await.unwrap();
         let second = upload(handle.clone(), &bytes).await.unwrap();

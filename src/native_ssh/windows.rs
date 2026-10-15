@@ -312,6 +312,7 @@ fn run_inner(real_ssh: &Path, directory: &Path, args: Vec<OsString>) -> Result<i
         let mut resize = tokio::time::interval(Duration::from_millis(100));
         let mut exit_status = 255;
         let mut input_open = true;
+        let mut shell_reply_pending = true;
         let result = async {
             loop {
                 tokio::select! {
@@ -324,11 +325,21 @@ fn run_inner(real_ssh: &Path, directory: &Path, args: Vec<OsString>) -> Result<i
                     }
                     message = channel.wait() => {
                         match message {
-                            Some(russh::ChannelMsg::Data { data }) | Some(russh::ChannelMsg::ExtendedData { data, .. }) => output(&data)?,
-                            Some(russh::ChannelMsg::ExitStatus { exit_status: status }) => exit_status = status as i32,
-                            Some(russh::ChannelMsg::ExitSignal { .. }) => exit_status = 128,
-                            Some(russh::ChannelMsg::Close) | None => break,
-                            _ => {},
+                            Some(message) => {
+                                if super::shell_request_reply(&message, &mut shell_reply_pending)? {
+                                    continue;
+                                }
+                                match message {
+                                    russh::ChannelMsg::Data { data } | russh::ChannelMsg::ExtendedData { data, .. } => output(&data)?,
+                                    russh::ChannelMsg::ExitStatus { exit_status: status } => exit_status = status as i32,
+                                    russh::ChannelMsg::ExitSignal { .. } => exit_status = 128,
+                                    russh::ChannelMsg::Close if shell_reply_pending => bail!("SSH channel closed before the shell request was accepted"),
+                                    russh::ChannelMsg::Close => break,
+                                    _ => {},
+                                }
+                            }
+                            None if shell_reply_pending => bail!("SSH channel closed before the shell request was accepted"),
+                            None => break,
                         }
                     }
                     _ = resize.tick() => {

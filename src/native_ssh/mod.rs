@@ -163,16 +163,38 @@ pub async fn shell(
         .await
         .context("Server rejected the terminal")?;
     channel.request_shell(true).await?;
-    expect_success(&mut channel)
-        .await
-        .context("Server rejected the shell")?;
     Ok(channel)
 }
 
 async fn expect_success(channel: &mut Channel<client::Msg>) -> Result<()> {
-    match tokio::time::timeout(std::time::Duration::from_secs(15), channel.wait()).await? {
-        Some(ChannelMsg::Success) => Ok(()),
-        _ => bail!("SSH channel request failed"),
+    tokio::time::timeout(std::time::Duration::from_secs(15), async {
+        loop {
+            match channel.wait().await {
+                Some(ChannelMsg::Success) => return Ok(()),
+                Some(ChannelMsg::Failure) => bail!("SSH channel request failed"),
+                Some(ChannelMsg::WindowAdjusted { .. }) => {}
+                _ => bail!("SSH channel request failed"),
+            }
+        }
+    })
+    .await?
+}
+
+#[cfg(any(windows, test))]
+fn shell_request_reply(message: &ChannelMsg, pending: &mut bool) -> Result<bool> {
+    if !*pending {
+        return Ok(false);
+    }
+    match message {
+        ChannelMsg::Success => {
+            *pending = false;
+            Ok(true)
+        }
+        ChannelMsg::Failure => {
+            *pending = false;
+            bail!("Server rejected the shell")
+        }
+        _ => Ok(false),
     }
 }
 
@@ -220,5 +242,43 @@ mod proxyjump_tests {
                 .collect::<Vec<_>>(),
             ["-W", "[2001:db8::5]:22", "bastion"]
         );
+    }
+}
+
+#[cfg(test)]
+mod shell_tests {
+    use super::{ChannelMsg, shell_request_reply};
+
+    #[test]
+    fn shell_reply_can_arrive_after_initial_output() {
+        let mut pending = true;
+        assert!(
+            !shell_request_reply(
+                &ChannelMsg::Data {
+                    data: b"login banner".as_slice().into()
+                },
+                &mut pending
+            )
+            .unwrap()
+        );
+        assert!(pending);
+        assert!(shell_request_reply(&ChannelMsg::Success, &mut pending).unwrap());
+        assert!(!pending);
+    }
+
+    #[test]
+    fn shell_failure_is_reported_after_any_initial_output() {
+        let mut pending = true;
+        assert!(
+            !shell_request_reply(
+                &ChannelMsg::Data {
+                    data: b"login banner".as_slice().into()
+                },
+                &mut pending
+            )
+            .unwrap()
+        );
+        assert!(shell_request_reply(&ChannelMsg::Failure, &mut pending).is_err());
+        assert!(!pending);
     }
 }

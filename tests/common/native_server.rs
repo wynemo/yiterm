@@ -181,8 +181,8 @@ impl server::Handler for Handler {
     }
     async fn shell_request(&mut self, id: ChannelId, session: &mut Session) -> Result<()> {
         self.shell = Some(id);
-        session.channel_success(id)?;
         session.data(id, &b"fixture-shell-ready\r\n"[..])?;
+        session.channel_success(id)?;
         Ok(())
     }
     async fn data(&mut self, id: ChannelId, data: &[u8], session: &mut Session) -> Result<()> {
