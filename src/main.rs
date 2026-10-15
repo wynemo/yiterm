@@ -349,7 +349,14 @@ fn color(color: Color, foreground: bool, theme: ThemeMode) -> Color32 {
         Color::Indexed(index) => index as usize,
     };
     if index < 16 {
-        theme.palette(index)
+        // Shell syntax highlighting can explicitly request ANSI white instead
+        // of the default foreground. Keep it readable on a light background
+        // without changing explicitly requested white backgrounds.
+        if foreground && theme == ThemeMode::Light && matches!(index, 7 | 15) {
+            theme.foreground()
+        } else {
+            theme.palette(index)
+        }
     } else if index < 232 {
         let n = index - 16;
         let level = |n| if n == 0 { 0 } else { 55 + n as u8 * 40 };
@@ -1803,6 +1810,26 @@ fn configure_fonts(ctx: &egui::Context) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ansi_white_text_is_readable_in_light_theme_without_changing_backgrounds() {
+        for (named, index) in [(NamedColor::White, 7), (NamedColor::BrightWhite, 15)] {
+            for value in [Color::Named(named), Color::Indexed(index)] {
+                assert_eq!(
+                    color(value, true, ThemeMode::Light),
+                    ThemeMode::Light.foreground()
+                );
+                assert_eq!(
+                    color(value, false, ThemeMode::Light),
+                    ThemeMode::Light.palette(index as usize)
+                );
+                assert_eq!(
+                    color(value, true, ThemeMode::Dark),
+                    ThemeMode::Dark.palette(index as usize)
+                );
+            }
+        }
+    }
 
     #[test]
     fn theme_colors_preserve_explicit_terminal_colors() {
