@@ -45,6 +45,9 @@ jobs:
         with:
           key: ${{ matrix.target }}
 
+      - name: Test on native platform
+        run: cargo test --locked
+
       - name: Build release
         env:
           YITERM_BUILD_REV: ${{ github.sha }}

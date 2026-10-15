@@ -87,6 +87,18 @@ pub fn upload(path: &Path, remote: &crate::ssh::Remote, scp: &Path) -> Result<St
     Ok(quote_posix(&destination))
 }
 
+pub fn upload_detected(
+    path: &Path,
+    detected: &crate::ssh::Detection,
+    scp: &Path,
+) -> Result<String> {
+    #[cfg(windows)]
+    if let Some(pipe) = &detected.upload_pipe {
+        return crate::native_ssh::upload(path, pipe, detected.identity.pid);
+    }
+    upload(path, &detected.remote, scp)
+}
+
 // A stalled transfer must never leave the terminal permanently busy.
 fn run_transfer(
     mut command: Command,

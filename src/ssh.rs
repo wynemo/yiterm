@@ -236,11 +236,20 @@ pub fn run_wrapper() -> Result<()> {
     let directory = PathBuf::from(
         std::env::var_os("YITERM_SSH_DIRECTORY").context("Missing session directory")?,
     );
-    let args = with_multiplexing(
-        std::env::args_os().skip(1).collect(),
-        &directory,
-        cfg!(unix),
-    );
+    let args: Vec<_> = std::env::args_os().skip(1).collect();
+    #[cfg(windows)]
+    let args = {
+        if !crate::native_ssh::config::system_requested(&args) {
+            let code = crate::native_ssh::run(Path::new(&real), &directory, args)?;
+            std::process::exit(code);
+        }
+        let mut args = args;
+        if args.first().is_some_and(|arg| arg == "--system") {
+            args.remove(0);
+        }
+        args
+    };
+    let args = with_multiplexing(args, &directory, cfg!(unix));
     let mut command = Command::new(real);
     command.args(args);
     // Wrapper variables must not propagate to remote sessions via SendEnv.
@@ -411,6 +420,8 @@ pub struct TargetIdentity {
 pub struct Detection {
     pub remote: Remote,
     pub identity: TargetIdentity,
+    /// Only a built-in Windows SSH shim owns this upload pipe.
+    pub upload_pipe: Option<String>,
 }
 
 fn is_descendant(system: &System, mut pid: Pid, root: Pid) -> bool {
@@ -495,18 +506,13 @@ fn detect_once(root: u32, group: Option<i32>) -> Result<Option<Detection>> {
         let Some(process) = system.process(pid) else {
             continue;
         };
-        // On Windows the PATH shim waits for its real OpenSSH child; ignore
-        // the shim executable itself and select that child's real argv.
-        if process
-            .exe()
-            .and_then(|path| path.parent())
-            .is_some_and(|p| {
-                p.file_name().is_some_and(|n| n == "bin")
-                    && p.parent().is_some_and(|p| {
-                        p.file_name()
-                            .is_some_and(|n| n.to_string_lossy().starts_with("yiterm-"))
-                    })
-            })
+        // Explicit system-SSH invocations still have a waiting shim parent.
+        // Native shims own the connection themselves and must be selected.
+        if shim_directory(process.exe()).is_some()
+            && (!cfg!(windows)
+                || crate::native_ssh::config::system_requested(
+                    &process.cmd().iter().skip(1).cloned().collect::<Vec<_>>(),
+                ))
         {
             continue;
         }
@@ -540,6 +546,13 @@ fn detect_once(root: u32, group: Option<i32>) -> Result<Option<Detection>> {
         let remote = parse(&args)?;
         found.push(Detection {
             remote,
+            upload_pipe: if cfg!(windows) {
+                shim_directory(process.exe())
+                    .map(|directory| crate::native_ssh::pipe_name(directory, pid.as_u32()))
+                    .transpose()?
+            } else {
+                None
+            },
             identity: TargetIdentity {
                 pid: pid.as_u32(),
                 group,
@@ -552,6 +565,17 @@ fn detect_once(root: u32, group: Option<i32>) -> Result<Option<Detection>> {
         "Multiple SSH sessions are active; cannot safely choose the image destination"
     );
     Ok(found.pop())
+}
+
+fn shim_directory(executable: Option<&Path>) -> Option<&Path> {
+    let bin = executable?.parent()?;
+    let directory = bin.parent()?;
+    (bin.file_name()? == "bin"
+        && directory
+            .file_name()?
+            .to_string_lossy()
+            .starts_with("yiterm-"))
+    .then_some(directory)
 }
 
 pub fn target_is_alive(target: TargetIdentity, group: Option<i32>) -> bool {

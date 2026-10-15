@@ -284,7 +284,7 @@ impl TerminalSession {
                     let detected = ssh::detect(root, group)?;
                     let (text, target) = if let Some(detected) = detected {
                         (
-                            paste::upload(&path, &detected.remote, &scp)?,
+                            paste::upload_detected(&path, &detected, &scp)?,
                             Some(detected.identity),
                         )
                     } else if cfg!(windows) {
@@ -1936,7 +1936,7 @@ mod tests {
                     }
                     for text in [
                         "YiTerm",
-                        "Version  0.0.2",
+                        concat!("Version  ", env!("CARGO_PKG_VERSION")),
                         "Docs",
                         "GitHub",
                         "Licenses",
