@@ -115,7 +115,9 @@ fn password_login_and_image_upload_share_native_windows_session() {
         let image = b"\x89PNG\r\n\x1a\nfixture-image";
         std::fs::write(&image_path, image)?;
         assert!(yiterm::native_ssh::upload(&image_path, pipe, detected.identity.pid + 1).is_err());
-        for _ in 0..2 {
+        // Reuse the same SSH session and pipe repeatedly to catch cases where
+        // the server is not already accepting the next paste after a reply.
+        for _ in 0..8 {
             let path = yiterm::paste::upload_detected(
                 &image_path,
                 &detected,

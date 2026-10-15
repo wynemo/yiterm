@@ -21,15 +21,33 @@ pub async fn request<S: AsyncRead + AsyncWrite + Unpin>(
         bytes.starts_with(PNG) && bytes.len() <= MAX_IMAGE_BYTES,
         "Invalid PNG or image exceeds 50 MiB"
     );
-    stream.write_all(MAGIC).await?;
-    stream.write_u64(bytes.len() as u64).await?;
-    stream.write_all(bytes).await?;
-    stream.flush().await?;
-    let status = stream.read_u8().await?;
-    let size = stream.read_u32().await? as usize;
+    stream
+        .write_all(MAGIC)
+        .await
+        .context("writing upload protocol header")?;
+    stream
+        .write_u64(bytes.len() as u64)
+        .await
+        .context("writing upload image size")?;
+    stream
+        .write_all(bytes)
+        .await
+        .context("writing upload image data")?;
+    stream.flush().await.context("flushing upload request")?;
+    let status = stream
+        .read_u8()
+        .await
+        .context("reading upload response status")?;
+    let size = stream
+        .read_u32()
+        .await
+        .context("reading upload response size")? as usize;
     ensure!(size <= 8192, "Invalid upload response");
     let mut message = vec![0; size];
-    stream.read_exact(&mut message).await?;
+    stream
+        .read_exact(&mut message)
+        .await
+        .context("reading upload response body")?;
     let message = String::from_utf8(message)?;
     ensure!(status == 0, "Image upload failed: {message}");
     ensure!(valid_remote_path(&message), "Invalid uploaded image path");
@@ -187,5 +205,21 @@ mod tests {
             assert!(request(&mut client, PNG).await.is_err());
             worker.await.unwrap();
         }
+    }
+
+    #[tokio::test]
+    async fn closed_upload_pipe_reports_which_response_stage_failed() {
+        let (mut client, mut server) = tokio::io::duplex(64);
+        let worker = tokio::spawn(async move {
+            let mut magic = [0; 8];
+            server.read_exact(&mut magic).await.unwrap();
+            server.read_u64().await.unwrap();
+            let mut image = [0; 8];
+            server.read_exact(&mut image).await.unwrap();
+        });
+
+        let error = request(&mut client, PNG).await.unwrap_err();
+        worker.await.unwrap();
+        assert!(format!("{error:#}").contains("reading upload response status"));
     }
 }

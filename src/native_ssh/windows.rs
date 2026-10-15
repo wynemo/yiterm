@@ -82,7 +82,7 @@ impl PipeSecurity {
             Ok(Self(descriptor))
         }
     }
-    fn server(&self, name: &str) -> Result<NamedPipeServer> {
+    fn server(&self, name: &str, first_pipe_instance: bool) -> Result<NamedPipeServer> {
         let mut attributes = SECURITY_ATTRIBUTES {
             nLength: std::mem::size_of::<SECURITY_ATTRIBUTES>() as u32,
             lpSecurityDescriptor: self.0,
@@ -90,8 +90,8 @@ impl PipeSecurity {
         };
         Ok(unsafe {
             ServerOptions::new()
-                .first_pipe_instance(true)
-                .max_instances(1)
+                .first_pipe_instance(first_pipe_instance)
+                .max_instances(2)
                 .reject_remote_clients(true)
                 .create_with_security_attributes_raw(
                     name,
@@ -296,16 +296,70 @@ fn run_inner(real_ssh: &Path, directory: &Path, args: Vec<OsString>) -> Result<i
         let mut channel = super::shell(&handle, size.0, size.1).await?;
         let name = super::pipe_name(directory, std::process::id())?;
         let security = PipeSecurity::new()?;
-        let mut pipe = security.server(&name)?;
+        let mut pipe = security.server(&name, true)?;
         drop(security);
         let connection = handle.clone();
         let uploads = tokio::spawn(async move {
+            let mut pending_connection = tokio::spawn(async move {
+                pipe.connect().await?;
+                Ok::<_, std::io::Error>(pipe)
+            });
             loop {
-                if pipe.connect().await.is_err() { break; }
+                let mut connected = match pending_connection.await {
+                    Ok(Ok(pipe)) => pipe,
+                    Ok(Err(error)) => {
+                        tracing::error!(error = %error, "SSH upload pipe accept failed");
+                        break;
+                    }
+                    Err(error) => {
+                        tracing::error!(error = %error, "SSH upload pipe accept task failed");
+                        break;
+                    }
+                };
+                // Start waiting on the next instance before processing this
+                // upload. Merely creating it is insufficient: Windows does not
+                // accept clients until ConnectNamedPipe is pending.
+                let next_connection = match PipeSecurity::new()
+                    .and_then(|security| security.server(&name, false))
+                {
+                    Ok(mut next_pipe) => Some(tokio::spawn(async move {
+                        next_pipe.connect().await?;
+                        Ok::<_, std::io::Error>(next_pipe)
+                    })),
+                    Err(error) => {
+                        tracing::error!(error = %error, "Could not rearm SSH upload pipe");
+                        None
+                    }
+                };
                 // Bound malformed clients as well as SFTP. A failed upload
                 // leaves the shell and future uploads usable.
-                let _ = tokio::time::timeout(Duration::from_secs(95), transfer::serve_one(&mut pipe, &connection)).await;
-                if pipe.disconnect().is_err() { break; }
+                let started = std::time::Instant::now();
+                match tokio::time::timeout(
+                    Duration::from_secs(95),
+                    transfer::serve_one(&mut connected, &connection),
+                )
+                .await
+                {
+                    Ok(Ok(())) => tracing::debug!(
+                        elapsed_ms = started.elapsed().as_millis() as u64,
+                        "SSH upload pipe request completed"
+                    ),
+                    Ok(Err(error)) => tracing::warn!(
+                        elapsed_ms = started.elapsed().as_millis() as u64,
+                        error = %format!("{error:#}"),
+                        "SSH upload pipe request failed"
+                    ),
+                    Err(error) => tracing::warn!(
+                        elapsed_ms = started.elapsed().as_millis() as u64,
+                        error = %error,
+                        "SSH upload pipe request timed out"
+                    ),
+                }
+                drop(connected);
+                let Some(next_connection) = next_connection else {
+                    break;
+                };
+                pending_connection = next_connection;
             }
         });
         let (tx, mut rx) = tokio::sync::mpsc::channel(16);
@@ -372,6 +426,25 @@ fn run_inner(real_ssh: &Path, directory: &Path, args: Vec<OsString>) -> Result<i
 }
 
 pub fn upload(path: &Path, pipe_name: &str, expected_pid: u32) -> Result<String> {
+    let started = std::time::Instant::now();
+    let result = upload_inner(path, pipe_name, expected_pid);
+    match &result {
+        Ok(_) => tracing::info!(
+            expected_pid,
+            elapsed_ms = started.elapsed().as_millis() as u64,
+            "Native SSH image upload completed"
+        ),
+        Err(error) => tracing::warn!(
+            expected_pid,
+            elapsed_ms = started.elapsed().as_millis() as u64,
+            error = %format!("{error:#}"),
+            "Native SSH image upload failed"
+        ),
+    }
+    result
+}
+
+fn upload_inner(path: &Path, pipe_name: &str, expected_pid: u32) -> Result<String> {
     let metadata = std::fs::metadata(path)?;
     ensure!(
         metadata.len() <= transfer::MAX_IMAGE_BYTES as u64,
@@ -401,7 +474,9 @@ pub fn upload(path: &Path, pipe_name: &str, expected_pid: u32) -> Result<String>
             let mut pid = 0;
             check(unsafe { GetNamedPipeServerProcessId(pipe.as_raw_handle().cast(), &mut pid) })?;
             ensure!(pid == expected_pid, "SSH session changed before upload");
-            transfer::request(&mut pipe, &bytes).await
+            transfer::request(&mut pipe, &bytes)
+                .await
+                .context("SSH upload pipe protocol failed")
         })
         .await
         .context("Image upload timed out; path was not pasted")?
