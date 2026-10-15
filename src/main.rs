@@ -32,6 +32,45 @@ const TERMINAL_FONT_SIZE: f32 = 16.0;
 const TERMINAL_LINE_HEIGHT: f32 = 1.3;
 const MAX_OSC52_CLIPBOARD_BYTES: usize = 1024 * 1024;
 
+#[cfg(windows)]
+fn windows_clipboard_owner(frame: &eframe::Frame) -> Result<isize> {
+    use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+
+    match frame
+        .window_handle()
+        .context("getting the YiTerm window handle for clipboard ownership")?
+        .as_raw()
+    {
+        RawWindowHandle::Win32(handle) => Ok(handle.hwnd.get()),
+        handle => anyhow::bail!("Expected a Win32 clipboard owner window, got {handle:?}"),
+    }
+}
+
+#[cfg(windows)]
+fn write_windows_clipboard(text: String, owner: isize) -> Result<()> {
+    use clipboard_win::{Clipboard, Setter, formats::Unicode};
+
+    let owner = owner as clipboard_win::types::HWND;
+    let clipboard = Clipboard::new_attempts_for(owner, 5)
+        .context("opening Windows host clipboard with YiTerm window owner")?;
+    Unicode
+        .write_clipboard(&text)
+        .context("writing Unicode text to Windows host clipboard")?;
+    drop(clipboard);
+
+    let clipboard = Clipboard::new_attempts_for(owner, 5)
+        .context("reopening Windows host clipboard to verify the write")?;
+    let mut actual = String::new();
+    Unicode
+        .read_clipboard(&mut actual)
+        .context("reading back Windows host clipboard text")?;
+    if actual != text {
+        anyhow::bail!("Windows host clipboard read-back did not match the requested text");
+    }
+    drop(clipboard);
+    Ok(())
+}
+
 fn terminal_cell_rect(origin: egui::Pos2, cell: Vec2, column: usize, row: usize) -> Rect {
     // Compute both sides from grid coordinates. Adding cell height to the top
     // can round differently from the next row's top at fractional line heights.
@@ -405,9 +444,13 @@ impl TerminalSession {
                         );
                         self.status = "Remote clipboard request exceeds 1 MiB".into();
                     } else {
+                        tracing::info!(
+                            bytes = text.len(),
+                            chars = text.chars().count(),
+                            "Received OSC 52 host clipboard request"
+                        );
                         self.pending_clipboard = Some(text);
                         self.status = "Writing remote text to host clipboard…".into();
-                        tracing::debug!("Remote application requested a host clipboard write");
                     }
                 }
                 _ => {}
@@ -447,6 +490,15 @@ impl TerminalSession {
         true
     }
 
+    #[cfg(windows)]
+    fn flush_clipboard(&mut self, owner: std::result::Result<isize, String>) {
+        self.flush_clipboard_with(|text| {
+            let owner = owner.map_err(anyhow::Error::msg)?;
+            write_windows_clipboard(text, owner)
+        });
+    }
+
+    #[cfg(not(windows))]
     fn flush_clipboard(&mut self) {
         self.flush_clipboard_with(|text| {
             let mut clipboard = arboard::Clipboard::new().context("opening host clipboard")?;
@@ -1253,7 +1305,7 @@ fn reserve_terminal_keyboard(ctx: &egui::Context) {
 }
 
 impl eframe::App for TerminalApp {
-    fn update(&mut self, ctx: &egui::Context, _: &mut eframe::Frame) {
+    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         ctx.set_visuals(self.theme.visuals());
         if !self.settings_open {
             reserve_terminal_keyboard(ctx);
@@ -1265,8 +1317,13 @@ impl eframe::App for TerminalApp {
                 self.close_tab(index);
             }
         }
+        #[cfg(windows)]
+        let clipboard_owner = windows_clipboard_owner(_frame).map_err(|error| format!("{error:#}"));
         for tab in &mut self.tabs {
             for pane in &mut tab.panes {
+                #[cfg(windows)]
+                pane.flush_clipboard(clipboard_owner.clone());
+                #[cfg(not(windows))]
                 pane.flush_clipboard();
             }
         }
