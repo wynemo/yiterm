@@ -1141,7 +1141,7 @@ impl TerminalTab {
         !self.panes.is_empty()
     }
 
-    fn show(&mut self, ctx: &egui::Context, ui: &mut egui::Ui) -> Option<(usize, SplitDirection)> {
+    fn show(&mut self, ctx: &egui::Context, ui: &mut egui::Ui) {
         let mut rectangles = Vec::new();
         self.layout.rectangles(
             ui,
@@ -1150,7 +1150,6 @@ impl TerminalTab {
             &mut rectangles,
         );
         let mut close = None;
-        let mut split = None;
         // Resolve focus before delivering this frame's keyboard and clipboard events.
         for &(index, rect) in &rectangles {
             if ctx
@@ -1164,18 +1163,7 @@ impl TerminalTab {
                 ui.id().with(("pane-menu", index)),
                 egui::Sense::click(),
             );
-            if !self.panes[index].copy_on_right_click(&response, cfg!(windows)) {
-                response.context_menu(|ui| {
-                    if ui.button("Split Right").clicked() {
-                        split = Some((index, SplitDirection::Right));
-                        ui.close();
-                    }
-                    if ui.button("Split Down").clicked() {
-                        split = Some((index, SplitDirection::Down));
-                        ui.close();
-                    }
-                });
-            }
+            self.panes[index].copy_on_right_click(&response, cfg!(windows));
             let header = Rect::from_min_size(rect.min, Vec2::new(rect.width(), 24.0));
             let mut header_ui = ui.new_child(
                 egui::UiBuilder::new()
@@ -1220,9 +1208,7 @@ impl TerminalTab {
         }
         if let Some(index) = close {
             self.close_pane(index);
-            return None;
         }
-        split
     }
 }
 
@@ -1553,16 +1539,11 @@ impl eframe::App for TerminalApp {
                 ui.label(&session.status);
             });
         });
-        let mut pane_split = None;
         egui::CentralPanel::default()
             .frame(egui::Frame::NONE.fill(self.theme.background()))
             .show(ctx, |ui| {
-                pane_split = self.tabs[self.active].show(ctx, ui);
+                self.tabs[self.active].show(ctx, ui);
             });
-        if let Some((pane, direction)) = pane_split {
-            self.tabs[self.active].select(pane);
-            self.split_pane(direction);
-        }
         // A pane can be closed from its header during rendering.
         if self.tabs[self.active].panes.is_empty() {
             self.close_tab(self.active);
