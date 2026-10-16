@@ -4,7 +4,7 @@ set -euo pipefail
 cd /work
 yum install -y libX11-devel libXcursor-devel libXi-devel libXrandr-devel \
   libxcb-devel libxkbcommon-devel libxkbcommon-x11 mesa-libGL-devel \
-  mesa-dri-drivers xorg-x11-server-Xvfb xorg-x11-utils
+  mesa-dri-drivers mesa-demos xorg-x11-server-Xvfb xorg-x11-utils
 export PATH="$CARGO_HOME/bin:/opt/python/cp313-cp313/bin:$PATH"
 if ! command -v rustup >/dev/null; then
   curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs -o /tmp/yiterm-rustup.sh
@@ -25,10 +25,12 @@ Xvfb :99 -screen 0 1280x800x24 +extension GLX &
 xvfb_pid=$!
 trap 'kill "$xvfb_pid" 2>/dev/null || true' EXIT
 export DISPLAY=:99 LIBGL_ALWAYS_SOFTWARE=1 WINIT_UNIX_BACKEND=x11
+export LIBGL_DEBUG=verbose GALLIUM_DRIVER=llvmpipe
 for attempt in {1..30}; do
   if xdpyinfo >/dev/null 2>&1; then break; fi
   sleep 1
 done
 xdpyinfo >/dev/null
+glxinfo -B
 python3 scripts/smoke_linux.py "$binary"
 python3 scripts/package.py --target "$target"

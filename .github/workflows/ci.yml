@@ -118,7 +118,8 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
-      - uses: actions/cache@v4
+      - uses: actions/cache/restore@v4
+        id: linux-cache
         with:
           path: |
             ~/.cache/yiterm-linux
@@ -145,7 +146,21 @@ jobs:
             -e CARGO_PROFILE_RELEASE_DEBUG \
             quay.io/pypa/manylinux2014_x86_64 \
             bash /work/scripts/build_linux.sh
-          sudo chown -R "$(id -u):$(id -g)" target dist "$HOME/.cache/yiterm-linux"
+
+      - name: Restore runner ownership
+        if: always()
+        run: sudo chown -R "$(id -u):$(id -g)" target "$HOME/.cache/yiterm-linux"
+
+      - uses: actions/cache/save@v4
+        if: always() && steps.linux-cache.outputs.cache-hit != 'true'
+        with:
+          path: |
+            ~/.cache/yiterm-linux
+            target/x86_64-unknown-linux-gnu
+          key: ${{ steps.linux-cache.outputs.cache-primary-key }}
+
+      - name: Restore package ownership
+        run: sudo chown -R "$(id -u):$(id -g)" dist
 
       - name: Upload Linux build
         uses: actions/upload-artifact@v7
