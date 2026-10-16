@@ -4,7 +4,7 @@ set -euo pipefail
 cd /work
 yum install -y libX11-devel libXcursor-devel libXi-devel libXrandr-devel \
   libxcb-devel libxkbcommon-devel libxkbcommon-x11 mesa-libGL-devel \
-  mesa-dri-drivers mesa-demos xorg-x11-server-Xvfb xorg-x11-utils
+  mesa-dri-drivers glx-utils xorg-x11-server-Xvfb xorg-x11-utils
 export PATH="$CARGO_HOME/bin:/opt/python/cp313-cp313/bin:$PATH"
 if ! command -v rustup >/dev/null; then
   curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs -o /tmp/yiterm-rustup.sh
