@@ -150,4 +150,4 @@ Windows CI 额外保存 `profiling-windows-<commit>` artifact，内含同次优�
 
 只有分支推送触发 CI，tag 推送不单独触发。一次 main 流水线完成 macOS、Windows 构建与测试；全部通过后，如果当前提交有对应版本 tag，就直接使用本次构建产物发布 GitHub Release。构建的打包步骤输出当前提交的版本 tag，发布 job 通过 `needs.build.outputs.tag` 判断是否运行；没有对应 tag 时跳过整个发布 job。若 tag 在 main 流水线结束后才推送，可在 main 上手动运行该工作流完成发布。
 
-CI 固定使用 Rust `1.99.1`，避免浮动 `stable` 自动升级导致依赖缓存失效。升级工具链时同步修改 `.github/workflows/ci.yml` 中的 `toolchain`；升级后的首次构建需要重建缓存。release 调试符号配置在工作流全局设置，缓存、编译和测试使用同一配置。
+CI 固定使用 Rust `1.99.1`，避免浮动 `stable` 自动升级导致依赖缓存失效。升级工具链时同步修改 `.github/workflows/ci.yml` 中的 `toolchain`；升级后的首次构建需要重建缓存。缓存前移除 runner 预装的其他 Rust 工具链，避免缓存键受 runner 镜像更新影响。release 调试符号配置在工作流全局设置，缓存、编译和测试使用同一配置。

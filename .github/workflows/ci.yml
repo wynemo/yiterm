@@ -45,6 +45,17 @@ jobs:
           toolchain: 1.99.1
           targets: ${{ matrix.target }}
 
+      # rust-cache hashes every installed toolchain, including runner preinstalls.
+      - name: Keep only the pinned Rust toolchain
+        shell: bash
+        run: |
+          active="$(rustup show active-toolchain | cut -d ' ' -f 1)"
+          while read -r toolchain _; do
+            if [[ "$toolchain" != "$active" ]]; then
+              rustup toolchain uninstall "$toolchain"
+            fi
+          done < <(rustup toolchain list)
+
       - uses: Swatinem/rust-cache@v2
         with:
           key: ${{ matrix.target }}
