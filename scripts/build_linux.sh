@@ -45,5 +45,5 @@ for attempt in {1..30}; do
   sleep 1
 done
 xdpyinfo >/dev/null
-glxinfo -B
+glxinfo
 python3 scripts/smoke_linux.py "$binary"
