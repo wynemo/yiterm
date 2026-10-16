@@ -107,11 +107,12 @@ jobs:
           retention-days: 30
 
   linux:
-    name: linux-x64 (CentOS 7 / glibc 2.17)
+    name: linux-x64 build (CentOS 7 / glibc 2.17)
     runs-on: ubuntu-22.04
     timeout-minutes: 45
     outputs:
       tag: ${{ steps.package.outputs.tag }}
+      version: ${{ steps.package.outputs.version }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -128,7 +129,7 @@ jobs:
           restore-keys: linux-centos7-rust-1.99.1-
 
       # Run Docker explicitly: GitHub's Node actions cannot run on glibc 2.17.
-      - name: Build and test in CentOS 7 userspace
+      - name: Build and package in CentOS 7 userspace
         id: package
         env:
           YITERM_BUILD_REV: ${{ github.sha }}
@@ -145,7 +146,7 @@ jobs:
             -e RUST_TOOLCHAIN=1.99.1 \
             -e CARGO_PROFILE_RELEASE_DEBUG \
             quay.io/pypa/manylinux2014_x86_64 \
-            bash /work/scripts/build_linux.sh
+            bash /work/scripts/build_linux.sh build
 
       - name: Restore runner ownership
         if: always()
@@ -171,9 +172,54 @@ jobs:
           compression-level: 0
           retention-days: 30
 
+  linux-test:
+    name: linux-x64 tests (CentOS 7 / Xvfb)
+    needs: linux
+    runs-on: ubuntu-22.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - uses: actions/cache/restore@v4
+        with:
+          path: |
+            ~/.cache/yiterm-linux
+            target/x86_64-unknown-linux-gnu
+          key: linux-centos7-rust-1.99.1-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'scripts/build_linux.sh') }}
+          restore-keys: linux-centos7-rust-1.99.1-
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: yiterm-${{ needs.linux.outputs.version }}-linux-x64
+          path: dist
+
+      - name: Verify and extract the uploaded Linux package
+        run: |
+          cd dist
+          sha256sum -c *.sha256
+          tar -xzf *.tar.gz
+
+      - name: Test in CentOS 7 userspace
+        env:
+          YITERM_BUILD_REV: ${{ github.sha }}
+        run: |
+          mkdir -p "$HOME/.cache/yiterm-linux"
+          docker run --rm \
+            -v "$GITHUB_WORKSPACE:/work" \
+            -v "$HOME/.cache/yiterm-linux:/ci-cache" \
+            -e YITERM_BUILD_REV \
+            -e CARGO_HOME=/ci-cache/cargo \
+            -e RUSTUP_HOME=/ci-cache/rustup \
+            -e RUST_TOOLCHAIN=1.99.1 \
+            -e CARGO_PROFILE_RELEASE_DEBUG \
+            quay.io/pypa/manylinux2014_x86_64 \
+            bash /work/scripts/build_linux.sh test
+
   release:
     name: Publish GitHub Release
-    needs: [build, linux]
+    needs: [build, linux, linux-test]
     if: github.ref == 'refs/heads/main' && needs.build.outputs.tag != '' && needs.linux.outputs.tag == needs.build.outputs.tag
     runs-on: ubuntu-latest
     timeout-minutes: 10
