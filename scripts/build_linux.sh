@@ -19,6 +19,8 @@ rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal
 rustup default "$RUST_TOOLCHAIN"
 target=x86_64-unknown-linux-gnu
 if [[ "$stage" == build ]]; then
+  # The checkout belongs to the host runner, not the container root user.
+  git config --global --add safe.directory /work
   cargo build --locked --release --target "$target" --no-default-features --features x11
   python3 scripts/verify_linux.py "target/$target/release/yiterm"
   python3 scripts/package.py --target "$target"
