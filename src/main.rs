@@ -615,6 +615,39 @@ impl TerminalSession {
             self.term
                 .scroll_display(Scroll::Delta((scroll / cell.y).round() as i32));
         }
+        let hovered_link = ctx
+            .input(|input| input.pointer.hover_pos())
+            .and_then(|pos| {
+                rect.contains(pos)
+                    .then(|| {
+                        let (point, _) = selection_point(
+                            rect,
+                            cell,
+                            size,
+                            self.term.grid().display_offset(),
+                            pos,
+                        );
+                        terminal_link(&self.term, point)
+                    })
+                    .flatten()
+            });
+        if let Some(link) = &hovered_link {
+            ctx.set_cursor_icon(egui::CursorIcon::PointingHand);
+            let hint = if cfg!(target_os = "macos") {
+                "Cmd"
+            } else {
+                "Ctrl"
+            };
+            egui::Tooltip::always_open(
+                ctx.clone(),
+                ui.layer_id(),
+                ui.id().with("terminal_link"),
+                egui::PopupAnchor::Pointer,
+            )
+            .show(|ui| {
+                ui.label(format!("{hint}+点击打开 {link}"));
+            });
+        }
         let content = self.term.renderable_content();
         let selection = content.selection;
         let offset = content.display_offset;
@@ -803,6 +836,23 @@ impl TerminalSession {
                     pressed,
                     modifiers,
                 } => {
+                    let open_link = if cfg!(target_os = "macos") {
+                        modifiers.mac_cmd
+                    } else {
+                        modifiers.ctrl
+                    };
+                    if button == egui::PointerButton::Primary && open_link && rect.contains(pos) {
+                        if pressed {
+                            let (point, _) = selection_point(rect, cell, size, offset, pos);
+                            if let Some(url) = terminal_link(&self.term, point) {
+                                ctx.open_url(egui::OpenUrl::new_tab(url));
+                                self.selecting = false;
+                                continue;
+                            }
+                        } else if hovered_link.is_some() {
+                            continue;
+                        }
+                    }
                     let tracked = self.mouse_button == Some(button);
                     if button == egui::PointerButton::Primary {
                         if pressed && !report_mouse && rect.contains(pos) {
@@ -1826,6 +1876,75 @@ fn is_copy_shortcut(key: Key, modifiers: egui::Modifiers) -> bool {
         || (key == Key::Insert && modifiers.ctrl && !modifiers.shift)
 }
 
+/// Resolve OSC 8 links or HTTP(S) text across soft-wrapped terminal rows.
+fn terminal_link<T: EventListener>(term: &Term<T>, point: Point) -> Option<String> {
+    let grid = term.grid();
+    if let Some(link) = grid[point].hyperlink() {
+        return browser_url(link.uri());
+    }
+    let last = Column(grid.columns() - 1);
+    let mut start = point.line;
+    while start > grid.topmost_line()
+        && grid[Line(start.0 - 1)][last]
+            .flags
+            .contains(Flags::WRAPLINE)
+    {
+        start -= 1;
+    }
+    let mut end = point.line;
+    while end < grid.bottommost_line() && grid[end][last].flags.contains(Flags::WRAPLINE) {
+        end += 1;
+    }
+    let mut text = String::new();
+    let mut target = None;
+    for line in start.0..=end.0 {
+        for column in 0..grid.columns() {
+            let current = Point::new(Line(line), Column(column));
+            let cell = &grid[current];
+            if current == point {
+                target = Some(text.len());
+            }
+            if !cell
+                .flags
+                .intersects(Flags::WIDE_CHAR_SPACER | Flags::LEADING_WIDE_CHAR_SPACER)
+            {
+                text.push(cell.c);
+                if let Some(extra) = cell.zerowidth() {
+                    text.extend(extra);
+                }
+            }
+        }
+    }
+    let target = target?;
+    for (start, _) in text.match_indices("http") {
+        let candidate = &text[start..];
+        if !(candidate.starts_with("https://") || candidate.starts_with("http://")) {
+            continue;
+        }
+        let length = candidate
+            .find(|c: char| c.is_whitespace() || matches!(c, '<' | '>' | '"' | '\'' | '`'))
+            .unwrap_or(candidate.len());
+        let mut candidate =
+            candidate[..length].trim_end_matches(['.', ',', ';', ':', '!', '?', '。', '，']);
+        for (open, close) in [('(', ')'), ('[', ']'), ('{', '}')] {
+            while candidate.ends_with(close)
+                && candidate.matches(close).count() > candidate.matches(open).count()
+            {
+                candidate = &candidate[..candidate.len() - close.len_utf8()];
+            }
+        }
+        if target >= start && target < start + candidate.len() {
+            return browser_url(candidate);
+        }
+    }
+    None
+}
+
+fn browser_url(value: &str) -> Option<String> {
+    let url = url::Url::parse(value).ok()?;
+    (matches!(url.scheme(), "http" | "https") && url.host_str().is_some()).then(|| value.to_owned())
+}
+
 fn selection_point(
     rect: Rect,
     cell: Vec2,
@@ -2813,6 +2932,30 @@ mod tests {
             &[egui::Event::Ime(egui::ImeEvent::Enabled)]
         ));
     }
+    #[test]
+    fn terminal_links_handle_wrap_punctuation_and_osc8() {
+        let (tx, _rx) = mpsc::channel();
+        let mut term = Term::new(Config::default(), &Size { cols: 20, rows: 6 }, Listener(tx));
+        let mut parser: Processor = Processor::new();
+        parser.advance(&mut term, b"(https://example.com/a(b)).");
+        assert_eq!(
+            terminal_link(&term, Point::new(Line(1), Column(1))).as_deref(),
+            Some("https://example.com/a(b)")
+        );
+        assert!(terminal_link(&term, Point::new(Line(0), Column(0))).is_none());
+        assert!(terminal_link(&term, Point::new(Line(1), Column(5))).is_none());
+        parser.advance(
+            &mut term,
+            b"\r\n\x1b]8;;https://example.org\x1b\\label\x1b]8;;\x1b\\",
+        );
+        assert_eq!(
+            terminal_link(&term, Point::new(Line(2), Column(0))).as_deref(),
+            Some("https://example.org")
+        );
+        assert!(browser_url("javascript:alert(1)").is_none());
+        assert!(browser_url("file:///tmp/test").is_none());
+    }
+
     #[test]
     fn terminal_parses_output_and_answers_queries() {
         let (tx, rx) = mpsc::channel();
