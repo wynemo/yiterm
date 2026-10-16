@@ -125,6 +125,7 @@ jobs:
           path: |
             ~/.cache/yiterm-linux
             target/x86_64-unknown-linux-gnu
+            target/release
           key: linux-centos7-rust-1.99.1-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'scripts/build_linux.sh') }}
           restore-keys: linux-centos7-rust-1.99.1-
 
@@ -158,6 +159,7 @@ jobs:
           path: |
             ~/.cache/yiterm-linux
             target/x86_64-unknown-linux-gnu
+            target/release
           key: ${{ steps.linux-cache.outputs.cache-primary-key }}
 
       - name: Restore package ownership
@@ -187,6 +189,7 @@ jobs:
           path: |
             ~/.cache/yiterm-linux
             target/x86_64-unknown-linux-gnu
+            target/release
           key: linux-centos7-rust-1.99.1-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'scripts/build_linux.sh') }}
           restore-keys: linux-centos7-rust-1.99.1-
 

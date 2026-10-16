@@ -48,5 +48,6 @@ default-features = false
 features = ["terminal-input"]
 
 [patch.crates-io]
+eframe = { path = "vendor/eframe" }
 alacritty_terminal = { path = "vendor/alacritty_terminal" }
 egui-winit = { path = "vendor/egui-winit" }

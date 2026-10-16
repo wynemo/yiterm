@@ -46,6 +46,8 @@ cargo build --locked --release --target x86_64-unknown-linux-gnu --no-default-fe
 
 默认源码构建同时启用 X11 和 Wayland；CentOS 7 包只启用 `x11`，避免依赖其旧版 Wayland 桌面环境。不要在新发行版直接构建后假定兼容 CentOS 7。CI 在 Linux runner 中通过 `quay.io/pypa/manylinux2014_x86_64`（CentOS 7 / glibc 2.17）运行 `scripts/build_linux.sh`，检查 ELF 架构、GLIBC 符号版本和共享库解析，随后打包、生成 SHA-256 并上传 Actions artifact。独立的 Linux 测试 job 下载同一份 artifact、校验 SHA-256，执行日志、性能汇总、刷新、Unicode 测试及 Xvfb/Mesa 窗口启动检查。测试失败不会阻止下载已上传的二进制；正式 Release 仍要求所有平台构建和 Linux 测试通过。
 
+Linux 使用本地补丁 `vendor/eframe`：优先创建默认 OpenGL 3.3 core 上下文；失败时先尝试 OpenGL 2.1 compatibility，再尝试上游 GLES 回退。旧版 Mesa / 远程桌面因此可使用 egui_glow 的 GLSL 1.20 渲染路径，避免直接进入 GLES 回退后出现 `GLXBadContextTag`。窗口测试要求窗口实际可见且已初始化 OpenGL 渲染器。
+
 该方案保留系统 glibc，不替换它，也不随包携带显卡驱动。CI 容器共享 runner 的 Linux 内核，Xvfb 使用软件渲染；它不能替代 CentOS 7.8 的旧内核、真实显卡、输入法、剪贴板和桌面交互实机验证。Linux 构建与运行检查只在 Linux CI / Linux 设备执行，macOS 本机不运行 Linux 构建。
 
 ### Windows SSH 与图片上传

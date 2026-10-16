@@ -84,6 +84,8 @@ def main() -> None:
         (binary, f"{name}/{executable}"),
         (ROOT / "readme.md", f"{name}/readme.md"),
         (ROOT / "TECHNICAL.md", f"{name}/TECHNICAL.md"),
+        (ROOT / "vendor/eframe/LICENSE-MIT", f"{name}/licenses/eframe/LICENSE-MIT"),
+        (ROOT / "vendor/eframe/LICENSE-APACHE", f"{name}/licenses/eframe/LICENSE-APACHE"),
         (ROOT / "vendor/egui-winit/LICENSE-MIT", f"{name}/licenses/egui-winit/LICENSE-MIT"),
         (ROOT / "vendor/egui-winit/LICENSE-APACHE", f"{name}/licenses/egui-winit/LICENSE-APACHE"),
     ]
