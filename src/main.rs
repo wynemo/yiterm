@@ -648,138 +648,9 @@ impl TerminalSession {
                 ui.label(format!("{}\n{hint}+点击打开链接", link.url));
             });
         }
-        let content = self.term.renderable_content();
-        let selection = content.selection;
-        let offset = content.display_offset;
-        let cells: Vec<_> = content.display_iter.collect();
-        // Paint all backgrounds first: a wide glyph extends into its spacer
-        // cell, whose background would otherwise erase the glyph's right half.
-        for indexed in &cells {
-            let row = indexed.point.line.0 + offset as i32;
-            if row < 0 {
-                continue;
-            }
-            let bg = if selection.is_some_and(|range| range.contains(indexed.point)) {
-                theme.selection()
-            } else if indexed.cell.flags.contains(Flags::INVERSE) {
-                color(indexed.cell.fg, true, theme)
-            } else {
-                color(indexed.cell.bg, false, theme)
-            };
-            ui.painter().rect_filled(
-                terminal_cell_rect(rect.min, cell, indexed.point.column.0, row as usize),
-                0.0,
-                bg,
-            );
-        }
-        for indexed in &cells {
-            let row = indexed.point.line.0 + offset as i32;
-            if row < 0 {
-                continue;
-            }
-            let pos =
-                rect.min + Vec2::new(indexed.point.column.0 as f32 * cell.x, row as f32 * cell.y);
-            let fg = if selection.is_some_and(|range| range.contains(indexed.point)) {
-                theme.selection_foreground()
-            } else if indexed.cell.flags.contains(Flags::INVERSE) {
-                color(indexed.cell.bg, false, theme)
-            } else {
-                color(indexed.cell.fg, true, theme)
-            };
-            if !indexed.cell.flags.intersects(
-                Flags::HIDDEN | Flags::WIDE_CHAR_SPACER | Flags::LEADING_WIDE_CHAR_SPACER,
-            ) {
-                let text = terminal_cell_text(indexed.cell);
-                let width = cell.x
-                    * if indexed.cell.flags.contains(Flags::WIDE_CHAR) {
-                        2.0
-                    } else {
-                        1.0
-                    };
-                let galley =
-                    fit_terminal_galley(ui.painter().layout_no_wrap(text, font.clone(), fg), width);
-                // Center the font's line box in the terminal row, as GPUI does.
-                let text_pos = pos + Vec2::new(0.0, (cell.y - galley.size().y) / 2.0);
-                ui.painter().galley(text_pos, galley, fg);
-                if indexed.cell.flags.contains(Flags::UNDERLINE)
-                    || hovered_link
-                        .as_ref()
-                        .is_some_and(|link| link.points.contains(&indexed.point))
-                {
-                    let width = if indexed.cell.flags.contains(Flags::WIDE_CHAR) {
-                        2.0 * cell.x
-                    } else {
-                        cell.x
-                    };
-                    ui.painter().line_segment(
-                        [
-                            pos + Vec2::new(0.0, cell.y - 2.0),
-                            pos + Vec2::new(width, cell.y - 2.0),
-                        ],
-                        (1.0, fg),
-                    );
-                }
-            }
-        }
-        if focused
-            && offset == 0
-            && self.term.mode().contains(TermMode::SHOW_CURSOR)
-            && self.cursor_settings.blinking
-            && ctx.input(|input| input.focused)
-        {
-            let elapsed = self.cursor_blink_started.elapsed().as_millis();
-            ctx.request_repaint_after(Duration::from_millis(500 - (elapsed % 500) as u64));
-        }
-        let blink_visible = !ctx.input(|input| input.focused)
-            || !self.cursor_settings.blinking
-            || self.cursor_blink_started.elapsed().as_millis() % 1000 < 500;
-        if focused
-            && offset == 0
-            && self.term.mode().contains(TermMode::SHOW_CURSOR)
-            && blink_visible
-        {
-            let point = content.cursor.point;
-            let pos =
-                rect.min + Vec2::new(point.column.0 as f32 * cell.x, point.line.0 as f32 * cell.y);
-            let wide = self.term.grid()[point].flags.contains(Flags::WIDE_CHAR);
-            let rect = Rect::from_min_size(
-                pos,
-                Vec2::new(cell.x * if wide { 2.0 } else { 1.0 }, cell.y),
-            );
-            let shape = match self.cursor_settings.shape {
-                CursorShape::Block => rect,
-                CursorShape::Underline => {
-                    Rect::from_min_max(egui::pos2(rect.left(), rect.bottom() - 2.0), rect.max)
-                }
-                CursorShape::Beam => Rect::from_min_size(rect.min, Vec2::new(2.0, rect.height())),
-            };
-            ui.painter().rect_filled(shape, 0.0, theme.cursor());
-            if self.cursor_settings.shape == CursorShape::Block {
-                let cell_content = &self.term.grid()[point];
-                if !cell_content.flags.contains(Flags::HIDDEN) {
-                    let text = terminal_cell_text(cell_content);
-                    let fg = theme.background();
-                    let galley = fit_terminal_galley(
-                        ui.painter().layout_no_wrap(text, font.clone(), fg),
-                        rect.width(),
-                    );
-                    let text_pos = pos + Vec2::new(0.0, (cell.y - galley.size().y) / 2.0);
-                    ui.painter().galley(text_pos, galley, fg);
-                }
-            }
-        }
-        let point = content.cursor.point;
-        let cursor_pos =
-            rect.min + Vec2::new(point.column.0 as f32 * cell.x, point.line.0 as f32 * cell.y);
-        let cursor_rect = Rect::from_min_size(cursor_pos, cell);
-        if focused {
-            ctx.output_mut(|output| {
-                output.ime = Some(egui::output::IMEOutput {
-                    rect: cursor_rect,
-                    cursor_rect,
-                });
-            });
-        }
+        // Deliver input before shaping and submitting the existing screen. The
+        // PTY can process/echo the key while we prepare this frame.
+        let offset = self.term.grid().display_offset();
         let events = if focused
             && !egui::Popup::is_any_open(ctx)
             && ctx.memory(|memory| memory.top_modal_layer().is_none())
@@ -973,6 +844,159 @@ impl TerminalSession {
                 }
                 _ => {}
             }
+        }
+        let content = self.term.renderable_content();
+        let selection = content.selection;
+        let offset = content.display_offset;
+        let cells: Vec<_> = content.display_iter.collect();
+        // Paint all backgrounds first: a wide glyph extends into its spacer
+        // cell, whose background would otherwise erase the glyph's right half.
+        let mut backgrounds: Vec<(Rect, Color32)> = Vec::new();
+        for indexed in &cells {
+            let row = indexed.point.line.0 + offset as i32;
+            if row < 0 {
+                continue;
+            }
+            let bg = if selection.is_some_and(|range| range.contains(indexed.point)) {
+                theme.selection()
+            } else if indexed.cell.flags.contains(Flags::INVERSE) {
+                color(indexed.cell.fg, true, theme)
+            } else {
+                color(indexed.cell.bg, false, theme)
+            };
+            // The central panel already paints the default background. Avoid
+            // thousands of redundant quads, and merge adjacent colored cells.
+            if bg == theme.background() {
+                continue;
+            }
+            let cell_rect =
+                terminal_cell_rect(rect.min, cell, indexed.point.column.0, row as usize);
+            if let Some((previous, previous_color)) = backgrounds.last_mut() {
+                if *previous_color == bg
+                    && previous.min.y == cell_rect.min.y
+                    && previous.max.x == cell_rect.min.x
+                {
+                    previous.max.x = cell_rect.max.x;
+                    continue;
+                }
+            }
+            backgrounds.push((cell_rect, bg));
+        }
+        for (background, bg) in backgrounds {
+            ui.painter().rect_filled(background, 0.0, bg);
+        }
+        for indexed in &cells {
+            let row = indexed.point.line.0 + offset as i32;
+            if row < 0 {
+                continue;
+            }
+            let pos =
+                rect.min + Vec2::new(indexed.point.column.0 as f32 * cell.x, row as f32 * cell.y);
+            let fg = if selection.is_some_and(|range| range.contains(indexed.point)) {
+                theme.selection_foreground()
+            } else if indexed.cell.flags.contains(Flags::INVERSE) {
+                color(indexed.cell.bg, false, theme)
+            } else {
+                color(indexed.cell.fg, true, theme)
+            };
+            if !indexed.cell.flags.intersects(
+                Flags::HIDDEN | Flags::WIDE_CHAR_SPACER | Flags::LEADING_WIDE_CHAR_SPACER,
+            ) {
+                let text = terminal_cell_text(indexed.cell);
+                let width = cell.x
+                    * if indexed.cell.flags.contains(Flags::WIDE_CHAR) {
+                        2.0
+                    } else {
+                        1.0
+                    };
+                // Blank cells still need selection/background/underline handling,
+                // but have no glyph to lay out or submit to the renderer.
+                if !text.is_empty() && text != " " {
+                    let galley = fit_terminal_galley(
+                        ui.painter().layout_no_wrap(text, font.clone(), fg),
+                        width,
+                    );
+                    let text_pos = pos + Vec2::new(0.0, (cell.y - galley.size().y) / 2.0);
+                    ui.painter().galley(text_pos, galley, fg);
+                }
+                if indexed.cell.flags.contains(Flags::UNDERLINE)
+                    || hovered_link
+                        .as_ref()
+                        .is_some_and(|link| link.points.contains(&indexed.point))
+                {
+                    let width = if indexed.cell.flags.contains(Flags::WIDE_CHAR) {
+                        2.0 * cell.x
+                    } else {
+                        cell.x
+                    };
+                    ui.painter().line_segment(
+                        [
+                            pos + Vec2::new(0.0, cell.y - 2.0),
+                            pos + Vec2::new(width, cell.y - 2.0),
+                        ],
+                        (1.0, fg),
+                    );
+                }
+            }
+        }
+        if focused
+            && offset == 0
+            && self.term.mode().contains(TermMode::SHOW_CURSOR)
+            && self.cursor_settings.blinking
+            && ctx.input(|input| input.focused)
+        {
+            let elapsed = self.cursor_blink_started.elapsed().as_millis();
+            ctx.request_repaint_after(Duration::from_millis(500 - (elapsed % 500) as u64));
+        }
+        let blink_visible = !ctx.input(|input| input.focused)
+            || !self.cursor_settings.blinking
+            || self.cursor_blink_started.elapsed().as_millis() % 1000 < 500;
+        if focused
+            && offset == 0
+            && self.term.mode().contains(TermMode::SHOW_CURSOR)
+            && blink_visible
+        {
+            let point = content.cursor.point;
+            let pos =
+                rect.min + Vec2::new(point.column.0 as f32 * cell.x, point.line.0 as f32 * cell.y);
+            let wide = self.term.grid()[point].flags.contains(Flags::WIDE_CHAR);
+            let rect = Rect::from_min_size(
+                pos,
+                Vec2::new(cell.x * if wide { 2.0 } else { 1.0 }, cell.y),
+            );
+            let shape = match self.cursor_settings.shape {
+                CursorShape::Block => rect,
+                CursorShape::Underline => {
+                    Rect::from_min_max(egui::pos2(rect.left(), rect.bottom() - 2.0), rect.max)
+                }
+                CursorShape::Beam => Rect::from_min_size(rect.min, Vec2::new(2.0, rect.height())),
+            };
+            ui.painter().rect_filled(shape, 0.0, theme.cursor());
+            if self.cursor_settings.shape == CursorShape::Block {
+                let cell_content = &self.term.grid()[point];
+                if !cell_content.flags.contains(Flags::HIDDEN) {
+                    let text = terminal_cell_text(cell_content);
+                    let fg = theme.background();
+                    let galley = fit_terminal_galley(
+                        ui.painter().layout_no_wrap(text, font.clone(), fg),
+                        rect.width(),
+                    );
+                    let text_pos = pos + Vec2::new(0.0, (cell.y - galley.size().y) / 2.0);
+                    ui.painter().galley(text_pos, galley, fg);
+                }
+            }
+        }
+        let point = content.cursor.point;
+        let cursor_pos =
+            rect.min + Vec2::new(point.column.0 as f32 * cell.x, point.line.0 as f32 * cell.y);
+        let cursor_rect = Rect::from_min_size(cursor_pos, cell);
+        if focused {
+            ctx.output_mut(|output| {
+                output.ime = Some(egui::output::IMEOutput {
+                    rect: cursor_rect,
+                    cursor_rect,
+                });
+            });
         }
         if !self.ime_preedit.is_empty() {
             let galley = ui.painter().layout_no_wrap(
@@ -2090,6 +2114,9 @@ fn run(args: Args, logging: &logging::Logging) -> Result<()> {
         "yiterm",
         eframe::NativeOptions {
             viewport: egui::ViewportBuilder::default().with_inner_size([960.0, 640.0]),
+            // Terminal colors are flat; per-pixel gradient dithering wastes
+            // substantial CPU when Mesa renders the window in software.
+            dithering: false,
             ..Default::default()
         },
         Box::new(move |cc| {
@@ -2656,6 +2683,10 @@ mod tests {
         }
         assert!(!session.selecting);
         assert_eq!(session.term.selection_to_string().as_deref(), Some("hello"));
+        let selected = ctx.run(egui::RawInput::default(), |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| session.show(ctx, ui, true));
+        });
+        assert!(selected.shapes.iter().any(|shape| matches!(&shape.shape, egui::Shape::Rect(rect) if rect.fill == Color32::from_rgb(65, 90, 125))));
         let output = ctx.run(
             egui::RawInput {
                 events: vec![egui::Event::Copy],
@@ -2673,7 +2704,8 @@ mod tests {
             egui::CentralPanel::default().show(ctx, |ui| session.show(ctx, ui, true));
         });
         assert!(!cleared.shapes.iter().any(|shape| matches!(&shape.shape, egui::Shape::Rect(rect) if rect.fill == Color32::from_rgb(65, 90, 125))));
-        assert!(output.shapes.iter().any(|shape| matches!(&shape.shape, egui::Shape::Rect(rect) if rect.fill == Color32::from_rgb(65, 90, 125))));
+        // Copy clears the highlight in the same frame now that input is handled first.
+        assert!(!output.shapes.iter().any(|shape| matches!(&shape.shape, egui::Shape::Rect(rect) if rect.fill == Color32::from_rgb(65, 90, 125))));
         session.writer = Box::new(Vec::<u8>::new());
         session.parser.advance(&mut session.term, b"\x1b[?1000h");
         for modifiers in [egui::Modifiers::NONE, egui::Modifiers::SHIFT] {
