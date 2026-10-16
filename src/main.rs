@@ -286,7 +286,7 @@ impl TerminalSession {
         }
     }
     fn copy_on_right_click(&mut self, response: &egui::Response, windows: bool) -> bool {
-        if !windows {
+        if !windows || self.term.mode().intersects(TermMode::MOUSE_MODE) {
             return false;
         }
         let Some(_) = self
@@ -830,10 +830,6 @@ impl TerminalSession {
                         }
                     }
                 }
-                egui::Event::PointerButton {
-                    button: egui::PointerButton::Secondary,
-                    ..
-                } => {}
                 egui::Event::PointerButton {
                     pos,
                     button,
@@ -2450,6 +2446,84 @@ mod tests {
                 session.term.selection.is_some(),
                 selected && !copies_selection
             );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn right_click_reaches_mouse_reporting_apps() {
+        let args = Args {
+            ssh: None,
+            config: None,
+            log_filter: None,
+            shell: Some("/bin/sh".into()),
+        };
+        for (modes, expected) in [
+            (
+                b"\x1b[?1000h\x1b[?1006h".as_slice(),
+                b"\x1b[<2;1;1M\x1b[<2;1;1m".as_slice(),
+            ),
+            (
+                b"\x1b[?1000h".as_slice(),
+                b"\x1b[M\x22!!\x1b[M\x23!!".as_slice(),
+            ),
+            (
+                b"\x1b[?1000h\x1b[?1015h".as_slice(),
+                b"\x1b[34;1;1M\x1b[35;1;1M".as_slice(),
+            ),
+            (b"".as_slice(), b"".as_slice()),
+        ] {
+            let mut session = TerminalSession::new(&args, None).unwrap();
+            let output = tempfile::NamedTempFile::new().unwrap();
+            session.writer = Box::new(output.reopen().unwrap());
+            session.parser.advance(&mut session.term, b"hello");
+            session.parser.advance(&mut session.term, modes);
+            session.mouse_modes.observe(modes);
+            let ctx = egui::Context::default();
+            let pos = egui::pos2(10.0, 10.0);
+            for pressed in [None, Some(true), Some(false)] {
+                let mut events = vec![egui::Event::PointerMoved(pos)];
+                if let Some(pressed) = pressed {
+                    events.push(egui::Event::PointerButton {
+                        pos,
+                        button: egui::PointerButton::Secondary,
+                        pressed,
+                        modifiers: egui::Modifiers::NONE,
+                    });
+                }
+                let _ = ctx.run(
+                    egui::RawInput {
+                        events,
+                        ..Default::default()
+                    },
+                    |ctx| {
+                        egui::CentralPanel::default().show(ctx, |ui| {
+                            let response = ui.interact(
+                                ui.available_rect_before_wrap(),
+                                ui.id().with("copy"),
+                                egui::Sense::click(),
+                            );
+                            if !modes.is_empty() {
+                                let mut selection = Selection::new(
+                                    SelectionType::Simple,
+                                    Point::new(Line(0), Column(0)),
+                                    Side::Left,
+                                );
+                                selection.update(Point::new(Line(0), Column(4)), Side::Right);
+                                session.term.selection = Some(selection);
+                                assert_eq!(
+                                    session.term.selection_to_string().as_deref(),
+                                    Some("hello")
+                                );
+                                assert!(!session.copy_on_right_click(&response, true));
+                            }
+                            session.show(ctx, ui, true);
+                        });
+                    },
+                );
+            }
+            assert_eq!(std::fs::read(output.path()).unwrap(), expected);
+            assert!(session.mouse_button.is_none());
         }
     }
 
