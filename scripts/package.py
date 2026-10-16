@@ -16,6 +16,7 @@ ROOT = Path(__file__).resolve().parents[1]
 TARGETS = {
     "x86_64-pc-windows-msvc": ("windows-x64", "yiterm.exe"),
     "aarch64-apple-darwin": ("macos-arm64", "yiterm"),
+    "x86_64-unknown-linux-gnu": ("linux-x64", "yiterm"),
 }
 CONPTY_VERSION = "1.24.261001001"
 CONPTY_FILES = {
@@ -51,6 +52,13 @@ def verify_binary(data: bytes, target: str) -> None:
             raise ValueError("Invalid Windows PE header")
         if struct.unpack_from("<H", data, offset + 4)[0] != 0x8664:
             raise ValueError("Expected a Windows x64 executable")
+    elif target == "x86_64-unknown-linux-gnu":
+        if len(data) < 64 or data[:7] != b"\x7fELF\x02\x01\x01":
+            raise ValueError("Expected a little-endian ELF64 executable")
+        if struct.unpack_from("<H", data, 18)[0] != 62:
+            raise ValueError("Expected a Linux x64 executable")
+        if struct.unpack_from("<H", data, 16)[0] not in (2, 3):
+            raise ValueError("Expected an ELF executable or PIE")
     else:
         if len(data) < 8 or data[:4] != b"\xcf\xfa\xed\xfe":
             raise ValueError("Expected a 64-bit Mach-O executable")
