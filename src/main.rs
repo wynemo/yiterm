@@ -689,10 +689,7 @@ impl TerminalSession {
             if !indexed.cell.flags.intersects(
                 Flags::HIDDEN | Flags::WIDE_CHAR_SPACER | Flags::LEADING_WIDE_CHAR_SPACER,
             ) {
-                let mut text = indexed.cell.c.to_string();
-                if let Some(extra) = indexed.cell.zerowidth() {
-                    text.extend(extra);
-                }
+                let text = terminal_cell_text(indexed.cell);
                 let galley = ui.painter().layout_no_wrap(text, font.clone(), fg);
                 // Center the font's line box in the terminal row, as GPUI does.
                 let text_pos = pos + Vec2::new(0.0, (cell.y - galley.size().y) / 2.0);
@@ -753,10 +750,7 @@ impl TerminalSession {
             if self.cursor_settings.shape == CursorShape::Block {
                 let cell_content = &self.term.grid()[point];
                 if !cell_content.flags.contains(Flags::HIDDEN) {
-                    let mut text = cell_content.c.to_string();
-                    if let Some(extra) = cell_content.zerowidth() {
-                        text.extend(extra);
-                    }
+                    let text = terminal_cell_text(cell_content);
                     let fg = theme.background();
                     let galley = ui.painter().layout_no_wrap(text, font.clone(), fg);
                     let text_pos = pos + Vec2::new(0.0, (cell.y - galley.size().y) / 2.0);
@@ -2109,6 +2103,39 @@ fn run(args: Args, logging: &logging::Logging) -> Result<()> {
     .map_err(|error| anyhow::anyhow!(error.to_string()))
 }
 
+// egui does not shape variation/joining sequences. Default-ignorable code
+// points must not become standalone missing-glyph boxes. Keep visible combining
+// marks, and leave the terminal grid (including widths and copied text) untouched.
+fn terminal_cell_text(cell: &alacritty_terminal::term::cell::Cell) -> String {
+    std::iter::once(cell.c)
+        .chain(cell.zerowidth().into_iter().flatten().copied())
+        .filter(|ch| !is_default_ignorable(*ch))
+        .collect()
+}
+
+// Unicode 17.0 Default_Ignorable_Code_Point, including reserved ranges.
+// https://www.unicode.org/Public/17.0.0/ucd/DerivedCoreProperties.txt
+// Do not replace this with a zero-width check: accents and enclosing marks are
+// zero-width too, but carry visible content.
+fn is_default_ignorable(ch: char) -> bool {
+    matches!(ch,
+        '\u{00AD}' | '\u{034F}' | '\u{061C}'
+        | '\u{115F}'..='\u{1160}'
+        | '\u{17B4}'..='\u{17B5}'
+        | '\u{180B}'..='\u{180F}'
+        | '\u{200B}'..='\u{200F}'
+        | '\u{202A}'..='\u{202E}'
+        | '\u{2060}'..='\u{206F}'
+        | '\u{3164}'
+        | '\u{FE00}'..='\u{FE0F}'
+        | '\u{FEFF}' | '\u{FFA0}'
+        | '\u{FFF0}'..='\u{FFF8}'
+        | '\u{1BCA0}'..='\u{1BCA3}'
+        | '\u{1D173}'..='\u{1D17A}'
+        | '\u{E0000}'..='\u{E0FFF}'
+    )
+}
+
 fn configure_fonts(ctx: &egui::Context) {
     let mut fonts = egui::FontDefinitions::default();
     fonts.font_data.insert(
@@ -2666,6 +2693,137 @@ mod tests {
                     }
                 }
             }
+        }
+    }
+
+    #[test]
+    fn terminal_display_ignores_formatting_without_erasing_visible_marks() {
+        let invisible = [
+            '\u{00AD}',
+            '\u{034F}',
+            '\u{061C}',
+            '\u{115F}',
+            '\u{1160}',
+            '\u{17B4}',
+            '\u{17B5}',
+            '\u{180B}',
+            '\u{180E}',
+            '\u{180F}',
+            '\u{200B}',
+            '\u{200C}',
+            '\u{200D}',
+            '\u{200E}',
+            '\u{200F}',
+            '\u{202A}',
+            '\u{202E}',
+            '\u{2060}',
+            '\u{2065}',
+            '\u{2069}',
+            '\u{206F}',
+            '\u{3164}',
+            '\u{FE00}',
+            '\u{FE0E}',
+            '\u{FE0F}',
+            '\u{FEFF}',
+            '\u{FFA0}',
+            '\u{FFF0}',
+            '\u{FFF8}',
+            '\u{1BCA0}',
+            '\u{1BCA3}',
+            '\u{1D173}',
+            '\u{1D17A}',
+            '\u{E0001}',
+            '\u{E0067}',
+            '\u{E007F}',
+            '\u{E0100}',
+            '\u{E01EF}',
+            '\u{E0FFF}',
+        ];
+        for ch in invisible {
+            let mut cell = alacritty_terminal::term::cell::Cell::default();
+            cell.c = '⚠';
+            cell.push_zerowidth(ch);
+            assert_eq!(terminal_cell_text(&cell), "⚠", "{ch:?}");
+            assert_eq!(cell.zerowidth().unwrap(), &[ch]);
+            cell.c = ch;
+            assert!(terminal_cell_text(&cell).is_empty(), "{ch:?}");
+        }
+        for (base, mark) in [
+            ('e', '\u{0301}'),
+            ('a', '\u{0308}'),
+            ('1', '\u{20E3}'),
+            ('क', '\u{093F}'),
+        ] {
+            let mut cell = alacritty_terminal::term::cell::Cell::default();
+            cell.c = base;
+            cell.push_zerowidth(mark);
+            assert_eq!(terminal_cell_text(&cell), format!("{base}{mark}"));
+        }
+        for ch in [
+            ' ', '\u{00A0}', '\u{2007}', '\u{202F}', '中', '─', '⚠', '❤', '😀', '\u{FFFD}',
+            '\u{E000}',
+        ] {
+            assert!(!is_default_ignorable(ch), "{ch:?}");
+        }
+    }
+
+    #[test]
+    fn parsed_unicode_keeps_grid_positions_and_original_selection() {
+        for (input, display, columns) in [
+            ("⚠\u{FE0F}", "⚠", 1),
+            ("❤\u{FE0E}", "❤", 1),
+            ("✓\u{FE0F}", "✓", 1),
+            ("中\u{E0100}", "中", 2),
+            ("ᠠ\u{180B}", "ᠠ", 1),
+            ("a\u{034F}\u{0301}", "a\u{0301}", 1),
+            ("a\u{200D}\u{2060}\u{FEFF}", "a", 1),
+            ("🏴\u{E0067}\u{E0062}\u{E007F}", "🏴", 2),
+            ("1\u{FE0F}\u{20E3}", "1\u{20E3}", 1),
+        ] {
+            let (tx, _rx) = mpsc::channel();
+            let mut term = Term::new(Config::default(), &Size { cols: 20, rows: 2 }, Listener(tx));
+            let mut parser: Processor = Processor::new();
+            parser.advance(&mut term, format!("{input}X").as_bytes());
+            let first = &term.grid()[Point::new(Line(0), Column(0))];
+            assert_eq!(terminal_cell_text(first), display, "{input:?}");
+            assert_eq!(first.flags.contains(Flags::WIDE_CHAR), columns == 2);
+            assert_eq!(term.grid()[Point::new(Line(0), Column(columns))].c, 'X');
+            assert_eq!(term.grid().cursor.point.column.0, columns + 1);
+            term.selection = Some(Selection::new(
+                SelectionType::Lines,
+                Point::new(Line(0), Column(0)),
+                Side::Left,
+            ));
+            assert_eq!(
+                term.selection_to_string().unwrap().trim_end(),
+                format!("{input}X")
+            );
+        }
+    }
+
+    #[test]
+    fn format_characters_do_not_add_rendered_width_at_any_scale() {
+        for scale in [1.0, 1.25, 1.5, 2.0] {
+            let ctx = egui::Context::default();
+            configure_fonts(&ctx);
+            ctx.set_pixels_per_point(scale);
+            let _ = ctx.run(egui::RawInput::default(), |ctx| {
+                ctx.fonts_mut(|fonts| {
+                    for base in ['⚠', '❤', '✓', '中', 'ᠠ', '🏴'] {
+                        let mut cell = alacritty_terminal::term::cell::Cell::default();
+                        cell.c = base;
+                        cell.push_zerowidth('\u{FE0F}');
+                        cell.push_zerowidth('\u{034F}');
+                        cell.push_zerowidth('\u{E007F}');
+                        let font = FontId::monospace(TERMINAL_FONT_SIZE);
+                        let expected =
+                            fonts.layout_no_wrap(base.to_string(), font.clone(), Color32::WHITE);
+                        let actual =
+                            fonts.layout_no_wrap(terminal_cell_text(&cell), font, Color32::WHITE);
+                        assert_eq!(actual.size(), expected.size(), "{base} at {scale}");
+                    }
+                });
+            });
         }
     }
 

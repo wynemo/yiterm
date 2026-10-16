@@ -4,6 +4,8 @@ Rust 原生终端原型，支持 macOS 和 Windows。使用 `alacritty_terminal`
 
 终端内嵌 Lilex 字体，无需系统安装；16px 字号配合 1.3 倍行高，使框线字符连续衔接。字体许可证见 [OFL.txt](assets/fonts/lilex/OFL.txt)。
 
+字符显示按终端网格定位。绘制时统一隐藏 Unicode 17.0 的默认不可见字符（如变体选择符、零宽连接符、方向控制符和 emoji 标签），避免产生额外缺字方框；保留可见的组合音标与包围标记，原始文本、复制内容和终端列宽不受此显示过滤影响。当前渲染器不支持完整的复杂文字塑形或彩色 emoji 序列合成，连接序列中的可见字符仍按终端网格分别显示。
+
 ## 运行
 
 下载 GitHub Actions 最新成功的 Windows x64 构建（Python 3.9+ 和 GitHub CLI `gh`）：
