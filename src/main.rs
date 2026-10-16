@@ -690,7 +690,14 @@ impl TerminalSession {
                 Flags::HIDDEN | Flags::WIDE_CHAR_SPACER | Flags::LEADING_WIDE_CHAR_SPACER,
             ) {
                 let text = terminal_cell_text(indexed.cell);
-                let galley = ui.painter().layout_no_wrap(text, font.clone(), fg);
+                let width = cell.x
+                    * if indexed.cell.flags.contains(Flags::WIDE_CHAR) {
+                        2.0
+                    } else {
+                        1.0
+                    };
+                let galley =
+                    fit_terminal_galley(ui.painter().layout_no_wrap(text, font.clone(), fg), width);
                 // Center the font's line box in the terminal row, as GPUI does.
                 let text_pos = pos + Vec2::new(0.0, (cell.y - galley.size().y) / 2.0);
                 ui.painter().galley(text_pos, galley, fg);
@@ -752,7 +759,10 @@ impl TerminalSession {
                 if !cell_content.flags.contains(Flags::HIDDEN) {
                     let text = terminal_cell_text(cell_content);
                     let fg = theme.background();
-                    let galley = ui.painter().layout_no_wrap(text, font.clone(), fg);
+                    let galley = fit_terminal_galley(
+                        ui.painter().layout_no_wrap(text, font.clone(), fg),
+                        rect.width(),
+                    );
                     let text_pos = pos + Vec2::new(0.0, (cell.y - galley.size().y) / 2.0);
                     ui.painter().galley(text_pos, galley, fg);
                 }
@@ -2113,6 +2123,40 @@ fn terminal_cell_text(cell: &alacritty_terminal::term::cell::Cell) -> String {
         .collect()
 }
 
+// Fallback symbol fonts are often proportional. Fit oversized glyphs to the
+// columns allocated by the terminal, retaining their height and atlas UVs.
+// The cached galley is shared: transform a copy only when fitting is necessary.
+fn fit_terminal_galley(mut galley: Arc<egui::Galley>, width: f32) -> Arc<egui::Galley> {
+    if galley.size().x <= width + 0.1 {
+        return galley;
+    }
+    let left = galley.mesh_bounds.left().min(0.0);
+    let right = galley.mesh_bounds.right().max(galley.size().x);
+    let scale = width / (right - left);
+    let map_x = |x: f32| (x - left) * scale;
+    let map_rect = |rect: &mut Rect| {
+        rect.min.x = map_x(rect.min.x);
+        rect.max.x = map_x(rect.max.x);
+    };
+    let fitted = Arc::make_mut(&mut galley);
+    map_rect(&mut fitted.rect);
+    map_rect(&mut fitted.mesh_bounds);
+    for placed in &mut fitted.rows {
+        placed.pos.x *= scale;
+        let row = Arc::make_mut(&mut placed.row);
+        row.size.x *= scale;
+        map_rect(&mut row.visuals.mesh_bounds);
+        for vertex in &mut row.visuals.mesh.vertices {
+            vertex.pos.x = map_x(vertex.pos.x);
+        }
+        for glyph in &mut row.glyphs {
+            glyph.pos.x = map_x(glyph.pos.x);
+            glyph.advance_width *= scale;
+        }
+    }
+    galley
+}
+
 // Unicode 17.0 Default_Ignorable_Code_Point, including reserved ranges.
 // https://www.unicode.org/Public/17.0.0/ucd/DerivedCoreProperties.txt
 // Do not replace this with a zero-width check: accents and enclosing marks are
@@ -2821,6 +2865,53 @@ mod tests {
                         let actual =
                             fonts.layout_no_wrap(terminal_cell_text(&cell), font, Color32::WHITE);
                         assert_eq!(actual.size(), expected.size(), "{base} at {scale}");
+                    }
+                });
+            });
+        }
+    }
+
+    #[test]
+    fn fallback_symbols_fit_terminal_columns_without_changing_height_or_cached_text() {
+        for scale in [1.0, 1.25, 1.5, 2.0] {
+            let ctx = egui::Context::default();
+            configure_fonts(&ctx);
+            ctx.set_pixels_per_point(scale);
+            let _ = ctx.run(egui::RawInput::default(), |ctx| {
+                ctx.fonts_mut(|fonts| {
+                    let font = FontId::monospace(TERMINAL_FONT_SIZE);
+                    let column = fonts.glyph_width(&font, 'M');
+                    for (text, columns) in [
+                        ("⚠", 1.0),
+                        ("❤", 1.0),
+                        ("☀", 1.0),
+                        ("中", 2.0),
+                        ("😀", 2.0),
+                        ("M", 1.0),
+                        ("─", 1.0),
+                    ] {
+                        let original =
+                            fonts.layout_no_wrap(text.into(), font.clone(), Color32::WHITE);
+                        let original_bounds = original.mesh_bounds;
+                        let original_size = original.size();
+                        let width = column * columns;
+                        let fitted = fit_terminal_galley(original.clone(), width);
+                        assert!(fitted.size().x <= width + 0.1, "{text} at {scale}");
+                        assert_eq!(fitted.size().y, original_size.y);
+                        assert_eq!(fitted.mesh_bounds.height(), original_bounds.height());
+                        assert_eq!(original.mesh_bounds, original_bounds);
+                        assert_eq!(original.size(), original_size);
+                        if original_size.x > width + 0.1 {
+                            assert!(fitted.mesh_bounds.left() >= -0.01);
+                            assert!(fitted.mesh_bounds.right() <= width + 0.01);
+                            for row in &fitted.rows {
+                                for vertex in &row.visuals.mesh.vertices {
+                                    assert!(vertex.pos.x >= -0.01 && vertex.pos.x <= width + 0.01);
+                                }
+                            }
+                        } else {
+                            assert!(Arc::ptr_eq(&original, &fitted));
+                        }
                     }
                 });
             });
