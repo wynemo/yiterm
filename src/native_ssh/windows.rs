@@ -473,7 +473,7 @@ fn run_inner(real_ssh: &Path, directory: &Path, args: Vec<OsString>) -> Result<i
         let mut channel = super::shell(&handle, size.0, size.1).await?;
         let name = super::pipe_name(directory, std::process::id())?;
         let security = PipeSecurity::new()?;
-        let mut pipe = security.server(&name, true)?;
+        let pipe = security.server(&name, true)?;
         drop(security);
         let connection = handle.clone();
         let uploads = tokio::spawn(async move {
@@ -499,7 +499,7 @@ fn run_inner(real_ssh: &Path, directory: &Path, args: Vec<OsString>) -> Result<i
                 let next_connection = match PipeSecurity::new()
                     .and_then(|security| security.server(&name, false))
                 {
-                    Ok(mut next_pipe) => Some(tokio::spawn(async move {
+                    Ok(next_pipe) => Some(tokio::spawn(async move {
                         next_pipe.connect().await?;
                         Ok::<_, std::io::Error>(next_pipe)
                     })),
