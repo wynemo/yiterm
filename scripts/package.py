@@ -4,6 +4,7 @@ import argparse
 import hashlib
 import io
 import os
+import shutil
 from pathlib import Path
 import struct
 import tarfile
@@ -66,6 +67,26 @@ def verify_binary(data: bytes, target: str) -> None:
             raise ValueError("Expected a macOS arm64 executable")
 
 
+def prepare_linux_binary(binary: Path) -> Path:
+    """Split symbols on a copy, keeping Cargo's cached build intact."""
+    directory = binary.parent / "profiling"
+    directory.mkdir(exist_ok=True)
+    packaged = directory / binary.name
+    symbols = directory / f"{binary.name}.debug"
+    subprocess.run(["objcopy", "--only-keep-debug", str(binary), str(symbols)], check=True)
+    shutil.copy2(binary, packaged)
+    subprocess.run(["strip", "--strip-unneeded", str(packaged)], check=True)
+    subprocess.run(["objcopy", f"--add-gnu-debuglink={symbols}", str(packaged)], check=True)
+    sections = subprocess.check_output(["readelf", "--sections", "--wide", str(packaged)], text=True)
+    debug_sections = subprocess.check_output(["readelf", "--sections", "--wide", str(symbols)], text=True)
+    if ".debug_info" in sections or ".debug_info" not in debug_sections:
+        raise ValueError("Linux debug symbol separation failed")
+    verify_binary(packaged.read_bytes(), "x86_64-unknown-linux-gnu")
+    print(f"Linux executable: {binary.stat().st_size / 2**20:.1f} MiB -> "
+          f"{packaged.stat().st_size / 2**20:.1f} MiB; symbols stored separately")
+    return packaged
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--target", required=True, choices=TARGETS)
@@ -79,6 +100,8 @@ def main() -> None:
                    if package["name"] == "yiterm" and package["id"] in metadata["workspace_members"])
     binary = ROOT / "target" / args.target / "release" / executable
     verify_binary(binary.read_bytes(), args.target)
+    if args.target == "x86_64-unknown-linux-gnu":
+        binary = prepare_linux_binary(binary)
     name = f"yiterm-{version}-{platform}"
     files = [
         (binary, f"{name}/{executable}"),
