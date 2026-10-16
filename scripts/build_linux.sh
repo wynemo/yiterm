@@ -8,7 +8,7 @@ yum install -y libX11-devel libXcursor-devel libXi-devel libXrandr-devel \
   libxcb-devel libxkbcommon-devel libxkbcommon-x11 mesa-libGL-devel \
   mesa-dri-drivers
 if [[ "$stage" == test ]]; then
-  yum install -y glx-utils xorg-x11-server-Xvfb xorg-x11-utils
+  yum install -y glx-utils xorg-x11-server-Xvfb xorg-x11-utils fontconfig google-noto-sans-cjk-fonts
 fi
 export PATH="$CARGO_HOME/bin:/opt/python/cp313-cp313/bin:$PATH"
 if ! command -v rustup >/dev/null; then
@@ -34,6 +34,7 @@ cargo test --locked --release --target "$target" --no-default-features --feature
 cargo test --locked --release --target "$target" --no-default-features --features x11 --bin yiterm profiling::tests
 cargo test --locked --release --target "$target" --no-default-features --features x11 --bin yiterm repaint_tests
 cargo test --locked --release --target "$target" --no-default-features --features x11 --bin yiterm terminal_unicode_
+cargo test --locked --release --target "$target" --no-default-features --features x11 --bin yiterm terminal_unicode_linux_system_cjk_fallback -- --ignored
 # Exercise window/context creation with CentOS 7's Mesa software renderer.
 Xvfb :99 -screen 0 1280x800x24 +extension GLX &
 xvfb_pid=$!

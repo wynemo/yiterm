@@ -2264,6 +2264,56 @@ fn configure_fonts(ctx: &egui::Context) {
             }
         }
     }
+    #[cfg(target_os = "linux")]
+    {
+        // egui does not inherit Fontconfig fallback from the desktop terminal.
+        // Preserve the selected TTC face instead of assuming collection index 0.
+        let mut loaded = std::collections::HashSet::new();
+        for pattern in [
+            "monospace:lang=zh-cn",
+            "monospace:lang=zh-tw",
+            "monospace:lang=ja",
+            "monospace:lang=ko",
+            "sans-serif:charset=2318",
+        ] {
+            let Ok(output) = std::process::Command::new("fc-match")
+                .args(["--format=%{file}\n%{index}\n", pattern])
+                .output()
+            else {
+                tracing::warn!(
+                    "fc-match unavailable; Linux system font fallback could not be loaded"
+                );
+                break;
+            };
+            if !output.status.success() {
+                continue;
+            }
+            let result = String::from_utf8_lossy(&output.stdout);
+            let mut lines = result.lines();
+            let Some(path) = lines.next().filter(|path| !path.is_empty()) else {
+                continue;
+            };
+            let Some(index) = lines.next().and_then(|index| index.parse::<u32>().ok()) else {
+                continue;
+            };
+            if !loaded.insert((path.to_owned(), index)) {
+                continue;
+            }
+            let Ok(data) = std::fs::read(path) else {
+                continue;
+            };
+            let name = format!("linux:{path}:{index}");
+            let mut data = egui::FontData::from_owned(data);
+            data.index = index;
+            fonts
+                .font_data
+                .insert(name.clone(), std::sync::Arc::new(data));
+            for family in [egui::FontFamily::Monospace, egui::FontFamily::Proportional] {
+                fonts.families.entry(family).or_default().push(name.clone());
+            }
+            tracing::info!(path, index, "Loaded Linux fallback font");
+        }
+    }
     ctx.set_fonts(fonts);
 }
 
@@ -2977,6 +3027,22 @@ mod tests {
                 .flags
                 .contains(Flags::WIDE_CHAR)
         );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    #[ignore = "requires Linux CI CJK fonts"]
+    fn terminal_unicode_linux_system_cjk_fallback() {
+        let ctx = egui::Context::default();
+        configure_fonts(&ctx);
+        let _ = ctx.run(egui::RawInput::default(), |ctx| {
+            ctx.fonts_mut(|fonts| {
+                for family in [egui::FontFamily::Monospace, egui::FontFamily::Proportional] {
+                    let font = FontId::new(TERMINAL_FONT_SIZE, family);
+                    assert!(fonts.has_glyphs(&font, "中文截图剪贴板你好世界"));
+                }
+            });
+        });
     }
 
     #[test]
