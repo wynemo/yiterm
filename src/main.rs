@@ -1960,18 +1960,7 @@ fn terminal_link_details<T: EventListener>(term: &Term<T>, point: Point) -> Opti
         if !(candidate.starts_with("https://") || candidate.starts_with("http://")) {
             continue;
         }
-        let length = candidate
-            .find(|c: char| c.is_whitespace() || matches!(c, '<' | '>' | '"' | '\'' | '`'))
-            .unwrap_or(candidate.len());
-        let mut candidate =
-            candidate[..length].trim_end_matches(['.', ',', ';', ':', '!', '?', '。', '，']);
-        for (open, close) in [('(', ')'), ('[', ']'), ('{', '}')] {
-            while candidate.ends_with(close)
-                && candidate.matches(close).count() > candidate.matches(open).count()
-            {
-                candidate = &candidate[..candidate.len() - close.len_utf8()];
-            }
-        }
+        let candidate = link_text(candidate);
         if target >= start && target < start + candidate.len() {
             let url = browser_url(candidate)?;
             let points = positions
@@ -1984,6 +1973,50 @@ fn terminal_link_details<T: EventListener>(term: &Term<T>, point: Point) -> Opti
         }
     }
     None
+}
+
+/// Stop at prose delimiters, while retaining balanced brackets inside URLs.
+fn link_text(text: &str) -> &str {
+    let mut brackets = Vec::new();
+    let mut end = text.len();
+    for (offset, ch) in text.char_indices() {
+        if ch.is_whitespace()
+            || matches!(
+                ch,
+                '<' | '>'
+                    | '"'
+                    | '\''
+                    | '`'
+                    | '（'
+                    | '）'
+                    | '【'
+                    | '】'
+                    | '「'
+                    | '」'
+                    | '。'
+                    | '，'
+                    | '；'
+                    | '！'
+                    | '？'
+            )
+        {
+            end = offset;
+            break;
+        }
+        match ch {
+            '(' => brackets.push(')'),
+            '[' => brackets.push(']'),
+            '{' => brackets.push('}'),
+            ')' | ']' | '}' => {
+                if brackets.pop() != Some(ch) {
+                    end = offset;
+                    break;
+                }
+            }
+            _ => {}
+        }
+    }
+    text[..end].trim_end_matches(['.', ',', ';', ':', '!', '?'])
 }
 
 fn browser_url(value: &str) -> Option<String> {
@@ -2978,6 +3011,39 @@ mod tests {
             &[egui::Event::Ime(egui::ImeEvent::Enabled)]
         ));
     }
+    #[test]
+    fn terminal_links_exclude_following_prose() {
+        let url = "https://platform.worldquantbrain.com/alpha/xA1MlEam";
+        for suffix in [
+            ") (TO 14.73%",
+            ")(TO 14.73%",
+            ")（TO 14.73%",
+            "）作为备选",
+            "].",
+        ] {
+            let (tx, _rx) = mpsc::channel();
+            let mut term = Term::new(Config::default(), &Size { cols: 20, rows: 8 }, Listener(tx));
+            let mut parser: Processor = Processor::new();
+            parser.advance(&mut term, format!("({url}{suffix}").as_bytes());
+            let link = terminal_link_details(&term, Point::new(Line(0), Column(5))).unwrap();
+            assert_eq!(link.url, url, "suffix: {suffix}");
+            assert_eq!(link.points.len(), url.len());
+            let end = url.len() + 1;
+            assert!(
+                terminal_link(&term, Point::new(Line((end / 20) as i32), Column(end % 20)))
+                    .is_none()
+            );
+        }
+        assert_eq!(
+            link_text("https://example.com/a(b)?x=[1] rest"),
+            "https://example.com/a(b)?x=[1]"
+        );
+        assert_eq!(
+            link_text("https://example.com/a(b))."),
+            "https://example.com/a(b)"
+        );
+    }
+
     #[test]
     fn terminal_links_handle_wrap_punctuation_and_osc8() {
         let (tx, _rx) = mpsc::channel();
