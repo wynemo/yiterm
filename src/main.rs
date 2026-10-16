@@ -627,7 +627,7 @@ impl TerminalSession {
                             self.term.grid().display_offset(),
                             pos,
                         );
-                        terminal_link(&self.term, point)
+                        terminal_link_details(&self.term, point)
                     })
                     .flatten()
             });
@@ -645,7 +645,7 @@ impl TerminalSession {
                 egui::PopupAnchor::Pointer,
             )
             .show(|ui| {
-                ui.label(format!("{hint}+点击打开 {link}"));
+                ui.label(format!("{}\n{hint}+点击打开链接", link.url));
             });
         }
         let content = self.term.renderable_content();
@@ -697,7 +697,11 @@ impl TerminalSession {
                 // Center the font's line box in the terminal row, as GPUI does.
                 let text_pos = pos + Vec2::new(0.0, (cell.y - galley.size().y) / 2.0);
                 ui.painter().galley(text_pos, galley, fg);
-                if indexed.cell.flags.contains(Flags::UNDERLINE) {
+                if indexed.cell.flags.contains(Flags::UNDERLINE)
+                    || hovered_link
+                        .as_ref()
+                        .is_some_and(|link| link.points.contains(&indexed.point))
+                {
                     let width = if indexed.cell.flags.contains(Flags::WIDE_CHAR) {
                         2.0 * cell.x
                     } else {
@@ -1877,10 +1881,43 @@ fn is_copy_shortcut(key: Key, modifiers: egui::Modifiers) -> bool {
 }
 
 /// Resolve OSC 8 links or HTTP(S) text across soft-wrapped terminal rows.
+struct TerminalLink {
+    url: String,
+    points: Vec<Point>,
+}
+
 fn terminal_link<T: EventListener>(term: &Term<T>, point: Point) -> Option<String> {
+    terminal_link_details(term, point).map(|link| link.url)
+}
+
+fn terminal_link_details<T: EventListener>(term: &Term<T>, point: Point) -> Option<TerminalLink> {
     let grid = term.grid();
     if let Some(link) = grid[point].hyperlink() {
-        return browser_url(link.uri());
+        let url = browser_url(link.uri())?;
+        let columns = grid.columns() as i32;
+        let index = point.line.0 * columns + point.column.0 as i32;
+        let to_point = |index: i32| {
+            Point::new(
+                Line(index.div_euclid(columns)),
+                Column(index.rem_euclid(columns) as usize),
+            )
+        };
+        let mut start = index;
+        let mut end = index;
+        while start > grid.topmost_line().0 * columns
+            && grid[to_point(start - 1)].hyperlink().as_ref() == Some(&link)
+        {
+            start -= 1;
+        }
+        while end < (grid.bottommost_line().0 + 1) * columns - 1
+            && grid[to_point(end + 1)].hyperlink().as_ref() == Some(&link)
+        {
+            end += 1;
+        }
+        return Some(TerminalLink {
+            url,
+            points: (start..=end).map(to_point).collect(),
+        });
     }
     let last = Column(grid.columns() - 1);
     let mut start = point.line;
@@ -1897,10 +1934,12 @@ fn terminal_link<T: EventListener>(term: &Term<T>, point: Point) -> Option<Strin
     }
     let mut text = String::new();
     let mut target = None;
+    let mut positions = Vec::new();
     for line in start.0..=end.0 {
         for column in 0..grid.columns() {
             let current = Point::new(Line(line), Column(column));
             let cell = &grid[current];
+            positions.push((text.len(), current));
             if current == point {
                 target = Some(text.len());
             }
@@ -1934,7 +1973,14 @@ fn terminal_link<T: EventListener>(term: &Term<T>, point: Point) -> Option<Strin
             }
         }
         if target >= start && target < start + candidate.len() {
-            return browser_url(candidate);
+            let url = browser_url(candidate)?;
+            let points = positions
+                .iter()
+                .filter_map(|(offset, point)| {
+                    (*offset >= start && *offset < start + candidate.len()).then_some(*point)
+                })
+                .collect();
+            return Some(TerminalLink { url, points });
         }
     }
     None
@@ -2942,6 +2988,10 @@ mod tests {
             terminal_link(&term, Point::new(Line(1), Column(1))).as_deref(),
             Some("https://example.com/a(b)")
         );
+        let link = terminal_link_details(&term, Point::new(Line(1), Column(1))).unwrap();
+        assert_eq!(link.points.first(), Some(&Point::new(Line(0), Column(1))));
+        assert_eq!(link.points.last(), Some(&Point::new(Line(1), Column(4))));
+        assert_eq!(link.points.len(), "https://example.com/a(b)".len());
         assert!(terminal_link(&term, Point::new(Line(0), Column(0))).is_none());
         assert!(terminal_link(&term, Point::new(Line(1), Column(5))).is_none());
         parser.advance(
@@ -2952,6 +3002,10 @@ mod tests {
             terminal_link(&term, Point::new(Line(2), Column(0))).as_deref(),
             Some("https://example.org")
         );
+        let link = terminal_link_details(&term, Point::new(Line(2), Column(2))).unwrap();
+        assert_eq!(link.points.len(), 5);
+        assert_eq!(link.points.first(), Some(&Point::new(Line(2), Column(0))));
+        assert_eq!(link.points.last(), Some(&Point::new(Line(2), Column(4))));
         assert!(browser_url("javascript:alert(1)").is_none());
         assert!(browser_url("file:///tmp/test").is_none());
     }
