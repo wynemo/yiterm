@@ -2741,7 +2741,7 @@ mod tests {
     }
 
     #[test]
-    fn terminal_display_ignores_formatting_without_erasing_visible_marks() {
+    fn terminal_unicode_display_keeps_visible_marks() {
         let invisible = [
             '\u{00AD}',
             '\u{034F}',
@@ -2812,9 +2812,11 @@ mod tests {
     }
 
     #[test]
-    fn parsed_unicode_keeps_grid_positions_and_original_selection() {
+    fn terminal_unicode_keeps_grid_positions_and_original_selection() {
         for (input, display, columns) in [
-            ("⚠\u{FE0F}", "⚠", 1),
+            ("⚠", "⚠", 1),
+            ("⚠\u{FE0F}", "⚠", 2),
+            ("❤\u{FE0F}", "❤", 2),
             ("❤\u{FE0E}", "❤", 1),
             ("✓\u{FE0F}", "✓", 1),
             ("中\u{E0100}", "中", 2),
@@ -2822,7 +2824,7 @@ mod tests {
             ("a\u{034F}\u{0301}", "a\u{0301}", 1),
             ("a\u{200D}\u{2060}\u{FEFF}", "a", 1),
             ("🏴\u{E0067}\u{E0062}\u{E007F}", "🏴", 2),
-            ("1\u{FE0F}\u{20E3}", "1\u{20E3}", 1),
+            ("1\u{FE0F}\u{20E3}", "1\u{20E3}", 2),
         ] {
             let (tx, _rx) = mpsc::channel();
             let mut term = Term::new(Config::default(), &Size { cols: 20, rows: 2 }, Listener(tx));
@@ -2846,7 +2848,107 @@ mod tests {
     }
 
     #[test]
-    fn format_characters_do_not_add_rendered_width_at_any_scale() {
+    fn terminal_unicode_pi_footer_survives_streaming_and_cursor_updates() {
+        let prefix = "· Mimo cache 43/44·2.06M/2.25M 91.5% ";
+        let footer = format!("{prefix}⚠️ compat");
+        for split in 0..=footer.len() {
+            let (tx, _rx) = mpsc::channel();
+            let mut term = Term::new(Config::default(), &Size { cols: 80, rows: 3 }, Listener(tx));
+            let mut parser: Processor = Processor::new();
+            parser.advance(&mut term, &footer.as_bytes()[..split]);
+            parser.advance(&mut term, &footer.as_bytes()[split..]);
+            let warning_column = prefix.chars().count();
+            let warning = &term.grid()[Point::new(Line(0), Column(warning_column))];
+            assert_eq!(warning.c, '⚠');
+            assert!(warning.flags.contains(Flags::WIDE_CHAR), "split {split}");
+            assert!(
+                term.grid()[Point::new(Line(0), Column(warning_column + 1))]
+                    .flags
+                    .contains(Flags::WIDE_CHAR_SPACER)
+            );
+            assert_eq!(term.grid().cursor.point.column.0, warning_column + 9);
+            // Pi's next absolute cursor update must land after the same two
+            // columns the terminal consumed, without leaving stale text.
+            parser.advance(
+                &mut term,
+                format!("\x1b[1;{}Hready\x1b[K", warning_column + 4).as_bytes(),
+            );
+            for (i, ch) in "ready".chars().enumerate() {
+                assert_eq!(
+                    term.grid()[Point::new(Line(0), Column(warning_column + 3 + i))].c,
+                    ch
+                );
+            }
+            term.selection = Some(Selection::new(
+                SelectionType::Lines,
+                Point::new(Line(0), Column(0)),
+                Side::Left,
+            ));
+            assert_eq!(
+                term.selection_to_string().unwrap().trim_end(),
+                format!("{prefix}⚠️ ready")
+            );
+        }
+    }
+
+    #[test]
+    fn terminal_unicode_emoji_handles_row_edges_scrolling_insert_and_overwrite() {
+        for (input, row, col) in [
+            ("abcd⚠️X", 0, 4),
+            ("abcde⚠️X", 1, 0),
+            ("\r\nabcde⚠️X", 1, 0),
+            ("abcdef\x1b[1;2H\x1b[4h⚠️", 0, 1),
+            ("ab中XY\x1b[1;2H⚠️", 0, 1),
+            ("⚠️\u{FE0F}", 0, 0),
+        ] {
+            let (tx, _rx) = mpsc::channel();
+            let mut term = Term::new(Config::default(), &Size { cols: 6, rows: 2 }, Listener(tx));
+            let mut parser: Processor = Processor::new();
+            // Split every UTF-8 byte to exercise decoding and late selectors.
+            for byte in input.as_bytes() {
+                parser.advance(&mut term, std::slice::from_ref(byte));
+            }
+            let base = &term.grid()[Point::new(Line(row), Column(col))];
+            assert_eq!(base.c, '⚠', "{input:?}");
+            assert!(base.flags.contains(Flags::WIDE_CHAR), "{input:?}");
+            let spacer = &term.grid()[Point::new(Line(row), Column(col + 1))];
+            assert_eq!(spacer.c, ' ');
+            assert!(spacer.flags.contains(Flags::WIDE_CHAR_SPACER));
+            assert!(spacer.zerowidth().unwrap_or_default().is_empty());
+            if input.contains("abcde⚠") {
+                let placeholder = &term.grid()[Point::new(Line(0), Column(5))];
+                assert_eq!(placeholder.c, ' ');
+                assert!(
+                    placeholder
+                        .flags
+                        .contains(Flags::LEADING_WIDE_CHAR_SPACER | Flags::WRAPLINE)
+                );
+            }
+            if input.contains("[4h") {
+                assert_eq!(term.grid()[Point::new(Line(0), Column(3))].c, 'b');
+            }
+            if input.contains('中') {
+                assert!(
+                    !term.grid()[Point::new(Line(0), Column(3))]
+                        .flags
+                        .contains(Flags::WIDE_CHAR_SPACER)
+                );
+            }
+        }
+        let (tx, _rx) = mpsc::channel();
+        let mut term = Term::new(Config::default(), &Size { cols: 6, rows: 2 }, Listener(tx));
+        let mut parser: Processor = Processor::new();
+        parser.advance(&mut term, "\x1b[?7labcde⚠️".as_bytes());
+        assert_eq!(term.grid().cursor.point, Point::new(Line(0), Column(5)));
+        assert!(
+            !term.grid()[Point::new(Line(0), Column(5))]
+                .flags
+                .contains(Flags::WIDE_CHAR)
+        );
+    }
+
+    #[test]
+    fn terminal_unicode_format_characters_do_not_add_rendered_width() {
         for scale in [1.0, 1.25, 1.5, 2.0] {
             let ctx = egui::Context::default();
             configure_fonts(&ctx);
@@ -2872,7 +2974,7 @@ mod tests {
     }
 
     #[test]
-    fn fallback_symbols_fit_terminal_columns_without_changing_height_or_cached_text() {
+    fn terminal_unicode_fallback_symbols_fit_columns_without_changing_height_or_cache() {
         for scale in [1.0, 1.25, 1.5, 2.0] {
             let ctx = egui::Context::default();
             configure_fonts(&ctx);

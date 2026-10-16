@@ -86,6 +86,9 @@ jobs:
           cargo test --locked --release --target ${{ matrix.target }} --bin yiterm profiling::tests
           cargo test --locked --release --target ${{ matrix.target }} --bin yiterm repaint_tests
 
+      - name: Test terminal Unicode rendering and emoji column widths
+        run: cargo test --locked --release --target ${{ matrix.target }} --bin yiterm terminal_unicode_
+
       - uses: actions/setup-python@v7
         with:
           python-version: '3.13'
