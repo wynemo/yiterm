@@ -200,12 +200,7 @@ impl TerminalUi {
                 }
             }
         });
-        let mut names = cx.text_system().all_font_names();
-        names.retain(|name| !name.starts_with('.'));
-        names.push("Lilex".into());
-        names.push(app.font_settings.family.clone());
-        names.sort_by_key(|name| name.to_lowercase());
-        names.dedup();
+        let names = available_font_families(cx, &app.font_settings.family);
         let selected = names
             .iter()
             .position(|name| *name == app.font_settings.family)
@@ -217,13 +212,7 @@ impl TerminalUi {
             InputState::new(window, cx).default_value(app.font_settings.size.to_string())
         });
         let settings_subscriptions = vec![
-            cx.subscribe_in(&font_select, window, |this, _, event, _, cx| {
-                if let SelectEvent::Confirm(Some(family)) = event {
-                    this.app.font_settings.family = family.clone();
-                    this.apply_settings();
-                    cx.notify();
-                }
-            }),
+            cx.subscribe_in(&font_select, window, Self::on_font_selected),
             cx.subscribe_in(&font_size, window, |this, input, event, window, cx| {
                 let text = input.read(cx).value();
                 let parsed = text.parse::<f32>().ok().filter(|v| v.is_finite());
@@ -376,6 +365,39 @@ impl TerminalUi {
             self.app.error = Some(format!("Cannot save settings: {error:#}"));
         }
     }
+    fn on_font_selected(
+        &mut self,
+        _: &gpui::Entity<SelectState<SearchableVec<String>>>,
+        event: &SelectEvent<SearchableVec<String>>,
+        _: &mut Window,
+        cx: &mut ViewContext<Self>,
+    ) {
+        if let SelectEvent::Confirm(Some(family)) = event {
+            self.app.font_settings.family = family.clone();
+            self.apply_settings();
+            cx.notify();
+        }
+    }
+    fn reset_settings(&mut self, window: &mut Window, cx: &mut ViewContext<Self>) {
+        self.app.cursor_settings = CursorSettings::default();
+        self.app.theme = ThemeMode::default();
+        self.app.font_settings = settings::FontSettings::default();
+        apply_component_theme(self.app.theme, Some(window), cx);
+        let names = available_font_families(cx, &self.app.font_settings.family);
+        let selected = names
+            .iter()
+            .position(|name| name == "Lilex")
+            .map(|row| IndexPath::default().row(row));
+        self.font_select = cx.new(|cx| {
+            SelectState::new(SearchableVec::new(names), selected, window, cx).searchable(true)
+        });
+        self._settings_subscriptions[0] =
+            cx.subscribe_in(&self.font_select, window, Self::on_font_selected);
+        self.font_size
+            .update(cx, |input, cx| input.set_value("16", window, cx));
+        self.apply_settings();
+        cx.notify();
+    }
     fn key(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut ViewContext<Self>) {
         let key = event.keystroke.key.as_str();
         let m = event.keystroke.modifiers;
@@ -385,9 +407,13 @@ impl TerminalUi {
                 self.app.about_open = false;
                 self.context_menu = false;
                 self.menu = None;
+                self.focus.focus(window);
                 cx.notify();
+                cx.stop_propagation();
             }
-            cx.stop_propagation();
+            // Text inputs in settings need unhandled keystrokes to reach the
+            // platform input handler. The terminal input handler is disabled
+            // while a modal is open.
             return;
         }
         if !self.session().ime_preedit.is_empty() {
@@ -1740,15 +1766,28 @@ impl TerminalUi {
                             .child("Changes are saved automatically."),
                     )
                     .child(
-                        Button::new("settings-done")
-                            .label("Done")
-                            .primary()
-                            .small()
-                            .on_click(cx.listener(|this, _, window, cx| {
-                                this.app.settings_open = false;
-                                this.focus.focus(window);
-                                cx.notify();
-                            })),
+                        div()
+                            .flex()
+                            .gap(px(8.))
+                            .child(
+                                Button::new("settings-reset")
+                                    .label("Reset Defaults")
+                                    .small()
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        this.reset_settings(window, cx)
+                                    })),
+                            )
+                            .child(
+                                Button::new("settings-done")
+                                    .label("Done")
+                                    .primary()
+                                    .small()
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        this.app.settings_open = false;
+                                        this.focus.focus(window);
+                                        cx.notify();
+                                    })),
+                            ),
                     ),
             )
             .into_any_element()
@@ -1979,6 +2018,16 @@ fn utf16_offset(text: &str, index: usize) -> usize {
         units += ch.len_utf16();
     }
     text.len()
+}
+
+fn available_font_families(cx: &App, current: &str) -> Vec<String> {
+    let mut names = cx.text_system().all_font_names();
+    names.retain(|name| !name.starts_with('.'));
+    names.push("Lilex".into());
+    names.push(current.to_owned());
+    names.sort_by_key(|name| name.to_lowercase());
+    names.dedup();
+    names
 }
 
 fn component_theme(theme: ThemeMode) -> gpui_component::ThemeMode {

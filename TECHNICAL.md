@@ -225,3 +225,5 @@ Cargo 按目标平台声明依赖：Linux 不编译 GPUI；Windows / macOS 不�
 family = "Lilex"
 size = 16.0
 ```
+
+在 Settings 底部点击 **Reset Defaults**，立即恢复默认主题（Dark）、终端字体（Lilex，16px）及光标（闪烁方块），并自动保存。其他配置项（例如日志）保持不变。

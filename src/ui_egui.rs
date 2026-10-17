@@ -1183,6 +1183,12 @@ fn show_settings(
                 );
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     done = ui.button("Done").clicked();
+                    if ui.button("Reset Defaults").clicked() {
+                        *settings = CursorSettings::default();
+                        *theme = ThemeMode::default();
+                        *font = settings::FontSettings::default();
+                        ctx.data_mut(|data| data.remove::<String>(egui::Id::new("font-search")));
+                    }
                 });
             });
             done
@@ -1667,6 +1673,72 @@ mod tests {
             color(Color::Indexed(1), true, ThemeMode::Dark),
             color(Color::Indexed(1), true, ThemeMode::Light)
         );
+    }
+
+    #[test]
+    fn settings_reset_restores_all_defaults() {
+        let ctx = egui::Context::default();
+        let mut cursor = CursorSettings {
+            shape: CursorShape::Beam,
+            blinking: false,
+        };
+        let mut theme = ThemeMode::Light;
+        let mut font = settings::FontSettings {
+            family: "Test Mono".into(),
+            size: 32.0,
+        };
+        let mut button = egui::Pos2::ZERO;
+        for frame in 0..4 {
+            let events = if frame == 3 {
+                vec![
+                    egui::Event::PointerMoved(button),
+                    egui::Event::PointerButton {
+                        pos: button,
+                        button: egui::PointerButton::Primary,
+                        pressed: true,
+                        modifiers: Default::default(),
+                    },
+                    egui::Event::PointerButton {
+                        pos: button,
+                        button: egui::PointerButton::Primary,
+                        pressed: false,
+                        modifiers: Default::default(),
+                    },
+                ]
+            } else {
+                vec![]
+            };
+            let output = ctx.run(
+                egui::RawInput {
+                    screen_rect: Some(Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        Vec2::new(710.0, 900.0),
+                    )),
+                    events,
+                    ..Default::default()
+                },
+                |ctx| {
+                    show_settings(ctx, &mut cursor, &mut theme, &mut font);
+                },
+            );
+            if frame == 2 {
+                button = output
+                    .shapes
+                    .iter()
+                    .find_map(|shape| {
+                        if let egui::Shape::Text(t) = &shape.shape {
+                            (t.galley.text() == "Reset Defaults")
+                                .then(|| Rect::from_min_size(t.pos, t.galley.size()).center())
+                        } else {
+                            None
+                        }
+                    })
+                    .expect("Reset Defaults button is visible");
+            }
+        }
+        assert_eq!(cursor, CursorSettings::default());
+        assert_eq!(theme, ThemeMode::default());
+        assert_eq!(font, settings::FontSettings::default());
     }
 
     #[test]
