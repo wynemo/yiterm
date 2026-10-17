@@ -949,131 +949,244 @@ impl eframe::App for TerminalApp {
     }
 }
 
+fn system_font_families(ctx: &egui::Context) -> std::sync::Arc<Vec<String>> {
+    let id = egui::Id::new("system-font-families");
+    if let Some(fonts) = ctx.data(|data| data.get_temp::<std::sync::Arc<Vec<String>>>(id)) {
+        return fonts;
+    }
+    let output = std::process::Command::new("fc-list")
+        .arg("--format=%{family[0]}\n")
+        .output();
+    let mut names = vec!["Lilex".to_owned()];
+    match output {
+        Ok(output) if output.status.success() => {
+            names.extend(
+                String::from_utf8_lossy(&output.stdout)
+                    .lines()
+                    .map(str::trim)
+                    .filter(|name| !name.is_empty() && !name.starts_with('.'))
+                    .map(str::to_owned),
+            );
+        }
+        _ => tracing::warn!("Fontconfig font enumeration unavailable"),
+    }
+    names.sort_by_key(|name| name.to_lowercase());
+    names.dedup();
+    let names = std::sync::Arc::new(names);
+    ctx.data_mut(|data| data.insert_temp(id, names.clone()));
+    names
+}
+
+fn settings_row(
+    ui: &mut egui::Ui,
+    title: &str,
+    detail: &str,
+    width: f32,
+    controls: impl FnOnce(&mut egui::Ui),
+) {
+    ui.add_space(16.0);
+    ui.horizontal(|ui| {
+        let label_width = (ui.available_width() - width - 20.0).max(80.0);
+        ui.allocate_ui_with_layout(
+            Vec2::new(label_width, 0.0),
+            egui::Layout::top_down(egui::Align::Min),
+            |ui| {
+                ui.label(egui::RichText::new(title).size(14.0));
+                ui.add_space(4.0);
+                ui.label(egui::RichText::new(detail).size(12.0).weak());
+            },
+        );
+        ui.allocate_ui_with_layout(
+            Vec2::new(width, 0.0),
+            egui::Layout::left_to_right(egui::Align::Center),
+            controls,
+        );
+    });
+    ui.add_space(16.0);
+}
+
 fn show_settings(
     ctx: &egui::Context,
     settings: &mut CursorSettings,
     theme: &mut ThemeMode,
     font: &mut settings::FontSettings,
 ) -> egui::ModalResponse<bool> {
-    egui::Modal::new(egui::Id::new("settings")).show(ctx, |ui| {
-        ui.set_width(420.0);
-        ui.heading("Settings");
-        ui.add_space(18.0);
-        ui.weak("APPEARANCE");
-        ui.horizontal(|ui| {
-            ui.label("Theme");
-            ui.selectable_value(theme, ThemeMode::Dark, "Dark");
-            ui.selectable_value(theme, ThemeMode::Light, "Light");
-        });
-        ui.add_space(18.0);
-        ui.horizontal(|ui| {
-            ui.label("Font");
-            let response = ui.text_edit_singleline(&mut font.family);
-            if response.lost_focus() && font.family.trim().is_empty() {
-                font.family = "Lilex".into();
-            }
-        });
-        ui.horizontal(|ui| {
-            ui.label("Font Size");
-            ui.add(
-                egui::DragValue::new(&mut font.size)
-                    .range(8.0..=48.0)
-                    .suffix(" px"),
-            );
-        });
-        ui.weak("CURSOR");
-        ui.add_space(6.0);
-        egui::Frame::group(ui.style())
-            .corner_radius(12.0)
-            .inner_margin(16.0)
-            .show(ui, |ui| {
-                ui.horizontal(|ui| {
-                    ui.label("Cursor Style");
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        ui.spacing_mut().item_spacing.x = 4.0;
-                        for (shape, label) in [
-                            (CursorShape::Beam, "Vertical bar"),
-                            (CursorShape::Underline, "Underline"),
-                            (CursorShape::Block, "Block"),
-                        ] {
-                            let (rect, response) =
-                                ui.allocate_exact_size(Vec2::new(58.0, 40.0), egui::Sense::click());
-                            if response.clicked() {
-                                settings.shape = shape;
-                            }
-                            let selected = settings.shape == shape;
-                            let visuals = ui.style().interact_selectable(&response, selected);
-                            ui.painter().rect_filled(rect, 8.0, visuals.bg_fill);
-                            let center = rect.center();
-                            let icon = match shape {
-                                CursorShape::Block => {
-                                    Rect::from_center_size(center, Vec2::new(13.0, 22.0))
-                                }
-                                CursorShape::Underline => Rect::from_center_size(
-                                    center + Vec2::new(0.0, 10.0),
-                                    Vec2::new(16.0, 3.0),
-                                ),
-                                CursorShape::Beam => {
-                                    Rect::from_center_size(center, Vec2::new(3.0, 22.0))
-                                }
-                            };
-                            ui.painter().rect_filled(icon, 0.0, visuals.text_color());
-                            response.on_hover_text(label).widget_info(|| {
-                                egui::WidgetInfo::selected(
-                                    egui::WidgetType::SelectableLabel,
-                                    true,
-                                    selected,
-                                    label,
+    let families = system_font_families(ctx);
+    egui::Modal::new(egui::Id::new("settings"))
+        .area(
+            egui::Modal::default_area(egui::Id::new("settings"))
+                .default_size(Vec2::new(600.0, ctx.content_rect().height() * 0.95)),
+        )
+        .frame(
+            egui::Frame::window(&ctx.style())
+                .inner_margin(24.0)
+                .corner_radius(10.0),
+        )
+        .show(ctx, |ui| {
+            ui.set_width(552.0_f32.min((ctx.content_rect().width() - 64.0).max(300.0)));
+            ui.style_mut()
+                .text_styles
+                .insert(egui::TextStyle::Body, FontId::proportional(13.0));
+            ui.spacing_mut().button_padding = Vec2::new(8.0, 5.0);
+            let mut done = false;
+            egui::ScrollArea::vertical()
+                .auto_shrink([false, true])
+                .max_height((ctx.content_rect().height() * 0.95 - 100.0).clamp(120.0, 740.0))
+                .show(ui, |ui| {
+                    ui.label(egui::RichText::new("Settings").size(20.0));
+                    ui.add_space(20.0);
+                    ui.weak("APPEARANCE");
+                    settings_row(
+                        ui,
+                        "Theme",
+                        "Choose the window and terminal appearance.",
+                        148.0,
+                        |ui| {
+                            ui.selectable_value(theme, ThemeMode::Dark, "Dark");
+                            ui.selectable_value(theme, ThemeMode::Light, "Light");
+                        },
+                    );
+                    ui.separator();
+                    settings_row(
+                        ui,
+                        "Font Size",
+                        "Terminal text size in pixels, from 8 to 48.",
+                        148.0,
+                        |ui| {
+                            ui.spacing_mut().item_spacing.x = 0.0;
+                            if ui
+                                .add_enabled(
+                                    font.size > 8.0,
+                                    egui::Button::new("−").min_size(Vec2::new(30.0, 28.0)),
                                 )
-                            });
-                        }
-                    });
-                });
-                ui.add_space(8.0);
-                ui.separator();
-                ui.add_space(8.0);
-                ui.horizontal(|ui| {
-                    ui.label("Cursor Blinking");
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        let (rect, response) =
-                            ui.allocate_exact_size(Vec2::new(50.0, 30.0), egui::Sense::click());
-                        if response.clicked() {
-                            settings.blinking = !settings.blinking;
-                        }
-                        response.widget_info(|| {
-                            egui::WidgetInfo::selected(
-                                egui::WidgetType::Checkbox,
-                                true,
-                                settings.blinking,
-                                "Cursor Blinking",
-                            )
+                                .clicked()
+                            {
+                                font.size = (font.size - 1.0).max(8.0);
+                            }
+                            ui.add_sized(
+                                [82.0, 28.0],
+                                egui::DragValue::new(&mut font.size)
+                                    .range(8.0..=48.0)
+                                    .speed(1.0)
+                                    .suffix(" px"),
+                            );
+                            if ui
+                                .add_enabled(
+                                    font.size < 48.0,
+                                    egui::Button::new("+").min_size(Vec2::new(30.0, 28.0)),
+                                )
+                                .clicked()
+                            {
+                                font.size = (font.size + 1.0).min(48.0);
+                            }
+                        },
+                    );
+                    ui.separator();
+                    settings_row(
+                        ui,
+                        "Font Family",
+                        "Use a monospace font to keep characters aligned.",
+                        220.0,
+                        |ui| {
+                            egui::ComboBox::from_id_salt("font-family")
+                                .width(220.0)
+                                .height(240.0)
+                                .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
+                                .selected_text(&font.family)
+                                .show_ui(ui, |ui| {
+                                    let search_id = egui::Id::new("font-search");
+                                    let mut search = ctx.data_mut(|data| {
+                                        data.get_temp::<String>(search_id).unwrap_or_default()
+                                    });
+                                    ui.add(
+                                        egui::TextEdit::singleline(&mut search)
+                                            .hint_text("Search fonts…")
+                                            .desired_width(200.0),
+                                    );
+                                    let query = search.to_lowercase();
+                                    ctx.data_mut(|data| data.insert_temp(search_id, search));
+                                    ui.separator();
+                                    let mut found = false;
+                                    for family in families
+                                        .iter()
+                                        .filter(|name| name.to_lowercase().contains(&query))
+                                    {
+                                        found = true;
+                                        if ui
+                                            .selectable_value(
+                                                &mut font.family,
+                                                family.clone(),
+                                                family,
+                                            )
+                                            .clicked()
+                                        {
+                                            ctx.data_mut(|data| data.remove::<String>(search_id));
+                                            ui.close();
+                                        }
+                                    }
+                                    if !found {
+                                        ui.weak("No matching fonts");
+                                    }
+                                });
+                        },
+                    );
+                    let preview_height = font.size * TERMINAL_LINE_HEIGHT + 28.0;
+                    egui::Frame::new()
+                        .fill(theme.background())
+                        .corner_radius(6.0)
+                        .inner_margin(14.0)
+                        .show(ui, |ui| {
+                            ui.set_min_size(Vec2::new(ui.available_width(), preview_height - 28.0));
+                            ui.add(
+                                egui::Label::new(
+                                    egui::RichText::new("Aa Bb 0123  ~/projects")
+                                        .font(FontId::monospace(font.size)),
+                                )
+                                .truncate(),
+                            );
                         });
-                        let on = ui.ctx().animate_bool(response.id, settings.blinking);
-                        ui.painter().rect_filled(
-                            rect,
-                            15.0,
-                            if settings.blinking {
-                                Color32::from_rgb(48, 199, 89)
-                            } else {
-                                ui.visuals().widgets.inactive.bg_fill
-                            },
-                        );
-                        ui.painter().circle_filled(
-                            egui::pos2(rect.left() + 15.0 + on * 20.0, rect.center().y),
-                            12.0,
-                            Color32::WHITE,
-                        );
-                    });
+                    ui.add_space(24.0);
+                    ui.weak("CURSOR");
+                    settings_row(
+                        ui,
+                        "Cursor Style",
+                        "Choose the terminal cursor shape.",
+                        220.0,
+                        |ui| {
+                            for (shape, label) in [
+                                (CursorShape::Block, "Block"),
+                                (CursorShape::Underline, "Underline"),
+                                (CursorShape::Beam, "Bar"),
+                            ] {
+                                ui.selectable_value(&mut settings.shape, shape, label);
+                            }
+                        },
+                    );
+                    ui.separator();
+                    settings_row(
+                        ui,
+                        "Cursor Blinking",
+                        "Blink the cursor while the terminal is focused.",
+                        70.0,
+                        |ui| {
+                            ui.toggle_value(&mut settings.blinking, "Enabled");
+                        },
+                    );
+                });
+            ui.separator();
+            ui.add_space(16.0);
+            ui.horizontal(|ui| {
+                ui.label(
+                    egui::RichText::new("Changes are saved automatically.")
+                        .size(11.0)
+                        .weak(),
+                );
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    done = ui.button("Done").clicked();
                 });
             });
-        ui.add_space(12.0);
-        ui.weak("Changes apply immediately and are saved automatically.");
-        ui.add_space(12.0);
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            ui.button("Done").clicked()
+            done
         })
-        .inner
-    })
 }
 
 fn show_about(ctx: &egui::Context, licenses: &mut bool) -> egui::ModalResponse<bool> {
@@ -1557,13 +1670,122 @@ mod tests {
     }
 
     #[test]
+    fn settings_font_picker_searches_and_selects_installed_font() {
+        let ctx = egui::Context::default();
+        ctx.data_mut(|data| {
+            data.insert_temp(
+                egui::Id::new("system-font-families"),
+                std::sync::Arc::new(vec!["Lilex".to_owned(), "Test Mono".to_owned()]),
+            )
+        });
+        let mut cursor = CursorSettings::default();
+        let mut theme = ThemeMode::Dark;
+        let mut font = settings::FontSettings::default();
+        let mut render = |events: Vec<egui::Event>| {
+            ctx.run(
+                egui::RawInput {
+                    screen_rect: Some(Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        Vec2::new(710.0, 900.0),
+                    )),
+                    events,
+                    ..Default::default()
+                },
+                |ctx| {
+                    show_settings(ctx, &mut cursor, &mut theme, &mut font);
+                },
+            )
+        };
+        let text_center = |output: &egui::FullOutput, text: &str| {
+            output
+                .shapes
+                .iter()
+                .find_map(|shape| {
+                    if let egui::Shape::Text(t) = &shape.shape {
+                        (t.galley.text() == text)
+                            .then(|| Rect::from_min_size(t.pos, t.galley.size()).center())
+                    } else {
+                        None
+                    }
+                })
+                .unwrap_or_else(|| panic!("Missing text: {text}"))
+        };
+        let click = |pos| {
+            vec![
+                egui::Event::PointerMoved(pos),
+                egui::Event::PointerButton {
+                    pos,
+                    button: egui::PointerButton::Primary,
+                    pressed: true,
+                    modifiers: Default::default(),
+                },
+                egui::Event::PointerButton {
+                    pos,
+                    button: egui::PointerButton::Primary,
+                    pressed: false,
+                    modifiers: Default::default(),
+                },
+            ]
+        };
+        render(vec![]);
+        let output = render(vec![]);
+        render(click(text_center(&output, "Lilex")));
+        let output = render(vec![]);
+        render(click(text_center(&output, "Search fonts…")));
+        render(vec![egui::Event::Text("Test".into())]);
+        let output = render(vec![]);
+        render(click(text_center(&output, "Test Mono")));
+        assert_eq!(font.family, "Test Mono");
+    }
+
+    #[test]
+    fn settings_dialog_scrolls_in_small_window_and_keeps_done_visible() {
+        let ctx = egui::Context::default();
+        let screen = Rect::from_min_size(egui::Pos2::ZERO, Vec2::new(420.0, 500.0));
+        let mut cursor = CursorSettings::default();
+        let mut theme = ThemeMode::Dark;
+        let mut font = settings::FontSettings::default();
+        for frame in 0..3 {
+            let mut dialog = Rect::NOTHING;
+            let output = ctx.run(
+                egui::RawInput {
+                    screen_rect: Some(screen),
+                    ..Default::default()
+                },
+                |ctx| {
+                    dialog = show_settings(ctx, &mut cursor, &mut theme, &mut font)
+                        .response
+                        .rect;
+                },
+            );
+            if frame == 0 {
+                continue;
+            }
+            assert!(screen.contains_rect(dialog));
+            let done = output
+                .shapes
+                .iter()
+                .find_map(|shape| {
+                    if let egui::Shape::Text(t) = &shape.shape {
+                        (t.galley.text() == "Done")
+                            .then(|| Rect::from_min_size(t.pos, t.galley.size()))
+                    } else {
+                        None
+                    }
+                })
+                .expect("Done stays visible outside scroll area");
+            assert!(dialog.contains_rect(done));
+        }
+    }
+
+    #[test]
     fn settings_dialog_keeps_controls_inside_window() {
         for mut theme in [ThemeMode::Dark, ThemeMode::Light] {
             let ctx = egui::Context::default();
             ctx.set_visuals(theme.visuals());
             let mut settings = CursorSettings::default();
             for frame in 0..3 {
-                let screen = Rect::from_min_size(egui::Pos2::ZERO, Vec2::new(710.0, 650.0));
+                let screen = Rect::from_min_size(egui::Pos2::ZERO, Vec2::new(710.0, 900.0));
                 let mut dialog = Rect::NOTHING;
                 let output = ctx.run(
                     egui::RawInput {

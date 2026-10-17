@@ -216,7 +216,7 @@ Cargo 按目标平台声明依赖：Linux 不编译 GPUI；Windows / macOS 不�
 
 ## 字体和字号
 
-在 **Settings → Font** 选择终端字体，使用 **Font Size** 调整字号（8–48px，默认 16px）。macOS / Windows 使用 GPUI Component 的可搜索 Select 字体选择器和 NumberInput 字号输入框（支持直接输入及加减），列出系统字体及内嵌 Lilex，隐藏系统内部字体；下方显示当前字体和字号的预览。Linux 输入 Fontconfig 字体名称。建议选择等宽字体；平台使用可用字体回退。界面字体保持 Ubuntu Light。
+在 **Settings → Font** 选择终端字体，使用 **Font Size** 调整字号（8–48px，默认 16px）。macOS / Windows 使用 GPUI Component 的可搜索 Select 字体选择器和 NumberInput 字号输入框（支持直接输入及加减），列出系统字体及内嵌 Lilex，隐藏系统内部字体；下方显示当前字体和字号的预览。Linux 使用相同的设置项目、说明与行布局，通过 Fontconfig 枚举已安装字体，在可搜索的下拉列表中选择；字号支持加减和直接输入。字体列表在首次打开设置时读取并缓存，新安装字体后重启程序刷新。建议选择等宽字体；平台使用可用字体回退。界面字体保持 Ubuntu Light。
 
 修改立即应用到终端标签页和分栏，自动调整字符网格与会话行列数，并保存到当前配置文件（支持 `--config`）。默认字体为内嵌 Lilex。手动编辑后重启生效：
 
