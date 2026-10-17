@@ -29,9 +29,9 @@ with tempfile.TemporaryDirectory(prefix="yiterm-smoke-") as directory:
                 logs = "\n".join(p.read_text(errors="replace") for p in Path(directory).rglob("*.log"))
                 if "X11 error:" in logs or "GLXBadContextTag" in logs:
                     raise RuntimeError("X11/GLX error during window startup")
-                if "OpenGL renderer" not in logs:
-                    raise RuntimeError("No initialized OpenGL renderer was logged")
-                print("YiTerm X11 window and OpenGL renderer startup passed")
+                if "GPUI window initialized" not in logs:
+                    raise RuntimeError("No initialized GPUI window was logged")
+                print("YiTerm GPUI X11 window startup passed")
                 break
             time.sleep(0.5)
         else:

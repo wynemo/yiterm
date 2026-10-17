@@ -1,4 +1,4 @@
-use eframe::egui::{Color32, Visuals};
+use gpui::{Rgba, rgb};
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -10,37 +10,37 @@ pub enum ThemeMode {
 }
 
 impl ThemeMode {
-    fn rgb(value: u32) -> Color32 {
-        Color32::from_rgb((value >> 16) as u8, (value >> 8) as u8, value as u8)
+    fn rgb(value: u32) -> Rgba {
+        rgb(value)
     }
-    fn choose(self, dark: u32, light: u32) -> Color32 {
+    fn choose(self, dark: u32, light: u32) -> Rgba {
         Self::rgb(if self == Self::Dark { dark } else { light })
     }
-    pub fn background(self) -> Color32 {
+    pub fn background(self) -> Rgba {
         self.choose(0x181A20, 0xFFFFFF)
     }
-    pub fn foreground(self) -> Color32 {
+    pub fn foreground(self) -> Rgba {
         self.choose(0xABB2BF, 0x24292F)
     }
-    pub fn surface(self) -> Color32 {
+    pub fn surface(self) -> Rgba {
         self.choose(0x21252B, 0xF3F4F6)
     }
-    pub fn border(self) -> Color32 {
+    pub fn border(self) -> Rgba {
         self.choose(0x363C46, 0xD0D7DE)
     }
-    pub fn accent(self) -> Color32 {
+    pub fn accent(self) -> Rgba {
         self.choose(0x61AFEF, 0x0969DA)
     }
-    pub fn selection(self) -> Color32 {
+    pub fn selection(self) -> Rgba {
         self.choose(0x415A7D, 0xCBE3FF)
     }
-    pub fn selection_foreground(self) -> Color32 {
+    pub fn selection_foreground(self) -> Rgba {
         self.choose(0xFFFFFF, 0x24292F)
     }
-    pub fn cursor(self) -> Color32 {
+    pub fn cursor(self) -> Rgba {
         self.choose(0xE6E6E6, 0x24292F)
     }
-    pub fn palette(self, index: usize) -> Color32 {
+    pub fn palette(self, index: usize) -> Rgba {
         let colors = match self {
             Self::Dark => [
                 0x181A20, 0xE06C75, 0x98C379, 0xE5C07B, 0x61AFEF, 0xC678DD, 0x56B6C2, 0xABB2BF,
@@ -52,26 +52,5 @@ impl ThemeMode {
             ],
         };
         Self::rgb(colors[index])
-    }
-    pub fn visuals(self) -> Visuals {
-        let mut visuals = match self {
-            Self::Dark => Visuals::dark(),
-            Self::Light => Visuals::light(),
-        };
-        visuals.panel_fill = self.surface();
-        visuals.window_fill = self.surface();
-        visuals.override_text_color = Some(self.foreground());
-        visuals.selection.bg_fill = self.selection();
-        visuals.selection.stroke.color = self.selection_foreground();
-        visuals.hyperlink_color = self.accent();
-        visuals.window_stroke.color = self.border();
-        visuals
-    }
-    pub fn from_context(ctx: &eframe::egui::Context) -> Self {
-        if ctx.style().visuals.dark_mode {
-            Self::Dark
-        } else {
-            Self::Light
-        }
     }
 }

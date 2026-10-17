@@ -1,10 +1,10 @@
 # YiTerm 技术与详细使用说明
 
-Rust 原生终端原型，支持 macOS、Windows，并提供面向 CentOS 7 的 Linux x64 CI 构建。使用 `alacritty_terminal` 解析终端协议、`portable-pty` 启动本地 shell / ConPTY、egui 绘制窗口。
+Rust 原生终端，使用 GPUI 0.2.2 管理窗口、界面、字体排版与终端绘制，使用 `alacritty_terminal` 解析终端协议、`portable-pty` 启动本地 shell / ConPTY。支持 macOS、Windows，Linux CI 保留 CentOS 7 / glibc 2.17 的 x64 兼容目标。
 
-终端内嵌 Lilex 字体，无需系统安装；16px 字号配合 1.3 倍行高，使框线字符连续衔接。字体许可证见 [OFL.txt](assets/fonts/lilex/OFL.txt)。
+终端内嵌 Lilex 字体；界面保留原版 Ubuntu Light 字体（[许可证](assets/fonts/ubuntu/UFL.txt)），无需系统安装；16px 字号配合 1.3 倍行高，使框线字符连续衔接。字体许可证见 [OFL.txt](assets/fonts/lilex/OFL.txt)。
 
-字符显示按终端网格定位。回退字体的符号字形若宽于分配的一列或两列，会只在水平方向压缩到分配宽度，保留高度，避免覆盖相邻字符；普通字符和已适配网格的宽字符保持原样。绘制时统一隐藏 Unicode 17.0 的默认不可见字符（如变体选择符、零宽连接符、方向控制符和 emoji 标签），避免产生额外缺字方框；保留可见的组合音标与包围标记，原始文本、复制内容和终端列宽不受此显示过滤影响。终端内核识别 VS16 将文本符号切换为 emoji 的序列（例如 `⚠️`、`❤️`），为这些序列保留两列；即使字符与变体选择符分批到达也保持相同占位，并处理行尾换行与插入模式。当前渲染器不支持完整的复杂文字塑形或彩色 emoji 序列合成，连接序列中的可见字符仍按终端网格分别显示。
+字符显示按终端网格定位，由 GPUI 排版每个单元格中的完整 Unicode 序列，保留变体选择符、连接符与组合标记，字体回退由平台处理。超出单元格分配宽度的字形会被裁剪，不会覆盖相邻字符；原始文本与复制内容保持原样。终端内核识别 VS16 将文本符号切换为 emoji 的序列（例如 `⚠️`、`❤️`），为这些序列保留两列；字符与变体选择符分批到达时也保持相同占位。跨多个独立终端单元格的复杂文字排版仍受字符网格限制。
 
 ## 运行
 
@@ -29,42 +29,19 @@ Windows 默认启动 `powershell.exe`；macOS 默认使用 `$SHELL`。`--shell` 
 
 ### Linux x64 / CentOS 7.8
 
-Linux 启动时通过 Fontconfig 的 `fc-match` 加载系统中日韩字体回退，并保留 TTC 字体集合的 face index；终端与界面均使用这些回退字体，ASCII 仍优先使用内置 Lilex。需要系统安装 Fontconfig 和中文字体（Ubuntu 通常已安装），无需把字体复制到远程 shell 所在机器。
+Linux 构建与验证继续使用 `quay.io/pypa/manylinux2014_x86_64`（CentOS 7 / glibc 2.17），发布包使用 X11 后端。`scripts/verify_linux.py` 拒绝要求高于 GLIBC 2.17 的二进制，并检查共享库能否解析；不放宽该兼容门槛。
 
-Linux 打包时从可执行文件分离 DWARF 调试符号，下载包只包含精简后的程序。CI 另外保存 `profiling-linux-<commit>` artifact，其中的 `yiterm` 和 `yiterm.debug` 必须配套使用；放在同一目录时 GDB 可通过 `.gnu_debuglink` 加载符号。原始 Cargo 编译产物保留，避免影响构建缓存。
+GPUI 使用 Vulkan，原来的 OpenGL 回退补丁不能直接复用。这不代表取消 CentOS 7 支持：迁移后的构建、依赖与图形驱动兼容性仍需 Linux CI 验证。当前没有 GPUI 版在 CentOS 7 上构建或运行通过的结论；出现问题应根据 CI 的具体错误解决，不应直接提高系统基线或跳过检查。
 
-Linux 发布包使用 X11 后端，目标为 x86_64、glibc 2.17；需要图形会话和可用的 OpenGL 驱动。解压 `yiterm-<版本>-linux-x64.tar.gz` 后运行 `./yiterm`，默认使用 `$SHELL`。如需指定 shell：`./yiterm --shell /bin/bash`。
-
-CentOS 7 的运行依赖（使用系统已有的 yum 仓库或管理员配置的归档镜像）：
+构建和测试由 Linux runner 中的 `scripts/build_linux.sh` 执行。本机 macOS 不进行 Linux 构建或交叉编译。默认源码构建同时启用 X11 和 Wayland；CentOS 7 CI 只启用 X11：
 
 ```sh
-sudo yum install libX11 libXcursor libXi libXrandr libxcb libxkbcommon libxkbcommon-x11 mesa-libGL mesa-dri-drivers xdg-utils openssh-clients
-```
-
-构建依赖可参考 [Alacritty 的 CentOS/RHEL 7 说明](https://github.com/alacritty/alacritty/blob/master/INSTALL.md#centosrhel-7)，但本项目使用 egui，依赖不完全相同。在 Linux 上安装 Rust 和 C 编译工具后：
-
-```sh
-sudo yum install gcc gcc-c++ make pkgconfig libX11-devel libXcursor-devel libXi-devel libXrandr-devel libxcb-devel libxkbcommon-devel mesa-libGL-devel
 cargo build --locked --release --target x86_64-unknown-linux-gnu --no-default-features --features x11
 ```
 
-默认源码构建同时启用 X11 和 Wayland；CentOS 7 包只启用 `x11`，避免依赖其旧版 Wayland 桌面环境。不要在新发行版直接构建后假定兼容 CentOS 7。CI 在 Linux runner 中通过 `quay.io/pypa/manylinux2014_x86_64`（CentOS 7 / glibc 2.17）运行 `scripts/build_linux.sh`，检查 ELF 架构、GLIBC 符号版本和共享库解析，随后打包、生成 SHA-256 并上传 Actions artifact。独立的 Linux 测试 job 下载同一份 artifact、校验 SHA-256，执行日志、性能汇总、刷新、Unicode 测试及 Xvfb/Mesa 窗口启动检查。测试失败不会阻止下载已上传的二进制；正式 Release 仍要求所有平台构建和 Linux 测试通过。
+原有 X11、字体与编译依赖保留，并加入 GPUI 所需的 Fontconfig、FreeType、OpenSSL 和 Vulkan 依赖。发行版提供的驱动能否满足 GPUI 要求，需通过 CI 窗口启动测试及实机测试确认，不替换系统 glibc，也不随包携带显卡驱动。
 
-Linux 使用本地补丁 `vendor/eframe`：优先创建默认 OpenGL 3.3 core 上下文；失败时先尝试 OpenGL 2.1 compatibility，再尝试上游 GLES 回退。旧版 Mesa / 远程桌面因此可使用 egui_glow 的 GLSL 1.20 渲染路径，兼容不支持 3.3 core 的驱动。`vendor/glutin` 使用 `glXQueryExtensionsString` 查询当前连接与屏幕实际可用的 GLX 扩展，避免把客户端库支持的扩展误认为 X Server 也支持，从而在设置垂直同步时触发异步 `GLXBadContextTag`。窗口测试要求窗口实际可见且已初始化 OpenGL 渲染器。
-
-该方案保留系统 glibc，不替换它，也不随包携带显卡驱动。CI 容器共享 runner 的 Linux 内核，Xvfb 使用软件渲染；它不能替代 CentOS 7.8 的旧内核、真实显卡、输入法、剪贴板和桌面交互实机验证。Linux 构建与运行检查只在 Linux CI / Linux 设备执行，macOS 本机不运行 Linux 构建。
-
-### Windows SSH 与图片上传
-
-Windows 下，YiTerm 的私有 `ssh.exe` wrapper 使用内置 Rust SSH 客户端（`russh`）。登录时输入密码或密钥口令，图片上传通过同一条已认证连接的新 SFTP 通道完成，无需再次输入密码。也支持服务器的 keyboard-interactive 认证。密码不会保存到配置文件或日志。
-
-仍需安装系统 OpenSSH：内置客户端通过 `ssh -G` 解析 SSH config 中的别名、HostName、User、Port、IdentityFile、ProxyJump 和 known_hosts 路径。`ProxyJump` 的跳板链路由系统 OpenSSH 建立，目标主机仍由内置客户端认证并复用连接上传图片；跳板机认证按系统 OpenSSH 的配置和提示处理。支持 OpenSSH 格式私钥文件和 Windows OpenSSH agent；`IdentitiesOnly=yes` 时仅尝试密钥文件。首次连接显示 SHA-256 主机指纹，确认后写入 known_hosts；主机密钥变化或被撤销时拒绝连接。`StrictHostKeyChecking` 支持 `ask`、`yes` 和 `accept-new`。握手/指纹确认和认证阶段各有 120 秒期限。`ssh -G` 可能去掉 known_hosts 路径列表的引号；多个绝对路径可以包含空格，无法判断分隔的相对路径列表会报错，应改用绝对路径或系统客户端。
-
-内置客户端暂不支持 ProxyCommand、端口/agent/X11 转发、SSH 证书和远程命令。遇到这些配置会提示使用 `ssh --system <原有参数>`，显式调用系统 OpenSSH；`ssh -V`、`ssh -G` 和 `ssh -Q` 也直接调用系统客户端。系统客户端会话仍通过独立 scp 上传图片，因此密码认证的会话不能保证免交互上传。macOS 继续使用系统 OpenSSH 的 ControlMaster 连接复用。
-
-内置上传单张限制为 50 MiB，远端文件名为 `/tmp/yiterm-drop-<UUID>.png`，创建权限为 `0600`。GUI 通过仅当前 Windows 用户可访问的命名管道请求当前分栏的 wrapper 上传，不传递密码；上传完成且目标进程仍有效才粘贴远端路径。失败或取消时尽力清理未完成文件；服务器断开时可能无法清理。
-
-本机开发只运行当前平台的 `cargo test --locked`；Windows 控制台、命名管道、窗口缩放和登录后连续传图的集成测试由 Windows CI runner 执行，不在 macOS 上安装 Windows 工具链或交叉编译。
+Linux 打包时分离 DWARF 调试符号；`profiling-linux-<commit>` artifact 中的 `yiterm` 与 `yiterm.debug` 必须配套使用。独立测试 job 下载同次构建的发布包、校验 SHA-256，执行 Rust 测试，并在 Xvfb 下检查 GPUI 窗口启动。CI 容器共享 runner 内核，不能替代 CentOS 7.8 的旧内核、真实显卡、输入法和剪贴板实机验证。
 
 ## 文字选择与复制
 
@@ -154,17 +131,15 @@ theme = "dark" # 或 "light"
 
 ## 空闲刷新与 CPU 占用
 
-终端渲染跳过默认背景与空白字形，并合并同一行相邻的同色背景；输入先发送到 PTY，再准备当前画面的文字。关闭逐像素渐变抖色以降低 Mesa 软件渲染开销，文字边缘抗锯齿仍由 egui 保留。
+终端画布由 GPUI 绘制，跳过默认背景与空白字形。PTY 输出与异步粘贴完成时，通过有界通知通道唤醒界面；通知会合并，避免输出突发时重复排队。空闲时每 500 毫秒检查退出、Windows 剪贴板请求与光标闪烁，仅在内容变化或光标需要闪烁时请求重绘。后台标签页持续处理输出；窗口标题只在内容变化时更新。
 
-`Linux software rendering comparison` 工作流可手动指定两个包含 Linux artifact 的 Actions run，在同一 CentOS 7 / llvmpipe 环境、1877×940 窗口下比较静止画面、每秒 5 次状态更新的 CPU 占用，以及 40 次模拟按键到达 PTY 的延迟。结果和性能日志保存在 `linux-performance-results` artifact。该延迟包含按键注入开销，不等于屏幕显示延迟，也不能替代远程桌面实机体验。
-
-PTY 收到输出时会唤醒界面；空闲时每 250 毫秒检查一次进程退出、异步粘贴和 Windows 剪贴板请求，不再固定以约 60 FPS 重绘。光标闪烁按 500 毫秒的边界安排刷新。后台标签页仍会处理输出。窗口标题只在内容变化时发送更新，避免标题命令触发持续重绘。
+`Linux software rendering comparison` 工作流可指定两个包含 Linux artifact 的 Actions run，在同一 CentOS 7 环境中比较空闲、持续更新的 CPU 占用与模拟按键到达 PTY 的延迟。性能数据需在相同系统、驱动与构建模式下比较；按键注入延迟不等于屏幕显示延迟。
 
 Windows 性能验证：使用 Release 构建，启动后等待提示符稳定，在任务管理器观察空闲 CPU，并检查持续输出、后台标签页、光标闪烁、粘贴和关闭 shell 的响应。实际占用取决于设备和图形驱动，需要在 Windows 上测量。
 
 ### Windows 高 CPU 诊断
 
-先在任务管理器展开 YiTerm 进程组，确认高占用的 PID。Process Explorer 的进程属性 → Threads 可以按 CPU 排序并查看最忙线程的 Stack。单次栈是瞬时快照；看到 `OPENGL32.dll` 只能说明当时经过图形路径，不能直接证明反复创建上下文或软件渲染。
+先在任务管理器展开 YiTerm 进程组，确认高占用的 PID。Process Explorer 的进程属性 → Threads 可以按 CPU 排序并查看最忙线程的 Stack。单次栈是瞬时快照，需要持续采样判断 CPU 时间消耗在会话处理还是 GPUI / DirectX 渲染。
 
 在 PowerShell 中开启汇总诊断后启动新进程：
 
@@ -175,7 +150,7 @@ $env:YITERM_PROFILE = "1"
 
 保持终端空闲约 30 秒，然后用 **Tools → Open Log File** 打开日志，搜索 `yiterm::profile`。完成后关闭该实例，并执行 `Remove-Item Env:YITERM_PROFILE`，之后启动的实例恢复默认关闭状态。日志文件写入需保持启用（`logging.file = true`）。
 
-启动日志包含构建版本、OpenGL vendor、renderer 和 version；每约 5 秒汇总 UI update 次数、update/会话轮询耗时、上一帧框架耗时（包括渲染，不包括等待垂直同步）、PTY 读取次数和字节数、窗口焦点以及 egui 报告的重绘请求调用位置。耗时是墙钟时间，不等于线程 CPU 时间；框架耗时包含 update，不能与 update 耗时相加。`updates_per_s` 是 update 调用频率，不是显示器实际呈现帧率。日志不记录终端内容、按键或剪贴板正文。
+启动日志记录 GPUI 窗口初始化；开启 profiling 后包含构建版本，并每约 5 秒汇总事件泵调用次数 `pumps`、画布绘制次数 `renders`、进程 CPU、事件处理与会话轮询耗时、PTY 读取次数与字节数及焦点状态。`renders_per_s` 是画布绘制频率，不等于显示器实际呈现帧率。GPUI 不再提供原 eframe 的上一帧框架耗时与重绘调用位置。耗时为墙钟时间，不等于线程 CPU 时间；日志不记录终端内容、按键或剪贴板正文。
 
 `process_cpu_core_percent` 通过两次采样的进程累计 CPU 毫秒差除以墙钟时间计算，仅统计 YiTerm 当前进程，100% 表示使用一个逻辑核，不是任务管理器的进程组百分比；与系统总 CPU 百分比比较时需考虑逻辑核数量。采样依赖 UI update：若图形调用长时间卡住，日志可能延迟，此时需要外部采样。
 
@@ -188,3 +163,16 @@ Windows CI 额外保存 `profiling-windows-<commit>` artifact，内含同次优�
 只有分支推送触发 CI，tag 推送不单独触发。一次 main 流水线完成 macOS、Windows、Linux 构建与测试；全部通过后，如果当前提交有对应版本 tag，就直接使用本次构建产物发布 GitHub Release。构建的打包步骤输出当前提交的版本 tag，发布 job 检查 macOS / Windows 和 Linux 打包步骤输出的版本 tag 一致后运行；没有对应 tag 时跳过整个发布 job。若 tag 在 main 流水线结束后才推送，可在 main 上手动运行该工作流完成发布。
 
 CI 固定使用 Rust `1.99.1`，避免浮动 `stable` 自动升级导致依赖缓存失效。升级工具链时同步修改 `.github/workflows/ci.yml` 中的 `toolchain`、Linux `RUST_TOOLCHAIN` 和 Linux 缓存键；升级后的首次构建需要重建缓存。缓存前移除 runner 预装的其他 Rust 工具链，避免缓存键受 runner 镜像更新影响。release 调试符号配置在工作流全局设置，缓存、编译和测试使用同一配置。
+
+## GPUI 实现结构
+
+- `src/main.rs`：PTY 会话、终端协议、标签与分栏树、SSH 和异步图片粘贴。
+- `src/ui.rs`：GPUI 窗口、布局、字符画布、鼠标协议与键盘输入、设置和关于弹窗。
+- `EntityInputHandler` 接收文字和中文输入法预编辑 / 提交；普通文字仅走此通道，键盘事件只发送快捷键与终端控制序列，避免重复输入。
+- `src/theme.rs`：配置中的主题枚举与 GPUI 颜色；`src/profiling.rs`：可选汇总诊断。
+
+界面沿用迁移前的布局与文案：Settings / Pane / Tools / About 菜单、编号标签与 +、分栏标题左侧的 ×、底部 Paste 与状态栏，以及原有设置和 About 弹窗。
+
+GPUI 版本固定为 `=0.2.2`，使用 macOS Metal、Windows DirectX 和 Linux Vulkan。macOS 启用运行时 Metal shader 编译，构建无需独立调用 Metal 编译工具。egui / eframe / glutin 依赖与相应 vendor 补丁已移除，保留 `vendor/alacritty_terminal` 的终端 Unicode 修复。
+
+本机仅验证 macOS。Windows 构建与测试交给 Windows CI runner，不在 macOS 安装 Windows 工具链或进行交叉编译；Linux CI 使用其独立容器。CI 配置更新不代表对应平台已经运行通过。

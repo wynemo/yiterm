@@ -39,14 +39,17 @@ jobs:
           for directory in baseline candidate; do
             (cd "$directory" && sha256sum -c *.sha256 && tar -xzf *.tar.gz)
           done
-      - name: Compare on CentOS 7 Mesa software rendering
+      - name: Compare on CentOS 7 software rendering
         run: |
           docker run --rm -v "$GITHUB_WORKSPACE:/work" -w /work \
             quay.io/pypa/manylinux2014_x86_64 bash -euc '
-              yum install -y libX11 libXcursor libXi libXrandr libxcb libxkbcommon libxkbcommon-x11 mesa-libGL mesa-dri-drivers xorg-x11-server-Xvfb xdotool xorg-x11-utils
+              yum install -y libX11 libXcursor libXi libXrandr libxcb libxkbcommon libxkbcommon-x11 mesa-libGL mesa-dri-drivers vulkan-loader mesa-vulkan-drivers xorg-x11-server-Xvfb xdotool xorg-x11-utils
               export PATH="/opt/python/cp313-cp313/bin:$PATH"
               Xvfb :99 -screen 0 1920x1080x24 +extension GLX &
               export DISPLAY=:99 LIBGL_ALWAYS_SOFTWARE=1 GALLIUM_DRIVER=llvmpipe
+              export XDG_RUNTIME_DIR=/tmp/yiterm-runtime
+              mkdir -p "$XDG_RUNTIME_DIR"
+              chmod 700 "$XDG_RUNTIME_DIR"
               for attempt in {1..30}; do xdpyinfo >/dev/null 2>&1 && break; sleep 1; done
               xdpyinfo >/dev/null
               python3 scripts/perf_linux.py "$(find baseline -type f -name yiterm -print -quit)" "$(find candidate -type f -name yiterm -print -quit)"

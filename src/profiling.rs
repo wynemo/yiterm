@@ -1,6 +1,5 @@
 //! Opt-in aggregate diagnostics; never records terminal or input contents.
 use std::{
-    collections::BTreeMap,
     sync::{
         OnceLock,
         atomic::{AtomicU64, Ordering},
@@ -28,13 +27,11 @@ pub struct Profile {
     since: Instant,
     system: System,
     cpu_baseline: Option<(Instant, u64)>,
-    frames: u64,
+    pumps: u64,
     update_ms: f64,
     poll_ms: f64,
     max_update_ms: f64,
-    backend_ms: f64,
-    backend_samples: u64,
-    causes: BTreeMap<(&'static str, u32), u64>,
+    renders: u64,
 }
 
 impl Profile {
@@ -50,13 +47,11 @@ impl Profile {
             since: Instant::now(),
             system: System::new(),
             cpu_baseline: None,
-            frames: 0,
+            pumps: 0,
             update_ms: 0.0,
             poll_ms: 0.0,
             max_update_ms: 0.0,
-            backend_ms: 0.0,
-            backend_samples: 0,
-            causes: BTreeMap::new(),
+            renders: 0,
         };
         profile.refresh_cpu();
         tracing::info!(target: "yiterm::profile", version = env!("CARGO_PKG_VERSION"),
@@ -81,25 +76,16 @@ impl Profile {
         previous.and_then(|(at, ms)| cpu_percent(ms, total_ms, now.duration_since(at)))
     }
 
-    pub fn frame(
-        &mut self,
-        ctx: &eframe::egui::Context,
-        update: Duration,
-        poll: Duration,
-        backend_seconds: Option<f32>,
-    ) {
-        self.frames += 1;
+    pub fn rendered(&mut self) {
+        self.renders += 1;
+    }
+
+    pub fn sample(&mut self, focused: bool, update: Duration, poll: Duration) {
+        self.pumps += 1;
         let ms = update.as_secs_f64() * 1000.0;
         self.update_ms += ms;
         self.max_update_ms = self.max_update_ms.max(ms);
         self.poll_ms += poll.as_secs_f64() * 1000.0;
-        if let Some(seconds) = backend_seconds {
-            self.backend_ms += f64::from(seconds) * 1000.0;
-            self.backend_samples += 1;
-        }
-        for cause in ctx.repaint_causes() {
-            *self.causes.entry((cause.file, cause.line)).or_default() += 1;
-        }
         let elapsed = self.since.elapsed().as_secs_f64();
         if elapsed < 5.0 {
             return;
@@ -107,22 +93,18 @@ impl Profile {
         let cpu = self.refresh_cpu();
         let logical_cpus = std::thread::available_parallelism().map_or(1, |n| n.get());
         tracing::info!(target: "yiterm::profile",
-            interval_s = elapsed, frames = self.frames, updates_per_s = self.frames as f64 / elapsed,
+            interval_s = elapsed, pumps = self.pumps, renders = self.renders, renders_per_s = self.renders as f64 / elapsed,
             process_cpu_core_percent = ?cpu, logical_cpus,
             update_total_ms = self.update_ms, update_max_ms = self.max_update_ms,
-            poll_total_ms = self.poll_ms, backend_total_ms = self.backend_ms,
-            backend_samples = self.backend_samples,
+            poll_total_ms = self.poll_ms,
             pty_bytes = PTY_BYTES.swap(0, Ordering::Relaxed),
             pty_reads = PTY_READS.swap(0, Ordering::Relaxed),
-            focused = ctx.input(|i| i.focused),
-            repaint_call_sites = ?self.causes, "Performance sample");
-        self.frames = 0;
+            focused, "Performance sample");
+        self.pumps = 0;
         self.update_ms = 0.0;
         self.poll_ms = 0.0;
         self.max_update_ms = 0.0;
-        self.backend_ms = 0.0;
-        self.backend_samples = 0;
-        self.causes.clear();
+        self.renders = 0;
         self.since = Instant::now();
     }
 }
@@ -161,34 +143,21 @@ mod tests {
             .finish();
         tracing::subscriber::with_default(subscriber, || {
             let mut profile = Profile::start();
-            let ctx = eframe::egui::Context::default();
-            profile.frame(
-                &ctx,
-                Duration::from_millis(3),
-                Duration::from_millis(1),
-                None,
-            );
+            profile.sample(true, Duration::from_millis(3), Duration::from_millis(1));
             assert!(
                 !std::fs::read_to_string(file.path())
                     .unwrap()
                     .contains("Performance sample")
             );
             profile.since = Instant::now() - Duration::from_secs(6);
-            profile.frame(
-                &ctx,
-                Duration::from_millis(7),
-                Duration::from_millis(2),
-                Some(0.01),
-            );
+            profile.sample(true, Duration::from_millis(7), Duration::from_millis(2));
             let log = std::fs::read_to_string(file.path()).unwrap();
             assert_eq!(log.matches("Performance sample").count(), 1);
-            assert!(log.contains("frames=2"));
+            assert!(log.contains("pumps=2"));
             assert!(log.contains("update_total_ms=10"));
             assert!(log.contains("poll_total_ms=3"));
-            assert!(log.contains("backend_samples=1"));
-            assert_eq!(profile.frames, 0);
+            assert_eq!(profile.pumps, 0);
             assert_eq!(profile.update_ms, 0.0);
-            assert!(profile.causes.is_empty());
         });
     }
 }
