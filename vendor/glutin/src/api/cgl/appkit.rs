@@ -81,6 +81,8 @@ extern_class!(
 unsafe impl Send for NSOpenGLPixelFormat {}
 unsafe impl Sync for NSOpenGLPixelFormat {}
 
+// The CGL backend requires AppKit's deprecated OpenGL attribute types.
+#[allow(deprecated)]
 impl NSOpenGLPixelFormat {
     extern_methods!(
         #[unsafe(method(initWithAttributes:))]

@@ -7,7 +7,9 @@ use cgl::CGLSetParameter;
 use dispatch2::{run_on_main, MainThreadBound};
 use objc2::rc::{autoreleasepool, Retained};
 use objc2::AllocAnyThread;
-use objc2_app_kit::{NSOpenGLCPSwapInterval, NSView};
+#[allow(deprecated)]
+use objc2_app_kit::NSOpenGLCPSwapInterval;
+use objc2_app_kit::NSView;
 
 use crate::config::GetGlConfig;
 use crate::context::{
@@ -284,6 +286,8 @@ impl ContextInner {
         };
 
         autoreleasepool(|_| unsafe {
+            // AppKit's swap interval constant is required by the CGL backend.
+            #[allow(deprecated)]
             self.raw.setValues_forParameter(&interval, NSOpenGLCPSwapInterval);
         })
     }

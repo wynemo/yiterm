@@ -135,6 +135,8 @@ pub struct Config {
 }
 
 impl Config {
+    // CGL exposes pixel format attributes through this deprecated AppKit alias.
+    #[allow(deprecated)]
     fn raw_attribute(&self, attrib: NSOpenGLPixelFormatAttribute) -> i32 {
         unsafe {
             let mut value = 0;
