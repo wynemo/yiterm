@@ -74,10 +74,10 @@ impl TerminalSession {
             self.cursor_blink_started = Instant::now();
         }
         let rect = ui.available_rect_before_wrap();
-        let font = FontId::monospace(TERMINAL_FONT_SIZE);
+        let font = FontId::monospace(self.font_settings.size);
         let cell = Vec2::new(
             ui.fonts_mut(|f| f.glyph_width(&font, 'M')),
-            TERMINAL_FONT_SIZE * TERMINAL_LINE_HEIGHT,
+            self.font_settings.size * TERMINAL_LINE_HEIGHT,
         );
         let size = Size {
             cols: ((rect.width() / cell.x) as usize).max(2),
@@ -866,12 +866,20 @@ impl eframe::App for TerminalApp {
             }
         }
         if self.settings_open {
-            let before = (self.cursor_settings, self.theme);
-            let modal = show_settings(ctx, &mut self.cursor_settings, &mut self.theme);
+            let before = (self.cursor_settings, self.theme, self.font_settings.clone());
+            let modal = show_settings(
+                ctx,
+                &mut self.cursor_settings,
+                &mut self.theme,
+                &mut self.font_settings,
+            );
             if modal.inner || modal.should_close() {
                 self.settings_open = false;
             }
-            if before != (self.cursor_settings, self.theme) {
+            if before != (self.cursor_settings, self.theme, self.font_settings.clone()) {
+                if before.2.family != self.font_settings.family {
+                    configure_fonts_for(ctx, &self.font_settings.family);
+                }
                 ctx.set_visuals(self.theme.visuals());
                 let result = self
                     .args
@@ -879,7 +887,14 @@ impl eframe::App for TerminalApp {
                     .clone()
                     .map(Ok)
                     .unwrap_or_else(logging::config_path)
-                    .and_then(|path| settings::save_all(&path, self.cursor_settings, self.theme));
+                    .and_then(|path| {
+                        settings::save_with_font(
+                            &path,
+                            self.cursor_settings,
+                            self.theme,
+                            &self.font_settings,
+                        )
+                    });
                 if let Err(error) = result {
                     self.error = Some(format!("Cannot save settings: {error:#}"));
                 }
@@ -893,6 +908,7 @@ impl eframe::App for TerminalApp {
         for tab in &mut self.tabs {
             for pane in &mut tab.panes {
                 pane.cursor_settings = self.cursor_settings;
+                pane.font_settings = self.font_settings.clone();
             }
         }
         if self.about_open {
@@ -937,6 +953,7 @@ fn show_settings(
     ctx: &egui::Context,
     settings: &mut CursorSettings,
     theme: &mut ThemeMode,
+    font: &mut settings::FontSettings,
 ) -> egui::ModalResponse<bool> {
     egui::Modal::new(egui::Id::new("settings")).show(ctx, |ui| {
         ui.set_width(420.0);
@@ -949,6 +966,21 @@ fn show_settings(
             ui.selectable_value(theme, ThemeMode::Light, "Light");
         });
         ui.add_space(18.0);
+        ui.horizontal(|ui| {
+            ui.label("Font");
+            let response = ui.text_edit_singleline(&mut font.family);
+            if response.lost_focus() && font.family.trim().is_empty() {
+                font.family = "Lilex".into();
+            }
+        });
+        ui.horizontal(|ui| {
+            ui.label("Font Size");
+            ui.add(
+                egui::DragValue::new(&mut font.size)
+                    .range(8.0..=48.0)
+                    .suffix(" px"),
+            );
+        });
         ui.weak("CURSOR");
         ui.add_space(6.0);
         egui::Frame::group(ui.style())
@@ -1268,7 +1300,7 @@ pub(super) fn run(app: TerminalApp) -> Result<()> {
                     }
                 }
             }
-            configure_fonts(&cc.egui_ctx);
+            configure_fonts_for(&cc.egui_ctx, &app.font_settings.family);
             Ok(Box::new(app))
         }),
     )
@@ -1330,6 +1362,10 @@ pub(super) fn is_default_ignorable(ch: char) -> bool {
 }
 
 fn configure_fonts(ctx: &egui::Context) {
+    configure_fonts_for(ctx, "Lilex");
+}
+
+fn configure_fonts_for(ctx: &egui::Context, family: &str) {
     let mut fonts = egui::FontDefinitions::default();
     fonts.font_data.insert(
         "Lilex".into(),
@@ -1436,6 +1472,32 @@ fn configure_fonts(ctx: &egui::Context) {
             tracing::info!(path, index, "Loaded Linux fallback font");
         }
     }
+    if family != "Lilex" && !family.trim().is_empty() {
+        if let Ok(output) = std::process::Command::new("fc-match")
+            .args(["--format=%{file}\n%{index}\n", family])
+            .output()
+        {
+            let result = String::from_utf8_lossy(&output.stdout);
+            let mut lines = result.lines();
+            if let (Some(path), Some(index)) = (
+                lines.next(),
+                lines.next().and_then(|v| v.parse::<u32>().ok()),
+            ) {
+                if let Ok(bytes) = std::fs::read(path) {
+                    let mut data = egui::FontData::from_owned(bytes);
+                    data.index = index;
+                    fonts
+                        .font_data
+                        .insert("selected-terminal".into(), std::sync::Arc::new(data));
+                    fonts
+                        .families
+                        .entry(egui::FontFamily::Monospace)
+                        .or_default()
+                        .insert(0, "selected-terminal".into());
+                }
+            }
+        }
+    }
     ctx.set_fonts(fonts);
 }
 
@@ -1509,7 +1571,14 @@ mod tests {
                         ..Default::default()
                     },
                     |ctx| {
-                        dialog = show_settings(ctx, &mut settings, &mut theme).response.rect;
+                        dialog = show_settings(
+                            ctx,
+                            &mut settings,
+                            &mut theme,
+                            &mut settings::FontSettings::default(),
+                        )
+                        .response
+                        .rect;
                     },
                 );
                 if frame == 0 {
@@ -2527,6 +2596,7 @@ mod tests {
             settings_open: false,
             theme: ThemeMode::Dark,
             cursor_settings: CursorSettings::default(),
+            font_settings: settings::FontSettings::default(),
         };
         // Set different titles through each real PTY; the background session
         // must parse output too, without changing the foreground session title.

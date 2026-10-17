@@ -64,6 +64,8 @@ struct Config {
     _cursor: crate::settings::CursorSettings,
     #[serde(rename = "appearance")]
     _appearance: crate::settings::AppearanceSettings,
+    #[serde(rename = "font")]
+    _font: crate::settings::FontSettings,
 }
 
 pub struct Logging {

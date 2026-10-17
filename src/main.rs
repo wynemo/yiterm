@@ -118,6 +118,7 @@ struct TerminalSession {
     pending_clipboard: Option<String>,
     cursor_blink_started: Instant,
     cursor_settings: CursorSettings,
+    font_settings: settings::FontSettings,
     status: String,
     size: Size,
 }
@@ -223,6 +224,7 @@ impl TerminalSession {
             pending_clipboard: None,
             cursor_blink_started: Instant::now(),
             cursor_settings: CursorSettings::default(),
+            font_settings: settings::FontSettings::default(),
             status: warning
                 .map(str::to_owned)
                 .unwrap_or_else(|| "Ready · paste: Cmd+V / Ctrl+Shift+V / Shift+Insert".into()),
@@ -618,6 +620,7 @@ struct TerminalApp {
     settings_open: bool,
     theme: ThemeMode,
     cursor_settings: CursorSettings,
+    font_settings: settings::FontSettings,
 }
 
 impl TerminalApp {
@@ -644,6 +647,7 @@ impl TerminalApp {
             settings_open: false,
             theme: settings::load_theme(&path)?,
             cursor_settings,
+            font_settings: settings::load_font(&path)?,
         })
     }
 

@@ -15,3 +15,8 @@ blinking = true
 [appearance]
 # dark / light
 theme = "dark"
+
+# Terminal font (size in pixels, 8–48).
+[font]
+family = "Lilex"
+size = 16.0

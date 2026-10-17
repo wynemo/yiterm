@@ -7,6 +7,13 @@ use gpui::{
     ScrollWheelEvent, SharedString, TextRun, UTF16Selection, Window, WindowBounds, WindowOptions,
     canvas, div, fill, point, prelude::*, px, size,
 };
+use gpui_component::{
+    IndexPath, Root, Selectable, Sizable,
+    button::{Button, ButtonVariants},
+    input::{InputEvent, InputState, NumberInput, NumberInputEvent, StepAction},
+    select::{SearchableVec, Select, SelectEvent, SelectState},
+    switch::Switch,
+};
 use std::{borrow::Cow, ops::Range};
 
 type Rect = Bounds<Pixels>;
@@ -140,6 +147,9 @@ pub(super) struct TerminalUi {
     focused: bool,
     hover: Option<(usize, TerminalLink)>,
     context_menu: bool,
+    font_select: gpui::Entity<SelectState<SearchableVec<String>>>,
+    font_size: gpui::Entity<InputState>,
+    _settings_subscriptions: Vec<gpui::Subscription>,
     menu: Option<Menu>,
     context_anchor: UiPoint<Pixels>,
     ime_selection: Range<usize>,
@@ -190,6 +200,78 @@ impl TerminalUi {
                 }
             }
         });
+        let mut names = cx.text_system().all_font_names();
+        names.retain(|name| !name.starts_with('.'));
+        names.push("Lilex".into());
+        names.push(app.font_settings.family.clone());
+        names.sort_by_key(|name| name.to_lowercase());
+        names.dedup();
+        let selected = names
+            .iter()
+            .position(|name| *name == app.font_settings.family)
+            .map(|row| IndexPath::default().row(row));
+        let font_select = cx.new(|cx| {
+            SelectState::new(SearchableVec::new(names), selected, window, cx).searchable(true)
+        });
+        let font_size = cx.new(|cx| {
+            InputState::new(window, cx).default_value(app.font_settings.size.to_string())
+        });
+        let settings_subscriptions = vec![
+            cx.subscribe_in(&font_select, window, |this, _, event, _, cx| {
+                if let SelectEvent::Confirm(Some(family)) = event {
+                    this.app.font_settings.family = family.clone();
+                    this.apply_settings();
+                    cx.notify();
+                }
+            }),
+            cx.subscribe_in(&font_size, window, |this, input, event, window, cx| {
+                let text = input.read(cx).value();
+                let parsed = text.parse::<f32>().ok().filter(|v| v.is_finite());
+                if matches!(event, InputEvent::Blur | InputEvent::PressEnter { .. }) {
+                    let size = parsed.unwrap_or(this.app.font_settings.size).clamp(8., 48.);
+                    input.update(cx, |input, cx| {
+                        input.set_value(size.to_string(), window, cx)
+                    });
+                    if this.app.font_settings.size != size {
+                        this.app.font_settings.size = size;
+                        this.apply_settings();
+                    }
+                } else if matches!(event, InputEvent::Change) {
+                    if let Some(size) = parsed.filter(|v| (8.0..=48.0).contains(v)) {
+                        if this.app.font_settings.size != size {
+                            this.app.font_settings.size = size;
+                            this.apply_settings();
+                        }
+                    }
+                }
+                cx.notify();
+            }),
+            cx.subscribe_in(
+                &font_size,
+                window,
+                |this, input, event: &NumberInputEvent, window, cx| {
+                    let NumberInputEvent::Step(action) = event;
+                    let delta = match action {
+                        StepAction::Increment => 1.,
+                        StepAction::Decrement => -1.,
+                    };
+                    let size = input
+                        .read(cx)
+                        .value()
+                        .parse::<f32>()
+                        .ok()
+                        .filter(|v| v.is_finite())
+                        .unwrap_or(this.app.font_settings.size);
+                    let size = (size + delta).clamp(8., 48.);
+                    input.update(cx, |input, cx| {
+                        input.set_value(size.to_string(), window, cx)
+                    });
+                    this.app.font_settings.size = size;
+                    this.apply_settings();
+                    cx.notify();
+                },
+            ),
+        ];
         Self {
             app,
             focus,
@@ -202,6 +284,9 @@ impl TerminalUi {
             focused: true,
             hover: None,
             context_menu: false,
+            font_select,
+            font_size,
+            _settings_subscriptions: settings_subscriptions,
             menu: None,
             context_anchor: point(px(0.), px(0.)),
             ime_selection: 0..0,
@@ -279,7 +364,14 @@ impl TerminalUi {
             .clone()
             .map(Ok)
             .unwrap_or_else(logging::config_path)
-            .and_then(|path| settings::save_all(&path, self.app.cursor_settings, self.app.theme));
+            .and_then(|path| {
+                settings::save_with_font(
+                    &path,
+                    self.app.cursor_settings,
+                    self.app.theme,
+                    &self.app.font_settings,
+                )
+            });
         if let Err(error) = result {
             self.app.error = Some(format!("Cannot save settings: {error:#}"));
         }
@@ -355,10 +447,14 @@ impl TerminalUi {
     fn geometry(&mut self, bounds: Rect, window: &Window) {
         self.panes.clear();
         self.dividers.clear();
-        let font = window.text_system().resolve_font(&gpui::font("Lilex"));
-        if let Ok(advance) = window
+        self.cell.height = px(self.app.font_settings.size * TERMINAL_LINE_HEIGHT);
+        let font = window
             .text_system()
-            .advance(font, px(TERMINAL_FONT_SIZE), 'M')
+            .resolve_font(&gpui::font(self.app.font_settings.family.clone()));
+        if let Ok(advance) =
+            window
+                .text_system()
+                .advance(font, px(self.app.font_settings.size), 'M')
         {
             self.cell.width = advance.width;
         }
@@ -690,6 +786,7 @@ impl TerminalUi {
             });
             let pane = &mut tab.panes[geo.index];
             pane.cursor_settings = self.app.cursor_settings;
+            pane.font_settings = self.app.font_settings.clone();
             window.with_content_mask(
                 Some(ContentMask {
                     bounds: geo.terminal,
@@ -789,6 +886,7 @@ fn paint_ui_text(
     }
 }
 fn paint_text(
+    font: &settings::FontSettings,
     text: &str,
     origin: UiPoint<Pixels>,
     height: Pixels,
@@ -798,8 +896,11 @@ fn paint_text(
 ) {
     let line = window.text_system().shape_line(
         text.to_owned().into(),
-        px(TERMINAL_FONT_SIZE),
-        &[text_run(text, color)],
+        px(font.size),
+        &[TextRun {
+            font: gpui::font(font.family.clone()),
+            ..text_run(text, color)
+        }],
         None,
     );
     if let Err(error) = line.paint(origin, height, window, cx) {
@@ -876,7 +977,15 @@ fn paint_terminal(
         if !text.is_empty() && text != " " {
             // Keep font fallback and shaping inside the columns owned by this cell.
             window.with_content_mask(Some(ContentMask { bounds }), |window| {
-                paint_text(&text, bounds.origin, cell.height, fg, window, cx)
+                paint_text(
+                    &pane.font_settings,
+                    &text,
+                    bounds.origin,
+                    cell.height,
+                    fg,
+                    window,
+                    cx,
+                )
             });
         }
         if flags.contains(Flags::UNDERLINE)
@@ -906,6 +1015,7 @@ fn paint_terminal(
         );
         if !pane.ime_preedit.is_empty() {
             paint_text(
+                &pane.font_settings,
                 &pane.ime_preedit,
                 bounds.origin,
                 cell.height,
@@ -930,6 +1040,7 @@ fn paint_terminal(
                 let text = terminal_cell_text(&pane.term.grid()[cursor]);
                 window.with_content_mask(Some(ContentMask { bounds }), |window| {
                     paint_text(
+                        &pane.font_settings,
                         &text,
                         bounds.origin,
                         cell.height,
@@ -1106,6 +1217,7 @@ impl Render for TerminalUi {
             .px(px(4.))
             .child(self.menu_button("settings", "Settings", cx, |this, _, _| {
                 this.app.settings_open = true;
+
                 this.menu = None;
             }))
             .child(self.menu_button("pane-menu", "Pane", cx, |this, _, _| {
@@ -1452,21 +1564,39 @@ impl TerminalUi {
     }
     fn settings_panel(&self, cx: &ViewContext<Self>) -> gpui::AnyElement {
         let theme = self.app.theme;
-        let mut themes = div().flex().items_center().gap(px(6.)).child("Theme");
+        let description = |title: &'static str, detail: &'static str| {
+            div()
+                .flex_1()
+                .min_w_0()
+                .child(div().text_size(px(14.)).child(title))
+                .child(
+                    div()
+                        .mt(px(4.))
+                        .text_size(px(12.))
+                        .opacity(0.65)
+                        .child(detail),
+                )
+        };
+        let row = || {
+            div()
+                .flex()
+                .items_center()
+                .justify_between()
+                .gap(px(20.))
+                .py(px(16.))
+                .flex_shrink_0()
+        };
+        let divider = || div().h(px(1.)).bg(theme.border());
+        let mut themes = div().flex().gap(px(4.));
         for (value, label) in [(ThemeMode::Dark, "Dark"), (ThemeMode::Light, "Light")] {
             themes = themes.child(
-                div()
-                    .id(label)
-                    .px(px(5.))
-                    .h(px(20.))
-                    .flex()
-                    .items_center()
-                    .rounded(px(2.))
-                    .when(theme == value, |d| d.bg(theme.selection()))
-                    .cursor_pointer()
-                    .child(label)
-                    .on_click(cx.listener(move |this, _, _, cx| {
+                Button::new(label)
+                    .label(label)
+                    .small()
+                    .selected(theme == value)
+                    .on_click(cx.listener(move |this, _, window, cx| {
                         this.app.theme = value;
+                        apply_component_theme(value, Some(window), cx);
                         this.apply_settings();
                         cx.notify();
                     })),
@@ -1476,32 +1606,13 @@ impl TerminalUi {
         for (shape, label) in [
             (CursorShape::Block, "Block"),
             (CursorShape::Underline, "Underline"),
-            (CursorShape::Beam, "Vertical bar"),
+            (CursorShape::Beam, "Bar"),
         ] {
-            let icon = div()
-                .bg(theme.foreground())
-                .when(shape == CursorShape::Block, |d| d.w(px(13.)).h(px(22.)))
-                .when(shape == CursorShape::Underline, |d| {
-                    d.w(px(16.)).h(px(3.)).mt(px(20.))
-                })
-                .when(shape == CursorShape::Beam, |d| d.w(px(3.)).h(px(22.)));
             shapes = shapes.child(
-                div()
-                    .id(label)
-                    .w(px(58.))
-                    .h(px(40.))
-                    .rounded(px(8.))
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .cursor_pointer()
-                    .bg(if self.app.cursor_settings.shape == shape {
-                        theme.selection()
-                    } else {
-                        theme.surface()
-                    })
-                    .hover(|d| d.bg(theme.border()))
-                    .child(icon)
+                Button::new(label)
+                    .label(label)
+                    .small()
+                    .selected(self.app.cursor_settings.shape == shape)
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.app.cursor_settings.shape = shape;
                         this.apply_settings();
@@ -1509,102 +1620,137 @@ impl TerminalUi {
                     })),
             );
         }
-        let blinking = self.app.cursor_settings.blinking;
-        let toggle = div()
-            .id("cursor-blinking")
-            .w(px(50.))
-            .h(px(30.))
-            .rounded(px(15.))
-            .px(px(3.))
-            .flex()
-            .items_center()
-            .cursor_pointer()
-            .bg(if blinking {
-                rgb(0x30C759)
-            } else {
-                theme.border()
-            })
-            .when(blinking, |d| d.justify_end())
-            .child(
-                div()
-                    .w(px(24.))
-                    .h(px(24.))
-                    .rounded(px(12.))
-                    .bg(rgb(0xFFFFFF)),
-            )
-            .on_click(cx.listener(|this, _, _, cx| {
-                this.app.cursor_settings.blinking = !this.app.cursor_settings.blinking;
-                this.apply_settings();
-                cx.notify();
-            }));
         div()
             .id("settings-dialog")
             .occlude()
-            .w(px(436.))
+            .w(px(600.))
             .max_w_full()
             .max_h(gpui::relative(0.95))
             .overflow_y_scroll()
-            .p(px(8.))
+            .p(px(24.))
+            .text_size(px(13.))
             .bg(theme.surface())
             .border_1()
             .border_color(theme.border())
-            .rounded(px(6.))
+            .rounded(px(10.))
             .shadow_lg()
             .flex()
             .flex_col()
+            .flex_shrink_0()
             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
             .child(
                 div()
-                    .text_size(px(18.))
-                    .line_height(px(24.))
+                    .text_size(px(20.))
+                    .line_height(px(28.))
                     .child("Settings"),
             )
+            .child(div().mt(px(20.)).opacity(0.6).child("APPEARANCE"))
             .child(
-                div()
-                    .mt(px(18.))
-                    .text_color(theme.foreground())
-                    .opacity(0.65)
-                    .child("APPEARANCE"),
+                row()
+                    .child(description(
+                        "Theme",
+                        "Choose the window and terminal appearance.",
+                    ))
+                    .child(themes),
             )
-            .child(themes)
-            .child(div().mt(px(18.)).opacity(0.65).child("CURSOR"))
+            .child(divider())
             .child(
-                div()
-                    .mt(px(6.))
-                    .p(px(16.))
-                    .border_1()
-                    .border_color(theme.border())
-                    .rounded(px(12.))
+                row()
+                    .child(description(
+                        "Font Size",
+                        "Terminal text size in pixels, from 8 to 48.",
+                    ))
                     .child(
                         div()
-                            .flex()
-                            .items_center()
-                            .justify_between()
-                            .child("Cursor Style")
-                            .child(shapes),
-                    )
-                    .child(div().my(px(8.)).h(px(1.)).bg(theme.border()))
+                            .w(px(148.))
+                            .flex_shrink_0()
+                            .child(NumberInput::new(&self.font_size).small()),
+                    ),
+            )
+            .child(divider())
+            .child(
+                row()
+                    .child(description(
+                        "Font Family",
+                        "Use a monospace font to keep characters aligned.",
+                    ))
                     .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .justify_between()
-                            .child("Cursor Blinking")
-                            .child(toggle),
+                        div().w(px(220.)).flex_shrink_0().child(
+                            Select::new(&self.font_select)
+                                .small()
+                                .search_placeholder("Search fonts…")
+                                .w_full(),
+                        ),
                     ),
             )
             .child(
                 div()
-                    .mt(px(12.))
-                    .opacity(0.65)
-                    .child("Changes apply immediately and are saved automatically."),
+                    .mt(px(4.))
+                    .p(px(14.))
+                    .h(px(self.app.font_settings.size * 1.3 + 28.))
+                    .flex_shrink_0()
+                    .flex()
+                    .items_center()
+                    .rounded(px(6.))
+                    .bg(theme.background())
+                    .overflow_hidden()
+                    .font_family(self.app.font_settings.family.clone())
+                    .text_size(px(self.app.font_settings.size))
+                    .line_height(px(self.app.font_settings.size * 1.3))
+                    .child("Aa Bb 0123  ~/projects"),
             )
-            .child(div().mt(px(12.)).flex().justify_end().child(self.button(
-                "done",
-                "Done",
-                cx,
-                |this, _, _| this.app.settings_open = false,
-            )))
+            .child(div().mt(px(24.)).opacity(0.6).child("CURSOR"))
+            .child(
+                row()
+                    .child(description(
+                        "Cursor Style",
+                        "Choose the terminal cursor shape.",
+                    ))
+                    .child(shapes),
+            )
+            .child(divider())
+            .child(
+                row()
+                    .child(description(
+                        "Cursor Blinking",
+                        "Blink the cursor while the terminal is focused.",
+                    ))
+                    .child(
+                        Switch::new("cursor-blinking")
+                            .checked(self.app.cursor_settings.blinking)
+                            .small()
+                            .on_click(cx.listener(|this, checked: &bool, _, cx| {
+                                this.app.cursor_settings.blinking = *checked;
+                                this.apply_settings();
+                                cx.notify();
+                            })),
+                    ),
+            )
+            .child(divider())
+            .child(
+                div()
+                    .mt(px(16.))
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .child(
+                        div()
+                            .text_size(px(11.))
+                            .opacity(0.6)
+                            .child("Changes are saved automatically."),
+                    )
+                    .child(
+                        Button::new("settings-done")
+                            .label("Done")
+                            .primary()
+                            .small()
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.app.settings_open = false;
+                                this.focus.focus(window);
+                                cx.notify();
+                            })),
+                    ),
+            )
             .into_any_element()
     }
     fn about_panel(&self, cx: &ViewContext<Self>) -> gpui::AnyElement {
@@ -1835,41 +1981,60 @@ fn utf16_offset(text: &str, index: usize) -> usize {
     text.len()
 }
 
+fn component_theme(theme: ThemeMode) -> gpui_component::ThemeMode {
+    match theme {
+        ThemeMode::Dark => gpui_component::ThemeMode::Dark,
+        ThemeMode::Light => gpui_component::ThemeMode::Light,
+    }
+}
+
+fn apply_component_theme(theme: ThemeMode, window: Option<&mut Window>, cx: &mut App) {
+    gpui_component::Theme::change(component_theme(theme), window, cx);
+    gpui_component::Theme::global_mut(cx).ring = gpui::rgb(0x3B82F6).into();
+}
+
 pub(super) fn run(app: TerminalApp) -> Result<()> {
     let result = std::rc::Rc::new(std::cell::RefCell::new(Ok(())));
     let outcome = result.clone();
-    Application::new().run(move |cx: &mut App| {
-        if let Err(error) = cx.text_system().add_fonts(vec![
-            Cow::Borrowed(include_bytes!("../assets/fonts/lilex/Lilex-Regular.ttf")),
-            Cow::Borrowed(include_bytes!("../assets/fonts/ubuntu/Ubuntu-Light.ttf")),
-        ]) {
-            *outcome.borrow_mut() = Err(error);
-            cx.quit();
-            return;
-        }
-        let bounds = Bounds::centered(None, size(px(960.), px(640.)), cx);
-        let opened = cx.open_window(
-            WindowOptions {
-                window_bounds: Some(WindowBounds::Windowed(bounds)),
-                window_min_size: Some(size(px(420.), px(260.))),
-                ..Default::default()
-            },
-            move |window, cx| cx.new(|cx| TerminalUi::new(app, window, cx)),
-        );
-        if let Err(error) = opened {
-            *outcome.borrow_mut() = Err(error);
-            cx.quit();
-            return;
-        }
-        tracing::info!(renderer = "GPUI", "GPUI window initialized");
-        cx.on_window_closed(|cx| {
-            if cx.windows().is_empty() {
+    Application::new()
+        .with_assets(gpui_component_assets::Assets)
+        .run(move |cx: &mut App| {
+            gpui_component::init(cx);
+            apply_component_theme(app.theme, None, cx);
+            if let Err(error) = cx.text_system().add_fonts(vec![
+                Cow::Borrowed(include_bytes!("../assets/fonts/lilex/Lilex-Regular.ttf")),
+                Cow::Borrowed(include_bytes!("../assets/fonts/ubuntu/Ubuntu-Light.ttf")),
+            ]) {
+                *outcome.borrow_mut() = Err(error);
                 cx.quit();
+                return;
             }
-        })
-        .detach();
-        cx.activate(true);
-    });
+            let bounds = Bounds::centered(None, size(px(960.), px(640.)), cx);
+            let opened = cx.open_window(
+                WindowOptions {
+                    window_bounds: Some(WindowBounds::Windowed(bounds)),
+                    window_min_size: Some(size(px(420.), px(260.))),
+                    ..Default::default()
+                },
+                move |window, cx| {
+                    let view = cx.new(|cx| TerminalUi::new(app, window, cx));
+                    cx.new(|cx| Root::new(view, window, cx))
+                },
+            );
+            if let Err(error) = opened {
+                *outcome.borrow_mut() = Err(error);
+                cx.quit();
+                return;
+            }
+            tracing::info!(renderer = "GPUI", "GPUI window initialized");
+            cx.on_window_closed(|cx| {
+                if cx.windows().is_empty() {
+                    cx.quit();
+                }
+            })
+            .detach();
+            cx.activate(true);
+        });
     std::mem::replace(&mut *result.borrow_mut(), Ok(()))
 }
 

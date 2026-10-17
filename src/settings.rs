@@ -44,13 +44,14 @@ pub fn load(path: &Path) -> Result<CursorSettings> {
 }
 
 pub fn save(path: &Path, cursor: CursorSettings) -> Result<()> {
-    save_values(path, cursor, None)
+    save_values(path, cursor, None, None)
 }
 
 fn save_values(
     path: &Path,
     cursor: CursorSettings,
     theme: Option<crate::theme::ThemeMode>,
+    font: Option<&FontSettings>,
 ) -> Result<()> {
     let mut value = match std::fs::read_to_string(path) {
         Ok(text) => toml::from_str::<toml::Value>(&text)?,
@@ -71,6 +72,13 @@ fn save_values(
                 "appearance".into(),
                 toml::Value::try_from(AppearanceSettings { theme })?,
             );
+    }
+    if let Some(font) = font {
+        font.validate()?;
+        value
+            .as_table_mut()
+            .context("Expected configuration table")?
+            .insert("font".into(), toml::Value::try_from(font)?);
     }
     if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
         std::fs::create_dir_all(parent)?;
@@ -138,7 +146,7 @@ pub fn load_theme(path: &Path) -> Result<crate::theme::ThemeMode> {
 }
 
 pub fn save_all(path: &Path, cursor: CursorSettings, theme: crate::theme::ThemeMode) -> Result<()> {
-    save_values(path, cursor, Some(theme))
+    save_values(path, cursor, Some(theme), None)
 }
 
 #[cfg(test)]
@@ -168,5 +176,91 @@ mod appearance_tests {
         }
         std::fs::write(&path, "[appearance]\ntheme = 'unknown'\n").unwrap();
         assert!(load_theme(&path).is_err());
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct FontSettings {
+    pub family: String,
+    pub size: f32,
+}
+impl Default for FontSettings {
+    fn default() -> Self {
+        Self {
+            family: "Lilex".into(),
+            size: 16.0,
+        }
+    }
+}
+impl FontSettings {
+    fn validate(&self) -> Result<()> {
+        anyhow::ensure!(
+            !self.family.trim().is_empty(),
+            "Font family cannot be empty"
+        );
+        anyhow::ensure!(
+            self.size.is_finite() && (8.0..=48.0).contains(&self.size),
+            "Font size must be between 8 and 48 pixels"
+        );
+        Ok(())
+    }
+}
+pub fn load_font(path: &Path) -> Result<FontSettings> {
+    let text = match std::fs::read_to_string(path) {
+        Ok(text) => text,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(FontSettings::default()),
+        Err(e) => return Err(e.into()),
+    };
+    let value: toml::Value = toml::from_str(&text)?;
+    let font = value
+        .get("font")
+        .cloned()
+        .map(|v| v.try_into::<FontSettings>())
+        .transpose()
+        .context("Invalid font settings")?
+        .unwrap_or_default();
+    font.validate()?;
+    Ok(font)
+}
+pub fn save_with_font(
+    path: &Path,
+    cursor: CursorSettings,
+    theme: crate::theme::ThemeMode,
+    font: &FontSettings,
+) -> Result<()> {
+    save_values(path, cursor, Some(theme), Some(font))
+}
+#[cfg(test)]
+mod font_tests {
+    use super::*;
+    #[test]
+    fn font_roundtrip_and_validation() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        assert_eq!(load_font(&path).unwrap(), FontSettings::default());
+        std::fs::write(&path, "[logging]\nfilter = 'debug'\n").unwrap();
+        let font = FontSettings {
+            family: "Menlo".into(),
+            size: 22.0,
+        };
+        save_with_font(&path, CursorSettings::default(), Default::default(), &font).unwrap();
+        assert_eq!(load_font(&path).unwrap(), font);
+        save_all(&path, CursorSettings::default(), Default::default()).unwrap();
+        assert_eq!(load_font(&path).unwrap(), font);
+        let value: toml::Value = toml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(value["logging"]["filter"].as_str(), Some("debug"));
+        for size in [0.0, 49.0, f32::NAN, f32::INFINITY] {
+            assert!(
+                FontSettings {
+                    size,
+                    ..font.clone()
+                }
+                .validate()
+                .is_err()
+            );
+        }
+        std::fs::write(&path, "[font]\nsize = 100\n").unwrap();
+        assert!(load_font(&path).is_err());
     }
 }
