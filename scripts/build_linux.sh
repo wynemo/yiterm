@@ -8,7 +8,10 @@ yum install -y libX11-devel libXcursor-devel libXi-devel libXrandr-devel \
   libxcb-devel libxkbcommon-devel libxkbcommon-x11 mesa-libGL-devel \
   mesa-dri-drivers
 if [[ "$stage" == test ]]; then
-  yum install -y glx-utils xorg-x11-server-Xvfb xorg-x11-utils fontconfig google-noto-sans-cjk-fonts
+  yum install -y openssh-clients glx-utils xorg-x11-server-Xvfb xorg-x11-utils fontconfig google-noto-sans-cjk-fonts
+  # Full SSH session tests require the real client, including the proxy fixture's absolute path.
+  test -x /usr/bin/ssh
+  /usr/bin/ssh -V
 fi
 export PATH="$CARGO_HOME/bin:/opt/python/cp313-cp313/bin:$PATH"
 if ! command -v rustup >/dev/null; then
