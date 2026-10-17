@@ -34,6 +34,7 @@ cargo test --locked --release --target "$target" --no-default-features --feature
 cargo test --locked --release --target "$target" --no-default-features --features x11 --bin yiterm profiling::tests
 cargo test --locked --release --target "$target" --no-default-features --features x11 --bin yiterm repaint_tests
 cargo test --locked --release --target "$target" --no-default-features --features x11 --bin yiterm terminal_unicode_
+cargo test --locked --release --target "$target" --no-default-features --features x11 --bin yiterm settings_font_picker_
 cargo test --locked --release --target "$target" --no-default-features --features x11 --bin yiterm terminal_unicode_linux_system_cjk_fallback -- --ignored
 # Exercise window/context creation with CentOS 7's Mesa software renderer.
 Xvfb :99 -screen 0 1280x800x24 +extension GLX &

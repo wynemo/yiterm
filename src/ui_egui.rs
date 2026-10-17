@@ -1088,45 +1088,60 @@ fn show_settings(
                         "Use a monospace font to keep characters aligned.",
                         220.0,
                         |ui| {
-                            egui::ComboBox::from_id_salt("font-family")
-                                .width(220.0)
-                                .height(240.0)
+                            let button = ui.add_sized(
+                                [220.0, 28.0],
+                                egui::Button::new(&font.family).right_text("⏷").truncate(),
+                            );
+                            egui::Popup::menu(&button)
+                                .width(button.rect.width())
                                 .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
-                                .selected_text(&font.family)
-                                .show_ui(ui, |ui| {
+                                .show(|ui| {
                                     let search_id = egui::Id::new("font-search");
                                     let mut search = ctx.data_mut(|data| {
                                         data.get_temp::<String>(search_id).unwrap_or_default()
                                     });
-                                    ui.add(
-                                        egui::TextEdit::singleline(&mut search)
-                                            .hint_text("Search fonts…")
-                                            .desired_width(200.0),
-                                    );
+                                    let search_changed = ui
+                                        .add(
+                                            egui::TextEdit::singleline(&mut search)
+                                                .hint_text("Search fonts…")
+                                                .desired_width(200.0),
+                                        )
+                                        .changed();
                                     let query = search.to_lowercase();
                                     ctx.data_mut(|data| data.insert_temp(search_id, search));
                                     ui.separator();
-                                    let mut found = false;
-                                    for family in families
-                                        .iter()
-                                        .filter(|name| name.to_lowercase().contains(&query))
-                                    {
-                                        found = true;
-                                        if ui
-                                            .selectable_value(
-                                                &mut font.family,
-                                                family.clone(),
-                                                family,
-                                            )
-                                            .clicked()
+                                    // Keep search outside the scrolling font list.
+                                    let mut list = egui::ScrollArea::vertical()
+                                        .id_salt("font-family-list")
+                                        .max_height(210.0);
+                                    if search_changed {
+                                        list = list.vertical_scroll_offset(0.0);
+                                    }
+                                    list.show(ui, |ui| {
+                                        let mut found = false;
+                                        for family in families
+                                            .iter()
+                                            .filter(|name| name.to_lowercase().contains(&query))
                                         {
-                                            ctx.data_mut(|data| data.remove::<String>(search_id));
-                                            ui.close();
+                                            found = true;
+                                            if ui
+                                                .selectable_value(
+                                                    &mut font.family,
+                                                    family.clone(),
+                                                    family,
+                                                )
+                                                .clicked()
+                                            {
+                                                ctx.data_mut(|data| {
+                                                    data.remove::<String>(search_id)
+                                                });
+                                                ui.close();
+                                            }
                                         }
-                                    }
-                                    if !found {
-                                        ui.weak("No matching fonts");
-                                    }
+                                        if !found {
+                                            ui.weak("No matching fonts");
+                                        }
+                                    });
                                 });
                         },
                     );
@@ -1747,7 +1762,12 @@ mod tests {
         ctx.data_mut(|data| {
             data.insert_temp(
                 egui::Id::new("system-font-families"),
-                std::sync::Arc::new(vec!["Lilex".to_owned(), "Test Mono".to_owned()]),
+                std::sync::Arc::new(
+                    ["Lilex".to_owned(), "Test Mono".to_owned()]
+                        .into_iter()
+                        .chain((0..80).map(|i| format!("Font {i:03}")))
+                        .collect::<Vec<_>>(),
+                ),
             )
         });
         let mut cursor = CursorSettings::default();
@@ -1803,6 +1823,39 @@ mod tests {
         let output = render(vec![]);
         render(click(text_center(&output, "Lilex")));
         let output = render(vec![]);
+        let search_center = text_center(&output, "Search fonts…");
+        let list_center = text_center(&output, "Test Mono");
+        render(vec![
+            egui::Event::PointerMoved(list_center),
+            egui::Event::MouseWheel {
+                unit: egui::MouseWheelUnit::Point,
+                delta: Vec2::new(0.0, -1000.0),
+                modifiers: Default::default(),
+            },
+        ]);
+        for _ in 0..20 {
+            render(vec![]);
+        }
+        let output = render(vec![]);
+        assert_eq!(text_center(&output, "Search fonts…"), search_center);
+        assert!(output.shapes.iter().any(|shape| {
+            if let egui::Shape::Text(t) = &shape.shape {
+                t.galley.text() == "Search fonts…" && shape.clip_rect.contains(search_center)
+            } else {
+                false
+            }
+        }));
+        assert!(
+            !output.shapes.iter().any(|shape| {
+                if let egui::Shape::Text(t) = &shape.shape {
+                    t.galley.text() == "Test Mono"
+                        && shape.clip_rect.contains(t.pos + t.galley.size() / 2.0)
+                } else {
+                    false
+                }
+            }),
+            "the font list actually scrolled"
+        );
         render(click(text_center(&output, "Search fonts…")));
         render(vec![egui::Event::Text("Test".into())]);
         let output = render(vec![]);
