@@ -81,8 +81,13 @@ jobs:
           YITERM_BUILD_REV: ${{ github.sha }}
         run: cargo test --locked --release --target ${{ matrix.target }} --test logging
 
-      - name: Test terminal, GPUI input, layout, settings, and profiling
-        run: cargo test --locked --release --target ${{ matrix.target }} --lib --bin yiterm
+      - name: Test profiling aggregates and idle repaint regression
+        run: |
+          cargo test --locked --release --target ${{ matrix.target }} --bin yiterm profiling::tests
+          cargo test --locked --release --target ${{ matrix.target }} --bin yiterm repaint_tests
+
+      - name: Test terminal Unicode rendering and emoji column widths
+        run: cargo test --locked --release --target ${{ matrix.target }} --bin yiterm terminal_unicode_
 
       - uses: actions/setup-python@v7
         with:

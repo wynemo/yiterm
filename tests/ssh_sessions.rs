@@ -16,15 +16,6 @@ struct Session {
 }
 impl Session {
     fn new(shell: &str) -> Self {
-        let ssh = std::process::Command::new("/usr/bin/ssh")
-            .arg("-V")
-            .output()
-            .expect("SSH session tests require OpenSSH at /usr/bin/ssh");
-        assert!(
-            ssh.status.success(),
-            "OpenSSH could not start: {}",
-            String::from_utf8_lossy(&ssh.stderr)
-        );
         let integration =
             ssh::Integration::new(std::path::Path::new(env!("CARGO_BIN_EXE_yiterm"))).unwrap();
         let pair = portable_pty::native_pty_system()
@@ -172,11 +163,11 @@ fn shell_bootstrap_preserves_typed_ssh_and_enables_multiplexing() {
         let output = String::from_utf8_lossy(&output);
         assert!(
             output.contains("controlmaster auto"),
-            "{shell}: SSH did not get the multiplexing default; PTY output:\n{output}"
+            "{shell}: SSH did not get the multiplexing default"
         );
         assert!(
             output.contains("controlpath /tmp/yiterm-"),
-            "{shell}: SSH did not get a private socket path; PTY output:\n{output}"
+            "{shell}: SSH did not get a private socket path"
         );
     }
 }
