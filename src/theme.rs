@@ -1,4 +1,4 @@
-use gpui::{Rgba, rgb};
+use crate::backend::{Color as Rgba, rgb};
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -52,5 +52,28 @@ impl ThemeMode {
             ],
         };
         Self::rgb(colors[index])
+    }
+    #[cfg(target_os = "linux")]
+    pub fn visuals(self) -> eframe::egui::Visuals {
+        let mut visuals = match self {
+            Self::Dark => eframe::egui::Visuals::dark(),
+            Self::Light => eframe::egui::Visuals::light(),
+        };
+        visuals.panel_fill = self.surface();
+        visuals.window_fill = self.surface();
+        visuals.override_text_color = Some(self.foreground());
+        visuals.selection.bg_fill = self.selection();
+        visuals.selection.stroke.color = self.selection_foreground();
+        visuals.hyperlink_color = self.accent();
+        visuals.window_stroke.color = self.border();
+        visuals
+    }
+    #[cfg(target_os = "linux")]
+    pub fn from_context(ctx: &eframe::egui::Context) -> Self {
+        if ctx.style().visuals.dark_mode {
+            Self::Dark
+        } else {
+            Self::Light
+        }
     }
 }

@@ -1,5 +1,13 @@
 #![cfg_attr(windows, windows_subsystem = "windows")]
+#[cfg(not(target_os = "linux"))]
 mod profiling;
+#[cfg(target_os = "linux")]
+#[path = "profiling_egui.rs"]
+mod profiling;
+#[cfg(not(target_os = "linux"))]
+mod ui;
+#[cfg(target_os = "linux")]
+#[path = "ui_egui.rs"]
 mod ui;
 use portable_pty::{MasterPty, PtySize};
 use yiterm::settings::{self, CursorSettings, CursorShape};
@@ -18,16 +26,12 @@ use alacritty_terminal::{
 };
 use anyhow::{Context, Result};
 use clap::Parser;
-use gpui::{Rgba, rgb};
 use std::{
     io::{Read, Write},
-    sync::{
-        Arc,
-        atomic::{AtomicBool, Ordering},
-        mpsc,
-    },
+    sync::{Arc, atomic::Ordering, mpsc},
     time::{Duration, Instant},
 };
+use yiterm::backend::{Color as Rgba, PointerButton, Repaint, rgb};
 const TERMINAL_FONT_SIZE: f32 = 16.0;
 const TERMINAL_LINE_HEIGHT: f32 = 1.3;
 const MAX_OSC52_CLIPBOARD_BYTES: usize = 1024 * 1024;
@@ -35,11 +39,15 @@ fn rgb_bytes(r: u8, g: u8, b: u8) -> Rgba {
     rgb((u32::from(r) << 16) | (u32::from(g) << 8) | u32::from(b))
 }
 // Coalesce bursts of PTY data without keeping the UI awake while idle.
+#[cfg(not(target_os = "linux"))]
 static UI_WAKE: std::sync::LazyLock<(async_channel::Sender<()>, async_channel::Receiver<()>)> =
     std::sync::LazyLock::new(|| async_channel::bounded(1));
+#[cfg(not(target_os = "linux"))]
 fn wake_ui() {
     let _ = UI_WAKE.0.try_send(());
 }
+#[cfg(target_os = "linux")]
+fn wake_ui() {}
 #[derive(Parser, Clone)]
 #[command(version, about = "A small native terminal with clipboard image paste")]
 struct Args {
@@ -93,7 +101,7 @@ struct TerminalSession {
     mouse_modes: mouse::MouseModes,
     mouse_wheel: mouse::Wheel,
     output: mpsc::Receiver<Vec<u8>>,
-    repaint: Arc<AtomicBool>,
+    repaint: Arc<Repaint>,
     events: mpsc::Receiver<Event>,
     writer: Box<dyn Write + Send>,
     master: Box<dyn MasterPty + Send>,
@@ -105,7 +113,7 @@ struct TerminalSession {
     paste_sender: mpsc::Sender<Result<PasteResult>>,
     paste_busy: bool,
     ime_preedit: String,
-    mouse_button: Option<u8>,
+    mouse_button: Option<PointerButton>,
     selecting: bool,
     pending_clipboard: Option<String>,
     cursor_blink_started: Instant,
@@ -158,7 +166,7 @@ impl TerminalSession {
         let mut reader = pair.master.try_clone_reader()?;
         let writer = pair.master.take_writer()?;
         let (tx, output) = mpsc::sync_channel(64);
-        let repaint = Arc::new(AtomicBool::new(true));
+        let repaint = Arc::new(Repaint::new());
         let output_repaint = repaint.clone();
         std::thread::spawn(move || {
             let mut buffer = [0; 16384];
@@ -231,6 +239,7 @@ impl TerminalSession {
             self.status = error.to_string();
         }
     }
+    #[cfg(not(target_os = "linux"))]
     fn copy_selection(&mut self) {
         if let Some(text) = self.term.selection_to_string().filter(|s| !s.is_empty()) {
             self.pending_clipboard = Some(text);
@@ -595,6 +604,8 @@ impl TerminalTab {
     }
 }
 struct TerminalApp {
+    #[cfg(target_os = "linux")]
+    profile: Option<profiling::Profile>,
     window_title: String,
     tabs: Vec<TerminalTab>,
     active: usize,
@@ -619,6 +630,8 @@ impl TerminalApp {
             .unwrap_or_else(logging::config_path)?;
         let cursor_settings = settings::load(&path)?;
         Ok(Self {
+            #[cfg(target_os = "linux")]
+            profile: profiling::Profile::new(),
             window_title: String::new(),
             tabs: vec![TerminalTab::new(session)],
             active: 0,
@@ -845,6 +858,17 @@ fn run(args: Args, logging: &logging::Logging) -> Result<()> {
 fn terminal_cell_text(cell: &alacritty_terminal::term::cell::Cell) -> String {
     std::iter::once(cell.c)
         .chain(cell.zerowidth().into_iter().flatten().copied())
+        .filter(|ch| {
+            #[cfg(target_os = "linux")]
+            {
+                !ui::is_default_ignorable(*ch)
+            }
+            #[cfg(not(target_os = "linux"))]
+            {
+                let _ = ch;
+                true
+            }
+        })
         .collect()
 }
 

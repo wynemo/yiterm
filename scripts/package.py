@@ -108,11 +108,20 @@ def main() -> None:
         (ROOT / "readme.md", f"{name}/readme.md"),
         (ROOT / "TECHNICAL.md", f"{name}/TECHNICAL.md"),
         (ROOT / "THIRD_PARTY_NOTICES.md", f"{name}/THIRD_PARTY_NOTICES.md"),
-        (ROOT / "licenses/gpui-LICENSE-APACHE", f"{name}/licenses/gpui-LICENSE-APACHE"),
         (ROOT / "vendor/alacritty_terminal/LICENSE-APACHE", f"{name}/licenses/alacritty-LICENSE-APACHE"),
         (ROOT / "assets/fonts/ubuntu/UFL.txt", f"{name}/licenses/Ubuntu-UFL.txt"),
         (ROOT / "assets/fonts/lilex/OFL.txt", f"{name}/licenses/Lilex-OFL.txt"),
     ]
+    if args.target == "x86_64-unknown-linux-gnu":
+        files.extend([
+            (ROOT / "vendor/glutin/LICENSE", f"{name}/licenses/glutin/LICENSE"),
+            (ROOT / "vendor/eframe/LICENSE-MIT", f"{name}/licenses/eframe/LICENSE-MIT"),
+            (ROOT / "vendor/eframe/LICENSE-APACHE", f"{name}/licenses/eframe/LICENSE-APACHE"),
+            (ROOT / "vendor/egui-winit/LICENSE-MIT", f"{name}/licenses/egui-winit/LICENSE-MIT"),
+            (ROOT / "vendor/egui-winit/LICENSE-APACHE", f"{name}/licenses/egui-winit/LICENSE-APACHE"),
+        ])
+    else:
+        files.append((ROOT / "licenses/gpui-LICENSE-APACHE", f"{name}/licenses/gpui-LICENSE-APACHE"))
     output = ROOT / "dist"
     output.mkdir(exist_ok=True)
     if args.target.endswith("windows-msvc"):

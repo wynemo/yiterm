@@ -53,7 +53,7 @@ fn theme_colors_preserve_explicit_terminal_colors() {
 
 #[test]
 fn terminal_unicode_keeps_grid_positions_and_original_selection() {
-    for (input, _display, columns) in [
+    for (input, display, columns) in [
         ("⚠", "⚠", 1),
         ("⚠\u{FE0F}", "⚠", 2),
         ("❤\u{FE0F}", "❤", 2),
@@ -71,7 +71,15 @@ fn terminal_unicode_keeps_grid_positions_and_original_selection() {
         let mut parser: Processor = Processor::new();
         parser.advance(&mut term, format!("{input}X").as_bytes());
         let first = &term.grid()[Point::new(Line(0), Column(0))];
-        assert_eq!(terminal_cell_text(first), input, "{input:?}");
+        assert_eq!(
+            terminal_cell_text(first),
+            if cfg!(target_os = "linux") {
+                display
+            } else {
+                input
+            },
+            "{input:?}"
+        );
         assert_eq!(first.flags.contains(Flags::WIDE_CHAR), columns == 2);
         assert_eq!(term.grid()[Point::new(Line(0), Column(columns))].c, 'X');
         assert_eq!(term.grid().cursor.point.column.0, columns + 1);
@@ -208,6 +216,8 @@ fn background_sessions_process_output_and_survive_another_tab_closing() {
     let first = TerminalSession::new(&args, None).unwrap();
     let second = TerminalSession::new(&args, None).unwrap();
     let mut app = TerminalApp {
+        #[cfg(target_os = "linux")]
+        profile: None,
         window_title: String::new(),
         tabs: vec![TerminalTab::new(first), TerminalTab::new(second)],
         active: 0,

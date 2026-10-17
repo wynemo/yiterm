@@ -1,10 +1,10 @@
 # YiTerm 技术与详细使用说明
 
-Rust 原生终端，使用 GPUI 0.2.2 管理窗口、界面、字体排版与终端绘制，使用 `alacritty_terminal` 解析终端协议、`portable-pty` 启动本地 shell / ConPTY。支持 macOS、Windows，Linux CI 保留 CentOS 7 / glibc 2.17 的 x64 兼容目标。
+Rust 原生终端，Windows / macOS 使用 GPUI 0.2.2，Linux 保留原有 egui / eframe / OpenGL 界面后端，使用 `alacritty_terminal` 解析终端协议、`portable-pty` 启动本地 shell / ConPTY。支持 macOS、Windows，Linux CI 保留 CentOS 7 / glibc 2.17 的 x64 兼容目标。
 
 终端内嵌 Lilex 字体；界面保留原版 Ubuntu Light 字体（[许可证](assets/fonts/ubuntu/UFL.txt)），无需系统安装；16px 字号配合 1.3 倍行高，使框线字符连续衔接。字体许可证见 [OFL.txt](assets/fonts/lilex/OFL.txt)。
 
-字符显示按终端网格定位，由 GPUI 排版每个单元格中的完整 Unicode 序列，保留变体选择符、连接符与组合标记，字体回退由平台处理。超出单元格分配宽度的字形会被裁剪，不会覆盖相邻字符；原始文本与复制内容保持原样。终端内核识别 VS16 将文本符号切换为 emoji 的序列（例如 `⚠️`、`❤️`），为这些序列保留两列；字符与变体选择符分批到达时也保持相同占位。跨多个独立终端单元格的复杂文字排版仍受字符网格限制。
+字符显示按终端网格定位，Windows / macOS 由 GPUI 排版每个单元格中的完整 Unicode 序列，保留变体选择符、连接符与组合标记，字体回退由平台处理。超出单元格分配宽度的字形会被裁剪，不会覆盖相邻字符；原始文本与复制内容保持原样。终端内核识别 VS16 将文本符号切换为 emoji 的序列（例如 `⚠️`、`❤️`），为这些序列保留两列；字符与变体选择符分批到达时也保持相同占位。跨多个独立终端单元格的复杂文字排版仍受字符网格限制。Linux 保持原有 egui 绘制逻辑：过滤默认不可见字符，保留组合标记，回退字形过宽时只在水平方向压缩；原始复制内容不变。
 
 ## 运行
 
@@ -29,20 +29,45 @@ Windows 默认启动 `powershell.exe`；macOS 默认使用 `$SHELL`。`--shell` 
 
 ### Linux x64 / CentOS 7.8
 
-Linux 构建与验证继续使用 `quay.io/pypa/manylinux2014_x86_64`（CentOS 7 / glibc 2.17），发布包使用 X11 后端。`scripts/verify_linux.py` 拒绝要求高于 GLIBC 2.17 的二进制，并检查共享库能否解析；不放宽该兼容门槛。
+Linux 启动时通过 Fontconfig 的 `fc-match` 加载系统中日韩字体回退，并保留 TTC 字体集合的 face index；终端与界面均使用这些回退字体，ASCII 仍优先使用内置 Lilex。需要系统安装 Fontconfig 和中文字体（Ubuntu 通常已安装），无需把字体复制到远程 shell 所在机器。
 
-GPUI 使用 Vulkan，原来的 OpenGL 回退补丁不能直接复用。这不代表取消 CentOS 7 支持：迁移后的构建、依赖与图形驱动兼容性仍需 Linux CI 验证。当前没有 GPUI 版在 CentOS 7 上构建或运行通过的结论；出现问题应根据 CI 的具体错误解决，不应直接提高系统基线或跳过检查。
+Linux 打包时从可执行文件分离 DWARF 调试符号，下载包只包含精简后的程序。CI 另外保存 `profiling-linux-<commit>` artifact，其中的 `yiterm` 和 `yiterm.debug` 必须配套使用；放在同一目录时 GDB 可通过 `.gnu_debuglink` 加载符号。原始 Cargo 编译产物保留，避免影响构建缓存。
 
-构建和测试由 Linux runner 中的 `scripts/build_linux.sh` 执行。本机 macOS 不进行 Linux 构建或交叉编译。默认源码构建同时启用 X11 和 Wayland；CentOS 7 CI 只启用 X11：
+Linux 发布包使用 X11 后端，目标为 x86_64、glibc 2.17；需要图形会话和可用的 OpenGL 驱动。解压 `yiterm-<版本>-linux-x64.tar.gz` 后运行 `./yiterm`，默认使用 `$SHELL`。如需指定 shell：`./yiterm --shell /bin/bash`。
+
+CentOS 7 的运行依赖（使用系统已有的 yum 仓库或管理员配置的归档镜像）：
 
 ```sh
+sudo yum install libX11 libXcursor libXi libXrandr libxcb libxkbcommon libxkbcommon-x11 mesa-libGL mesa-dri-drivers xdg-utils openssh-clients
+```
+
+构建依赖可参考 [Alacritty 的 CentOS/RHEL 7 说明](https://github.com/alacritty/alacritty/blob/master/INSTALL.md#centosrhel-7)，但本项目使用 egui，依赖不完全相同。在 Linux 上安装 Rust 和 C 编译工具后：
+
+```sh
+sudo yum install gcc gcc-c++ make pkgconfig libX11-devel libXcursor-devel libXi-devel libXrandr-devel libxcb-devel libxkbcommon-devel mesa-libGL-devel
 cargo build --locked --release --target x86_64-unknown-linux-gnu --no-default-features --features x11
 ```
 
-原有 X11、字体与编译依赖保留，并加入 GPUI 所需的 Fontconfig、FreeType、OpenSSL 和 Vulkan 依赖。发行版提供的驱动能否满足 GPUI 要求，需通过 CI 窗口启动测试及实机测试确认，不替换系统 glibc，也不随包携带显卡驱动。
+默认源码构建同时启用 X11 和 Wayland；CentOS 7 包只启用 `x11`，避免依赖其旧版 Wayland 桌面环境。不要在新发行版直接构建后假定兼容 CentOS 7。CI 在 Linux runner 中通过 `quay.io/pypa/manylinux2014_x86_64`（CentOS 7 / glibc 2.17）运行 `scripts/build_linux.sh`，检查 ELF 架构、GLIBC 符号版本和共享库解析，随后打包、生成 SHA-256 并上传 Actions artifact。独立的 Linux 测试 job 下载同一份 artifact、校验 SHA-256，执行日志、性能汇总、刷新、Unicode 测试及 Xvfb/Mesa 窗口启动检查。测试失败不会阻止下载已上传的二进制；正式 Release 仍要求所有平台构建和 Linux 测试通过。
 
-Linux 打包时分离 DWARF 调试符号；`profiling-linux-<commit>` artifact 中的 `yiterm` 与 `yiterm.debug` 必须配套使用。独立测试 job 下载同次构建的发布包、校验 SHA-256，执行 Rust 测试，并在 Xvfb 下检查 GPUI 窗口启动。CI 容器共享 runner 内核，不能替代 CentOS 7.8 的旧内核、真实显卡、输入法和剪贴板实机验证。
+Linux 使用本地补丁 `vendor/eframe`：优先创建默认 OpenGL 3.3 core 上下文；失败时先尝试 OpenGL 2.1 compatibility，再尝试上游 GLES 回退。旧版 Mesa / 远程桌面因此可使用 egui_glow 的 GLSL 1.20 渲染路径，兼容不支持 3.3 core 的驱动。`vendor/glutin` 使用 `glXQueryExtensionsString` 查询当前连接与屏幕实际可用的 GLX 扩展，避免把客户端库支持的扩展误认为 X Server 也支持，从而在设置垂直同步时触发异步 `GLXBadContextTag`。窗口测试要求窗口实际可见且已初始化 OpenGL 渲染器。
 
+该方案保留系统 glibc，不替换它，也不随包携带显卡驱动。CI 容器共享 runner 的 Linux 内核，Xvfb 使用软件渲染；它不能替代 CentOS 7.8 的旧内核、真实显卡、输入法、剪贴板和桌面交互实机验证。Linux 构建与运行检查只在 Linux CI / Linux 设备执行，macOS 本机不运行 Linux 构建。
+
+### Windows SSH 与图片上传
+
+Windows 下，YiTerm 的私有 `ssh.exe` wrapper 使用内置 Rust SSH 客户端（`russh`）。登录时输入密码或密钥口令，图片上传通过同一条已认证连接的新 SFTP 通道完成，无需再次输入密码。也支持服务器的 keyboard-interactive 认证。密码不会保存到配置文件或日志。
+
+仍需安装系统 OpenSSH：内置客户端通过 `ssh -G` 解析 SSH config 中的别名、HostName、User、Port、IdentityFile、ProxyJump 和 known_hosts 路径。`ProxyJump` 的跳板链路由系统 OpenSSH 建立，目标主机仍由内置客户端认证并复用连接上传图片；跳板机认证按系统 OpenSSH 的配置和提示处理。支持 OpenSSH 格式私钥文件和 Windows OpenSSH agent；`IdentitiesOnly=yes` 时仅尝试密钥文件。首次连接显示 SHA-256 主机指纹，确认后写入 known_hosts；主机密钥变化或被撤销时拒绝连接。`StrictHostKeyChecking` 支持 `ask`、`yes` 和 `accept-new`。握手/指纹确认和认证阶段各有 120 秒期限。`ssh -G` 可能去掉 known_hosts 路径列表的引号；多个绝对路径可以包含空格，无法判断分隔的相对路径列表会报错，应改用绝对路径或系统客户端。
+
+内置客户端暂不支持 ProxyCommand、端口/agent/X11 转发、SSH 证书和远程命令。遇到这些配置会提示使用 `ssh --system <原有参数>`，显式调用系统 OpenSSH；`ssh -V`、`ssh -G` 和 `ssh -Q` 也直接调用系统客户端。系统客户端会话仍通过独立 scp 上传图片，因此密码认证的会话不能保证免交互上传。macOS 继续使用系统 OpenSSH 的 ControlMaster 连接复用。
+
+内置上传单张限制为 50 MiB，远端文件名为 `/tmp/yiterm-drop-<UUID>.png`，创建权限为 `0600`。GUI 通过仅当前 Windows 用户可访问的命名管道请求当前分栏的 wrapper 上传，不传递密码；上传完成且目标进程仍有效才粘贴远端路径。失败或取消时尽力清理未完成文件；服务器断开时可能无法清理。
+
+本机开发只运行当前平台的 `cargo test --locked`；Windows 控制台、命名管道、窗口缩放和登录后连续传图的集成测试由 Windows CI runner 执行，不在 macOS 上安装 Windows 工具链或交叉编译。
+
+
+Linux 不引入 GPUI、Vulkan 或新版 glibc 要求。上述兼容路径和验证脚本从原版保留，本次分流改动仍需 Linux CI 实际构建与运行确认。
 ## 文字选择与复制
 
 按住鼠标左键拖动选择文字，选区会高亮，松开后保留。macOS 使用 **Cmd+C** 复制；Windows / Linux 使用 **Ctrl+Shift+C** 或 **Ctrl+Insert**。**Ctrl+C** 保留为终端中断命令。
@@ -131,7 +156,9 @@ theme = "dark" # 或 "light"
 
 ## 空闲刷新与 CPU 占用
 
-终端画布由 GPUI 绘制，跳过默认背景与空白字形。PTY 输出与异步粘贴完成时，通过有界通知通道唤醒界面；通知会合并，避免输出突发时重复排队。空闲时每 500 毫秒检查退出、Windows 剪贴板请求与光标闪烁，仅在内容变化或光标需要闪烁时请求重绘。后台标签页持续处理输出；窗口标题只在内容变化时更新。
+Windows / macOS 的终端画布由 GPUI 绘制，跳过默认背景与空白字形。PTY 输出与异步粘贴完成时，通过有界通知通道唤醒界面；通知会合并，避免输出突发时重复排队。空闲时每 500 毫秒检查退出、Windows 剪贴板请求与光标闪烁，仅在内容变化或光标需要闪烁时请求重绘。后台标签页持续处理输出；窗口标题只在内容变化时更新。
+
+Linux 保留原有 egui 的输出唤醒与每 250 毫秒兜底检查，光标按 500 毫秒边界刷新，继续合并同色背景并关闭渐变抖色。
 
 `Linux software rendering comparison` 工作流可指定两个包含 Linux artifact 的 Actions run，在同一 CentOS 7 环境中比较空闲、持续更新的 CPU 占用与模拟按键到达 PTY 的延迟。性能数据需在相同系统、驱动与构建模式下比较；按键注入延迟不等于屏幕显示延迟。
 
@@ -150,7 +177,7 @@ $env:YITERM_PROFILE = "1"
 
 保持终端空闲约 30 秒，然后用 **Tools → Open Log File** 打开日志，搜索 `yiterm::profile`。完成后关闭该实例，并执行 `Remove-Item Env:YITERM_PROFILE`，之后启动的实例恢复默认关闭状态。日志文件写入需保持启用（`logging.file = true`）。
 
-启动日志记录 GPUI 窗口初始化；开启 profiling 后包含构建版本，并每约 5 秒汇总事件泵调用次数 `pumps`、画布绘制次数 `renders`、进程 CPU、事件处理与会话轮询耗时、PTY 读取次数与字节数及焦点状态。`renders_per_s` 是画布绘制频率，不等于显示器实际呈现帧率。GPUI 不再提供原 eframe 的上一帧框架耗时与重绘调用位置。耗时为墙钟时间，不等于线程 CPU 时间；日志不记录终端内容、按键或剪贴板正文。
+Windows / macOS 启动日志记录 GPUI 窗口初始化；开启 profiling 后包含构建版本，并每约 5 秒汇总事件泵调用次数 `pumps`、画布绘制次数 `renders`、进程 CPU、事件处理与会话轮询耗时、PTY 读取次数与字节数及焦点状态。`renders_per_s` 是画布绘制频率，不等于显示器实际呈现帧率。Linux 保留原来的 OpenGL 渲染器信息、eframe 框架耗时与 egui 重绘调用位置汇总。耗时为墙钟时间，不等于线程 CPU 时间；日志不记录终端内容、按键或剪贴板正文。
 
 `process_cpu_core_percent` 通过两次采样的进程累计 CPU 毫秒差除以墙钟时间计算，仅统计 YiTerm 当前进程，100% 表示使用一个逻辑核，不是任务管理器的进程组百分比；与系统总 CPU 百分比比较时需考虑逻辑核数量。采样依赖 UI update：若图形调用长时间卡住，日志可能延迟，此时需要外部采样。
 
@@ -164,15 +191,25 @@ Windows CI 额外保存 `profiling-windows-<commit>` artifact，内含同次优�
 
 CI 固定使用 Rust `1.99.1`，避免浮动 `stable` 自动升级导致依赖缓存失效。升级工具链时同步修改 `.github/workflows/ci.yml` 中的 `toolchain`、Linux `RUST_TOOLCHAIN` 和 Linux 缓存键；升级后的首次构建需要重建缓存。缓存前移除 runner 预装的其他 Rust 工具链，避免缓存键受 runner 镜像更新影响。release 调试符号配置在工作流全局设置，缓存、编译和测试使用同一配置。
 
-## GPUI 实现结构
+## 平台兼容层与实现结构
 
-- `src/main.rs`：PTY 会话、终端协议、标签与分栏树、SSH 和异步图片粘贴。
-- `src/ui.rs`：GPUI 窗口、布局、字符画布、鼠标协议与键盘输入、设置和关于弹窗。
-- `EntityInputHandler` 接收文字和中文输入法预编辑 / 提交；普通文字仅走此通道，键盘事件只发送快捷键与终端控制序列，避免重复输入。
-- `src/theme.rs`：配置中的主题枚举与 GPUI 颜色；`src/profiling.rs`：可选汇总诊断。
+编译目标自动选择后端，无需用户设置：
 
-界面沿用迁移前的布局与文案：Settings / Pane / Tools / About 菜单、编号标签与 +、分栏标题左侧的 ×、底部 Paste 与状态栏，以及原有设置和 About 弹窗。
+| 平台 | 界面后端 | 渲染路径 |
+| --- | --- | --- |
+| macOS | GPUI 0.2.2 | Metal |
+| Windows | GPUI 0.2.2 | DirectX |
+| Linux | 原有 egui / eframe 0.33 | OpenGL，保留旧驱动回退 |
 
-GPUI 版本固定为 `=0.2.2`，使用 macOS Metal、Windows DirectX 和 Linux Vulkan。macOS 启用运行时 Metal shader 编译，构建无需独立调用 Metal 编译工具。egui / eframe / glutin 依赖与相应 vendor 补丁已移除，保留 `vendor/alacritty_terminal` 的终端 Unicode 修复。
+- `src/backend.rs`：平台颜色、鼠标按钮类型与 PTY 重绘通知的适配边界。
+- `src/main.rs`：共用的 PTY 会话、终端协议、标签与分栏树、SSH、链接解析和异步图片粘贴。
+- `src/ui.rs`：Windows / macOS 的 GPUI 界面与输入处理。
+- `src/ui_egui.rs`：Linux 原有界面、字符渲染、输入法、快捷键、鼠标与字体回退，以及原有回归测试。
+- `src/theme.rs` 和 `src/settings.rs`：共用主题配色和配置格式。
+- `src/profiling.rs` / `src/profiling_egui.rs`：两个后端各自的性能统计，日志不记录终端内容。
 
-本机仅验证 macOS。Windows 构建与测试交给 Windows CI runner，不在 macOS 安装 Windows 工具链或进行交叉编译；Linux CI 使用其独立容器。CI 配置更新不代表对应平台已经运行通过。
+Cargo 按目标平台声明依赖：Linux 不编译 GPUI；Windows / macOS 不编译 eframe、egui-winit 或 glutin。Linux 使用 `vendor/eframe`、`vendor/egui-winit` 和 `vendor/glutin` 的原有补丁；所有平台共用 `vendor/alacritty_terminal` 的 Unicode 修复。发布包按平台携带相应界面后端许可证。
+
+界面沿用迁移前的布局与文案：Settings / Pane / Tools / About 菜单、编号标签与 +、分栏标题左侧的 ×、底部 Paste 与状态栏，以及原有设置和 About 弹窗。GPUI 的 `EntityInputHandler` 接收文字与输入法预编辑 / 提交；Linux 保留 egui 的原有输入处理。
+
+本机只运行 macOS 构建与测试，不安装 Windows 工具链或交叉编译 Windows / Linux。Windows 和 Linux 的实际构建与运行验证分别交给对应 CI runner；依赖分流检查不能替代这些平台的构建与运行测试。

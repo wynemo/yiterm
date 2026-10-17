@@ -1,3 +1,4 @@
+pub mod backend;
 pub mod logging;
 pub mod mouse;
 pub mod native_ssh;

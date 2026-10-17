@@ -5,17 +5,14 @@ edition = "2024"
 
 [features]
 default = ["x11", "wayland"]
-x11 = ["gpui/x11"]
-wayland = ["gpui/wayland"]
+x11 = ["eframe/x11"]
+wayland = ["eframe/wayland"]
 
 [dependencies]
 alacritty_terminal = "0.26"
 anyhow = "1"
-async-channel = "2"
-futures-lite = "2"
 arboard = "3"
 clap = { version = "4", features = ["derive"] }
-gpui = { version = "=0.2.2", default-features = false, features = ["font-kit", "windows-manifest", "runtime_shaders"] }
 image = { version = "0.25", default-features = false, features = ["png"] }
 portable-pty = "0.9"
 libc = "0.2"
@@ -38,6 +35,15 @@ zeroize = "1"
 hmac = "0.13"
 sha1 = "0.11"
 
+[target.'cfg(any(target_os = "macos", windows))'.dependencies]
+gpui = { version = "=0.2.2", default-features = false, features = ["font-kit", "windows-manifest", "runtime_shaders"] }
+async-channel = "2"
+futures-lite = "2"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+eframe = { version = "0.33", default-features = false, features = ["default_fonts", "glow"] }
+egui-winit = { version = "0.33.3", default-features = false, features = ["terminal-input"] }
+
 [target.'cfg(windows)'.dependencies]
 clipboard-win = { version = "5.4", features = ["std"] }
 raw-window-handle = "0.6"
@@ -45,3 +51,6 @@ windows-sys = { version = "0.61", features = ["Win32_System_LibraryLoader", "Win
 
 [patch.crates-io]
 alacritty_terminal = { path = "vendor/alacritty_terminal" }
+eframe = { path = "vendor/eframe" }
+egui-winit = { path = "vendor/egui-winit" }
+glutin = { path = "vendor/glutin" }
