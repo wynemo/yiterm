@@ -933,6 +933,93 @@ fn paint_text(
         tracing::warn!(%error,"Text painting failed");
     }
 }
+
+// Box-drawing glyphs must reach the cell edges, including the extra leading
+// between terminal rows. Font glyph bounds do not guarantee that connection.
+fn box_drawing_rects(text: &str, rect: Rect, scale: f32) -> Option<Vec<Rect>> {
+    let snap = |value: Pixels| px((f32::from(value) * scale).round() / scale);
+    // TUIs also build scrollbars from fractional block glyphs. These need
+    // their full cell height just like vertical box-drawing strokes.
+    let block = match text {
+        "█" => Some((0., 0., 8., 8.)),
+        "▏" => Some((0., 0., 1., 8.)),
+        "▎" => Some((0., 0., 2., 8.)),
+        "▍" => Some((0., 0., 3., 8.)),
+        "▌" => Some((0., 0., 4., 8.)),
+        "▋" => Some((0., 0., 5., 8.)),
+        "▊" => Some((0., 0., 6., 8.)),
+        "▉" => Some((0., 0., 7., 8.)),
+        "▐" => Some((4., 0., 8., 8.)),
+        "▕" => Some((7., 0., 8., 8.)),
+        "▀" => Some((0., 0., 8., 4.)),
+        "▁" => Some((0., 7., 8., 8.)),
+        "▂" => Some((0., 6., 8., 8.)),
+        "▃" => Some((0., 5., 8., 8.)),
+        "▄" => Some((0., 4., 8., 8.)),
+        "▅" => Some((0., 3., 8., 8.)),
+        "▆" => Some((0., 2., 8., 8.)),
+        "▇" => Some((0., 1., 8., 8.)),
+        _ => None,
+    };
+    if let Some((left, top, right, bottom)) = block {
+        let left = snap(rect.left() + rect.size.width * (left / 8.));
+        let top = snap(rect.top() + rect.size.height * (top / 8.));
+        let right = snap(rect.left() + rect.size.width * (right / 8.));
+        let bottom = snap(rect.top() + rect.size.height * (bottom / 8.));
+        return Some(vec![Bounds::new(
+            point(left, top),
+            size(right - left, bottom - top),
+        )]);
+    }
+    let (up, down, left, right) = match text {
+        "│" => (true, true, false, false),
+        "─" => (false, false, true, true),
+        "┌" => (false, true, false, true),
+        "┐" => (false, true, true, false),
+        "└" => (true, false, false, true),
+        "┘" => (true, false, true, false),
+        "├" => (true, true, false, true),
+        "┤" => (true, true, true, false),
+        "┬" => (false, true, true, true),
+        "┴" => (true, false, true, true),
+        "┼" => (true, true, true, true),
+        _ => return None,
+    };
+    let thickness = px(scale.round().max(1.) / scale);
+    let x = snap(rect.center().x - thickness / 2.);
+    let y = snap(rect.center().y - thickness / 2.);
+    let mut lines = Vec::with_capacity(2);
+    if up || down {
+        let top = if up { snap(rect.top()) } else { y };
+        let bottom = if down {
+            snap(rect.bottom())
+        } else {
+            y + thickness
+        };
+        lines.push(Bounds::new(point(x, top), size(thickness, bottom - top)));
+    }
+    if left || right {
+        let start = if left { snap(rect.left()) } else { x };
+        let end = if right {
+            snap(rect.right())
+        } else {
+            x + thickness
+        };
+        lines.push(Bounds::new(point(start, y), size(end - start, thickness)));
+    }
+    Some(lines)
+}
+
+fn paint_box_drawing(text: &str, rect: Rect, color: Rgba, window: &mut Window) -> bool {
+    let Some(lines) = box_drawing_rects(text, rect, window.scale_factor()) else {
+        return false;
+    };
+    for line in lines {
+        window.paint_quad(fill(line, color));
+    }
+    true
+}
+
 #[allow(clippy::too_many_arguments)]
 fn paint_terminal(
     pane: &TerminalSession,
@@ -1000,7 +1087,7 @@ fn paint_terminal(
             },
         );
         let text = terminal_cell_text(indexed.cell);
-        if !text.is_empty() && text != " " {
+        if !text.is_empty() && text != " " && !paint_box_drawing(&text, bounds, fg, window) {
             // Keep font fallback and shaping inside the columns owned by this cell.
             window.with_content_mask(Some(ContentMask { bounds }), |window| {
                 paint_text(
@@ -1064,17 +1151,19 @@ fn paint_terminal(
             window.paint_quad(fill(bounds, theme.cursor()));
             if pane.cursor_settings.shape == CursorShape::Block {
                 let text = terminal_cell_text(&pane.term.grid()[cursor]);
-                window.with_content_mask(Some(ContentMask { bounds }), |window| {
-                    paint_text(
-                        &pane.font_settings,
-                        &text,
-                        bounds.origin,
-                        cell.height,
-                        theme.background(),
-                        window,
-                        cx,
-                    )
-                });
+                if !paint_box_drawing(&text, bounds, theme.background(), window) {
+                    window.with_content_mask(Some(ContentMask { bounds }), |window| {
+                        paint_text(
+                            &pane.font_settings,
+                            &text,
+                            bounds.origin,
+                            cell.height,
+                            theme.background(),
+                            window,
+                            cx,
+                        )
+                    });
+                }
             }
         }
     }
@@ -2090,6 +2179,56 @@ pub(super) fn run(app: TerminalApp) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn scrollbar_blocks_connect_across_rows_and_track_thumb_changes() {
+        for scale in [1., 1.25, 1.5, 2.] {
+            let cell = size(px(9.6), px(20.8));
+            let origin = point(px(2.3), px(26.7));
+            for text in ["█", "▏", "▎", "▍", "▌", "▋", "▊", "▉", "▐", "▕"] {
+                let first =
+                    box_drawing_rects(text, cell_rect(origin, cell, 0, 0, 1), scale).unwrap()[0];
+                let next =
+                    box_drawing_rects(text, cell_rect(origin, cell, 0, 1, 1), scale).unwrap()[0];
+                assert_eq!(first.bottom(), next.top(), "{text} at {scale}");
+                assert_eq!(first.left(), next.left());
+                assert_eq!(first.right(), next.right());
+            }
+            let track = box_drawing_rects("▕", cell_rect(origin, cell, 0, 0, 1), scale).unwrap()[0];
+            let thumb = box_drawing_rects("▐", cell_rect(origin, cell, 0, 1, 1), scale).unwrap()[0];
+            assert_eq!(track.bottom(), thumb.top());
+            assert_eq!(track.right(), thumb.right());
+            assert!(thumb.left() < track.left());
+        }
+    }
+
+    #[test]
+    fn box_drawing_connects_across_fractional_terminal_cells() {
+        for scale in [1., 1.25, 1.5, 2.] {
+            for font_size in [12., 16., 19., 24.] {
+                let cell = size(px(font_size * 0.6), px(font_size * 1.3));
+                let origin = point(px(2.3), px(26.7));
+                // A corner, vertical run and bottom corner must share exact
+                // physical-pixel endpoints, even with fractional row heights.
+                let top = box_drawing_rects("┌", cell_rect(origin, cell, 0, 0, 1), scale).unwrap();
+                let middle =
+                    box_drawing_rects("│", cell_rect(origin, cell, 0, 1, 1), scale).unwrap();
+                let bottom =
+                    box_drawing_rects("└", cell_rect(origin, cell, 0, 2, 1), scale).unwrap();
+                assert_eq!(top[0].bottom(), middle[0].top());
+                assert_eq!(middle[0].bottom(), bottom[0].top());
+                assert_eq!(top[0].left(), middle[0].left());
+                let horizontal =
+                    box_drawing_rects("─", cell_rect(origin, cell, 1, 0, 1), scale).unwrap();
+                assert_eq!(top[1].right(), horizontal[0].left());
+                assert_eq!(top[1].top(), horizontal[0].top());
+            }
+        }
+        let rect = Bounds::new(point(px(0.), px(0.)), size(px(10.), px(20.)));
+        assert!(box_drawing_rects("|", rect, 1.).is_none());
+        assert!(box_drawing_rects("A", rect, 1.).is_none());
+        assert!(box_drawing_rects("│\u{301}", rect, 1.).is_none());
+    }
     #[test]
     fn nested_splits_partition_space_and_collapse_after_close() {
         let mut layout = PaneLayout::Leaf(0);

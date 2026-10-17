@@ -2,7 +2,7 @@
 
 Rust 原生终端，Windows / macOS 使用 GPUI 0.2.2，Linux 保留原有 egui / eframe / OpenGL 界面后端，使用 `alacritty_terminal` 解析终端协议、`portable-pty` 启动本地 shell / ConPTY。支持 macOS、Windows，Linux CI 保留 CentOS 7 / glibc 2.17 的 x64 兼容目标。
 
-终端内嵌 Lilex 字体；界面保留原版 Ubuntu Light 字体（[许可证](assets/fonts/ubuntu/UFL.txt)），无需系统安装；默认 16px 字号配合 1.3 倍行高，使框线字符连续衔接。字体许可证见 [OFL.txt](assets/fonts/lilex/OFL.txt)。
+终端内嵌 Lilex 字体；界面保留原版 Ubuntu Light 字体（[许可证](assets/fonts/ubuntu/UFL.txt)），无需系统安装；默认 16px 字号配合 1.3 倍行高。macOS / Windows 将常用单线框线字符 `│─┌┐└┘├┤┬┴┼` 按终端单元格直接绘制并对齐物理像素，保证 Herdr 等终端程序的框线跨行、跨列连续衔接，不依赖所选字体的字形高度；滚动条使用的实心块、左右分数块和上下分数块（如 `█▕▐▏▀▄`）同样按单元格绘制。复制仍保留原始字符。其他框线字符和 Linux 仍使用字体绘制。字体许可证见 [OFL.txt](assets/fonts/lilex/OFL.txt)。
 
 字符显示按终端网格定位，Windows / macOS 由 GPUI 排版每个单元格中的完整 Unicode 序列，保留变体选择符、连接符与组合标记，字体回退由平台处理。超出单元格分配宽度的字形会被裁剪，不会覆盖相邻字符；原始文本与复制内容保持原样。终端内核识别 VS16 将文本符号切换为 emoji 的序列（例如 `⚠️`、`❤️`），为这些序列保留两列；字符与变体选择符分批到达时也保持相同占位。跨多个独立终端单元格的复杂文字排版仍受字符网格限制。Linux 保持原有 egui 绘制逻辑：过滤默认不可见字符，保留组合标记，回退字形过宽时只在水平方向压缩；原始复制内容不变。
 
