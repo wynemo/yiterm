@@ -1111,9 +1111,14 @@ fn show_settings(
                                     ctx.data_mut(|data| data.insert_temp(search_id, search));
                                     ui.separator();
                                     // Keep search outside the scrolling font list.
+                                    // A popup's sizing pass can collapse a scroll area to its
+                                    // default 64px minimum; max_height alone won't expand it.
+                                    let list_height =
+                                        (ctx.content_rect().height() - 100.0).clamp(64.0, 300.0);
                                     let mut list = egui::ScrollArea::vertical()
                                         .id_salt("font-family-list")
-                                        .max_height(210.0);
+                                        .min_scrolled_height(list_height)
+                                        .max_height(list_height);
                                     if search_changed {
                                         list = list.vertical_scroll_offset(0.0);
                                     }
@@ -1824,6 +1829,22 @@ mod tests {
         render(click(text_center(&output, "Lilex")));
         let output = render(vec![]);
         let search_center = text_center(&output, "Search fonts…");
+        let visible_fonts = output
+            .shapes
+            .iter()
+            .filter(|shape| {
+                if let egui::Shape::Text(t) = &shape.shape {
+                    t.galley.text().starts_with("Font ")
+                        && shape.clip_rect.contains(t.pos + t.galley.size() / 2.0)
+                } else {
+                    false
+                }
+            })
+            .count();
+        assert!(
+            visible_fonts >= 8,
+            "font popup collapsed to {visible_fonts} rows"
+        );
         let list_center = text_center(&output, "Test Mono");
         render(vec![
             egui::Event::PointerMoved(list_center),
