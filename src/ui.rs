@@ -917,21 +917,84 @@ fn paint_text(
     origin: UiPoint<Pixels>,
     height: Pixels,
     color: Rgba,
+    max_width: Option<Pixels>,
     window: &mut Window,
     cx: &mut App,
 ) {
-    let line = window.text_system().shape_line(
-        text.to_owned().into(),
-        px(font.size),
-        &[TextRun {
-            font: gpui::font(font.family.clone()),
-            ..text_run(text, color)
-        }],
-        None,
-    );
+    let runs = [TextRun {
+        font: gpui::font(font.family.clone()),
+        ..text_run(text, color)
+    }];
+    let mut line =
+        window
+            .text_system()
+            .shape_line(text.to_owned().into(), px(font.size), &runs, None);
+    // Fallback symbol fonts can have a wider advance than the selected mono font.
+    // Fit them to their terminal columns before the cell mask clips the glyph.
+    if let Some(width) = max_width.filter(|width| *width > px(0.) && line.width > *width) {
+        let fitted_size = font.size * f32::from(width) / f32::from(line.width);
+        line =
+            window
+                .text_system()
+                .shape_line(text.to_owned().into(), px(fitted_size), &runs, None);
+    }
     if let Err(error) = line.paint(origin, height, window, cx) {
         tracing::warn!(%error,"Text painting failed");
     }
+}
+
+// Draw common terminal status circles at a stable size regardless of font fallback.
+fn paint_status_circle(text: &str, rect: Rect, color: Rgba, window: &mut Window) -> bool {
+    if !matches!(text, "○" | "●" | "◐" | "◑" | "◒" | "◓") {
+        return false;
+    }
+    let diameter = rect.size.width.min(rect.size.height) * 0.86;
+    let thickness = (diameter * 0.08).max(px(1. / window.scale_factor()));
+    let radius = (diameter - thickness) / 2.;
+    let center = rect.center();
+    let circle = |filled| {
+        let mut path = if filled {
+            gpui::PathBuilder::fill()
+        } else {
+            gpui::PathBuilder::stroke(thickness)
+        };
+        for step in 0..64 {
+            let angle = step as f32 * std::f32::consts::TAU / 64.;
+            let p = center + point(radius * angle.cos(), radius * angle.sin());
+            if step == 0 {
+                path.move_to(p);
+            } else {
+                path.line_to(p);
+            }
+        }
+        path.close();
+        path.build()
+    };
+    if let Ok(path) = circle(text == "●") {
+        window.paint_path(path, color);
+    }
+    if matches!(text, "◐" | "◑" | "◒" | "◓") {
+        let mut half = rect;
+        match text {
+            "◐" => half.size.width /= 2.,
+            "◑" => {
+                half.origin.x = center.x;
+                half.size.width /= 2.;
+            }
+            "◒" => {
+                half.origin.y = center.y;
+                half.size.height /= 2.;
+            }
+            "◓" => half.size.height /= 2.,
+            _ => unreachable!(),
+        }
+        window.with_content_mask(Some(ContentMask { bounds: half }), |window| {
+            if let Ok(path) = circle(true) {
+                window.paint_path(path, color);
+            }
+        });
+    }
+    true
 }
 
 // Box-drawing glyphs must reach the cell edges, including the extra leading
@@ -1087,7 +1150,11 @@ fn paint_terminal(
             },
         );
         let text = terminal_cell_text(indexed.cell);
-        if !text.is_empty() && text != " " && !paint_box_drawing(&text, bounds, fg, window) {
+        if !text.is_empty()
+            && text != " "
+            && !paint_status_circle(&text, bounds, fg, window)
+            && !paint_box_drawing(&text, bounds, fg, window)
+        {
             // Keep font fallback and shaping inside the columns owned by this cell.
             window.with_content_mask(Some(ContentMask { bounds }), |window| {
                 paint_text(
@@ -1096,6 +1163,7 @@ fn paint_terminal(
                     bounds.origin,
                     cell.height,
                     fg,
+                    Some(bounds.size.width),
                     window,
                     cx,
                 )
@@ -1133,6 +1201,7 @@ fn paint_terminal(
                 bounds.origin,
                 cell.height,
                 theme.foreground(),
+                None,
                 window,
                 cx,
             );
@@ -1151,7 +1220,9 @@ fn paint_terminal(
             window.paint_quad(fill(bounds, theme.cursor()));
             if pane.cursor_settings.shape == CursorShape::Block {
                 let text = terminal_cell_text(&pane.term.grid()[cursor]);
-                if !paint_box_drawing(&text, bounds, theme.background(), window) {
+                if !paint_status_circle(&text, bounds, theme.background(), window)
+                    && !paint_box_drawing(&text, bounds, theme.background(), window)
+                {
                     window.with_content_mask(Some(ContentMask { bounds }), |window| {
                         paint_text(
                             &pane.font_settings,
@@ -1159,6 +1230,7 @@ fn paint_terminal(
                             bounds.origin,
                             cell.height,
                             theme.background(),
+                            Some(bounds.size.width),
                             window,
                             cx,
                         )
