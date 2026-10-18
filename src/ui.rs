@@ -20,6 +20,15 @@ type Rect = Bounds<Pixels>;
 const HEADER: f32 = 24.;
 const DIVIDER: f32 = 5.;
 
+gpui::actions!(terminal, [Complete, CompletePrevious]);
+
+fn terminal_key_bindings() -> [gpui::KeyBinding; 2] {
+    [
+        gpui::KeyBinding::new("tab", Complete, Some("Terminal")),
+        gpui::KeyBinding::new("shift-tab", CompletePrevious, Some("Terminal")),
+    ]
+}
+
 #[derive(Clone)]
 struct PaneGeometry {
     index: usize,
@@ -397,6 +406,16 @@ impl TerminalUi {
             .update(cx, |input, cx| input.set_value("16", window, cx));
         self.apply_settings();
         cx.notify();
+    }
+    fn complete(&mut self, previous: bool, cx: &mut ViewContext<Self>) {
+        let session = self.session();
+        if session.ime_preedit.is_empty() {
+            session.term.scroll_display(Scroll::Bottom);
+            session.write(if previous { b"\x1b[Z" } else { b"\t" });
+            session.cursor_blink_started = Instant::now();
+            cx.notify();
+        }
+        cx.stop_propagation();
     }
     fn key(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut ViewContext<Self>) {
         let key = event.keystroke.key.as_str();
@@ -1603,6 +1622,16 @@ impl Render for TerminalUi {
             .line_height(px(18.))
             .track_focus(&self.focus)
             .on_key_down(cx.listener(Self::key))
+            // Override Root's Tab focus navigation only while the terminal is active.
+            .when(!self.blocked(), |root| {
+                root.key_context("Terminal")
+                    .on_action(cx.listener(|this, _: &Complete, _, cx| {
+                        this.complete(false, cx);
+                    }))
+                    .on_action(cx.listener(|this, _: &CompletePrevious, _, cx| {
+                        this.complete(true, cx);
+                    }))
+            })
             .child(top)
             .child(terminal)
             .child(footer);
@@ -2235,6 +2264,7 @@ pub(super) fn run(app: TerminalApp) -> Result<()> {
         .with_assets(gpui_component_assets::Assets)
         .run(move |cx: &mut App| {
             gpui_component::init(cx);
+            cx.bind_keys(terminal_key_bindings());
             apply_component_theme(app.theme, None, cx);
             if let Err(error) = cx.text_system().add_fonts(vec![
                 Cow::Borrowed(include_bytes!("../assets/fonts/lilex/Lilex-Regular.ttf")),
@@ -2276,6 +2306,35 @@ pub(super) fn run(app: TerminalApp) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn terminal_tab_bindings_override_root_focus_navigation() {
+        let mut keymap = gpui::Keymap::default();
+        // Model the component Root's focus-navigation bindings.
+        keymap.add_bindings([
+            gpui::KeyBinding::new("tab", gpui::NoAction, Some("Root")),
+            gpui::KeyBinding::new("shift-tab", gpui::NoAction, Some("Root")),
+        ]);
+        keymap.add_bindings(terminal_key_bindings());
+        let contexts = [
+            gpui::KeyContext::parse("Root").unwrap(),
+            gpui::KeyContext::parse("Terminal").unwrap(),
+        ];
+        for (key, previous) in [("tab", false), ("shift-tab", true)] {
+            let input = [gpui::Keystroke::parse(key).unwrap()];
+            let (bindings, pending) = keymap.bindings_for_input(&input, &contexts);
+            assert!(!pending);
+            let action = bindings.first().expect("terminal handles Tab").action();
+            if previous {
+                assert!(action.as_any().is::<CompletePrevious>());
+            } else {
+                assert!(action.as_any().is::<Complete>());
+            }
+            // With a modal open the terminal context is absent.
+            let (bindings, _) = keymap.bindings_for_input(&input, &contexts[..1]);
+            assert!(bindings.is_empty());
+        }
+    }
 
     #[test]
     fn scrollbar_blocks_connect_across_rows_and_track_thumb_changes() {
