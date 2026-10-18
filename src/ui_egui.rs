@@ -1233,7 +1233,7 @@ fn show_about(ctx: &egui::Context, licenses: &mut bool) -> egui::ModalResponse<b
             ui.add_space(12.0);
             ui.label(egui::RichText::new("YiTerm").size(28.0).strong());
             ui.add_space(8.0);
-            ui.label("A lightweight terminal for macOS and Windows.");
+            ui.label("A lightweight terminal for macOS, Windows and Linux.");
             ui.label("Tabs, split panes and image paste over SSH.");
             ui.add_space(20.0);
             ui.label(format!("Version  {}", env!("CARGO_PKG_VERSION")));

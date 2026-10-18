@@ -2051,7 +2051,7 @@ impl TerminalUi {
             .child(
                 div()
                     .mt(px(8.))
-                    .child("A lightweight terminal for macOS and Windows."),
+                    .child("A lightweight terminal for macOS, Windows and Linux."),
             )
             .child("Tabs, split panes and image paste over SSH.")
             .child(
