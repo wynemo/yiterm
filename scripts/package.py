@@ -106,6 +106,7 @@ def main() -> None:
     files = [
         (binary, f"{name}/{executable}"),
         (ROOT / "readme.md", f"{name}/readme.md"),
+        (ROOT / "readme.zhcn.md", f"{name}/readme.zhcn.md"),
         (ROOT / "TECHNICAL.md", f"{name}/TECHNICAL.md"),
         (ROOT / "THIRD_PARTY_NOTICES.md", f"{name}/THIRD_PARTY_NOTICES.md"),
         (ROOT / "vendor/alacritty_terminal/LICENSE-APACHE", f"{name}/licenses/alacritty-LICENSE-APACHE"),
