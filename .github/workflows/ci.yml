@@ -81,6 +81,11 @@ jobs:
           YITERM_BUILD_REV: ${{ github.sha }}
         run: cargo test --locked --release --target ${{ matrix.target }} --test logging
 
+      - name: Test release updater and restart helper
+        run: |
+          cargo test --locked --release --target ${{ matrix.target }} --lib update::tests
+          cargo test --locked --release --target ${{ matrix.target }} --test update
+
       - name: Test profiling aggregates and idle repaint regression
         run: |
           cargo test --locked --release --target ${{ matrix.target }} --bin yiterm profiling::tests

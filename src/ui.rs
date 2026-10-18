@@ -297,7 +297,16 @@ impl TerminalUi {
     }
     fn tick(&mut self, cx: &mut ViewContext<Self>) {
         let started = Instant::now();
-        let mut changed = false;
+        let mut changed = self.app.updater.poll();
+        if matches!(self.app.updater.state, yiterm::update::State::Restarting) {
+            for tab in &mut self.app.tabs {
+                for pane in &mut tab.panes {
+                    let _ = pane.child.kill();
+                }
+            }
+            cx.quit();
+            return;
+        }
         for tab in &mut self.app.tabs {
             for pane in &mut tab.panes {
                 changed |= pane.repaint.swap(false, Ordering::AcqRel) || pane.paste_busy;
@@ -2094,6 +2103,28 @@ impl TerminalUi {
                     this.app.about_licenses = !this.app.about_licenses
                 })),
         );
+        if let Some(label) = self.app.updater.state.action_label() {
+            panel = panel.child(div().mt(px(12.)).child(self.button(
+                "update-action",
+                label,
+                cx,
+                |this, _, _| this.app.updater.act(),
+            )));
+        }
+        panel = panel.child(
+            div()
+                .w_full()
+                .mt(px(8.))
+                .child(self.app.updater.state.message()),
+        );
+        if let Some(url) = self.app.updater.state.notes_url() {
+            panel = panel.child(self.menu_button(
+                "release-notes",
+                "Release Notes",
+                cx,
+                move |_, _, cx| cx.open_url(&url),
+            ));
+        }
         if self.app.about_licenses {
             panel = panel.child(
                 div()

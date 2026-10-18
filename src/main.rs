@@ -617,6 +617,7 @@ struct TerminalApp {
     error: Option<String>,
     about_open: bool,
     about_licenses: bool,
+    updater: yiterm::update::Controller,
     settings_open: bool,
     theme: ThemeMode,
     cursor_settings: CursorSettings,
@@ -632,6 +633,8 @@ impl TerminalApp {
             .map(Ok)
             .unwrap_or_else(logging::config_path)?;
         let cursor_settings = settings::load(&path)?;
+        let updater = yiterm::update::Controller::default();
+        let update_failed = matches!(updater.state, yiterm::update::State::Failed(_));
         Ok(Self {
             #[cfg(target_os = "linux")]
             profile: profiling::Profile::new(),
@@ -642,8 +645,9 @@ impl TerminalApp {
             log_directory: logging.directory.clone(),
             warning: logging.warning.clone(),
             error: None,
-            about_open: false,
+            about_open: update_failed,
             about_licenses: false,
+            updater,
             settings_open: false,
             theme: settings::load_theme(&path)?,
             cursor_settings,
@@ -842,6 +846,9 @@ fn browser_url(value: &str) -> Option<String> {
 }
 
 fn main() -> Result<()> {
+    if let Some(result) = yiterm::update::run_helper_if_requested() {
+        return result;
+    }
     if ssh::is_wrapper() {
         return ssh::run_wrapper();
     }

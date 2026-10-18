@@ -227,6 +227,7 @@ fn background_sessions_process_output_and_survive_another_tab_closing() {
         error: None,
         about_open: false,
         about_licenses: false,
+        updater: yiterm::update::Controller::default(),
         settings_open: false,
         theme: ThemeMode::Dark,
         cursor_settings: CursorSettings::default(),

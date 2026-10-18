@@ -31,6 +31,9 @@ binary=$(find /work/dist -type f -name yiterm -print -quit)
 : "${binary:?Missing extracted Linux package}"
 python3 scripts/verify_linux.py "$binary"
 cargo test --locked --release --target "$target" --no-default-features --features x11 --test logging
+cargo test --locked --release --target "$target" --no-default-features --features x11 --lib update::tests
+cargo test --locked --release --target "$target" --no-default-features --features x11 --test update
+cargo test --locked --release --target "$target" --no-default-features --features x11 --bin yiterm about_dialog_keeps_content_inside_a_compact_window
 cargo test --locked --release --target "$target" --no-default-features --features x11 --bin yiterm profiling::tests
 cargo test --locked --release --target "$target" --no-default-features --features x11 --bin yiterm repaint_tests
 cargo test --locked --release --target "$target" --no-default-features --features x11 --bin yiterm terminal_unicode_

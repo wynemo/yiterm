@@ -715,6 +715,16 @@ fn reserve_terminal_keyboard(ctx: &egui::Context) {
 
 impl eframe::App for TerminalApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        self.updater.poll();
+        if matches!(self.updater.state, yiterm::update::State::Restarting) {
+            for tab in &mut self.tabs {
+                for pane in &mut tab.panes {
+                    let _ = pane.child.kill();
+                }
+            }
+            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            return;
+        }
         let profile_start = self.profile.as_ref().map(|_| Instant::now());
         ctx.set_visuals(self.theme.visuals());
         if !self.settings_open {
@@ -912,7 +922,7 @@ impl eframe::App for TerminalApp {
             }
         }
         if self.about_open {
-            let modal = show_about(ctx, &mut self.about_licenses);
+            let modal = show_about(ctx, &mut self.about_licenses, &mut self.updater);
             if modal.inner || modal.should_close() {
                 self.about_open = false;
             }
@@ -1215,7 +1225,11 @@ fn show_settings(
         })
 }
 
-fn show_about(ctx: &egui::Context, licenses: &mut bool) -> egui::ModalResponse<bool> {
+fn show_about(
+    ctx: &egui::Context,
+    licenses: &mut bool,
+    updater: &mut yiterm::update::Controller,
+) -> egui::ModalResponse<bool> {
     egui::Modal::new(egui::Id::new("about-yiterm")).show(ctx, |ui| {
         ui.set_width(360.0);
         ui.vertical_centered(|ui| {
@@ -1274,9 +1288,27 @@ fn show_about(ctx: &egui::Context, licenses: &mut bool) -> egui::ModalResponse<b
             );
             ui.add_space(12.0);
         });
+        if let Some(label) = updater.state.action_label() {
+            if ui.button(label).clicked() {
+                updater.act();
+            }
+        }
+        let message = updater.state.message();
+        let has_update_message = !message.is_empty();
+        if has_update_message {
+            egui::ScrollArea::vertical()
+                .id_salt("update-message")
+                .max_height(80.0)
+                .show(ui, |ui| {
+                    ui.label(message);
+                });
+        }
+        if let Some(url) = updater.state.notes_url() {
+            ui.hyperlink_to("Release Notes", url);
+        }
         if *licenses {
             egui::ScrollArea::vertical()
-                .max_height(220.0)
+                .max_height(if has_update_message { 120.0 } else { 220.0 })
                 .show(ui, |ui| {
                     ui.heading("IBM Plex Sans · SIL Open Font License 1.1");
                     ui.label(include_str!("../assets/fonts/ibm-plex-sans/OFL.txt"));
@@ -2009,7 +2041,13 @@ mod tests {
                             ..Default::default()
                         },
                         |ctx| {
-                            dialog = show_about(ctx, &mut licenses).response.rect;
+                            dialog = show_about(
+                                ctx,
+                                &mut licenses,
+                                &mut yiterm::update::Controller::default(),
+                            )
+                            .response
+                            .rect;
                         },
                     );
                     assert!(dialog.width() < 420.0, "About width: {dialog:?}");
@@ -2975,6 +3013,7 @@ mod tests {
             error: None,
             about_open: false,
             about_licenses: false,
+            updater: yiterm::update::Controller::default(),
             settings_open: false,
             theme: ThemeMode::Dark,
             cursor_settings: CursorSettings::default(),

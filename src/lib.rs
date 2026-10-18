@@ -6,3 +6,4 @@ pub mod paste;
 pub mod settings;
 pub mod ssh;
 pub mod theme;
+pub mod update;

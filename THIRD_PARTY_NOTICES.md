@@ -9,6 +9,8 @@ YiTerm includes these components under their respective licenses:
 - alacritty_terminal: Apache-2.0, see vendor/alacritty_terminal/LICENSE-APACHE
 - Lilex: SIL Open Font License 1.1, see assets/fonts/lilex/OFL.txt
 - IBM Plex Sans: SIL Open Font License 1.1, see assets/fonts/ibm-plex-sans/OFL.txt
+- self_update: MIT, https://github.com/jaemk/self_update
+- self-replace: Apache-2.0, https://github.com/mitsuhiko/self-replace
 - Windows ConPTY: see licenses/conpty-LICENSE
 
 Other Rust dependencies retain the licenses declared in their Cargo manifests.
