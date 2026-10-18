@@ -1516,11 +1516,7 @@ impl Render for TerminalUi {
             .flex_1()
             .min_h_0()
             .overflow_hidden()
-            .cursor(if self.hover.is_some() {
-                gpui::CursorStyle::PointingHand
-            } else {
-                gpui::CursorStyle::IBeam
-            })
+            .cursor(gpui::CursorStyle::IBeam)
             .on_mouse_down(MouseButton::Left, cx.listener(Self::mouse_down))
             .on_mouse_down(MouseButton::Right, cx.listener(Self::mouse_down))
             .on_mouse_down(MouseButton::Middle, cx.listener(Self::mouse_down))
@@ -1535,9 +1531,38 @@ impl Render for TerminalUi {
             .child(
                 canvas(
                     move |bounds, window, cx| {
-                        entity.update(cx, |this, _| this.geometry(bounds, window));
+                        entity.update(cx, |this, _| {
+                            this.geometry(bounds, window);
+                            this.panes
+                                .iter()
+                                .map(|geo| {
+                                    let pane = &this.app.tabs[this.app.active].panes[geo.index];
+                                    let cursor = if this
+                                        .hover
+                                        .as_ref()
+                                        .is_some_and(|(index, _)| *index == geo.index)
+                                    {
+                                        gpui::CursorStyle::PointingHand
+                                    } else if pane.term.mode().intersects(TermMode::MOUSE_MODE) {
+                                        gpui::CursorStyle::Arrow
+                                    } else {
+                                        gpui::CursorStyle::IBeam
+                                    };
+                                    (
+                                        window.insert_hitbox(
+                                            geo.terminal,
+                                            gpui::HitboxBehavior::Normal,
+                                        ),
+                                        cursor,
+                                    )
+                                })
+                                .collect::<Vec<_>>()
+                        })
                     },
-                    move |bounds, _, window, cx| {
+                    move |bounds, cursors, window, cx| {
+                        for (hitbox, cursor) in cursors {
+                            window.set_cursor_style(cursor, &hitbox);
+                        }
                         if !blocked {
                             let focus = painting.read(cx).focus.clone();
                             window.handle_input(
