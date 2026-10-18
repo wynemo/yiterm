@@ -8,7 +8,7 @@ YiTerm includes these components under their respective licenses:
 - glutin (Linux): Apache-2.0, see vendor/glutin/LICENSE
 - alacritty_terminal: Apache-2.0, see vendor/alacritty_terminal/LICENSE-APACHE
 - Lilex: SIL Open Font License 1.1, see assets/fonts/lilex/OFL.txt
-- Ubuntu Light: Ubuntu Font License 1.0, see assets/fonts/ubuntu/UFL.txt
+- IBM Plex Sans: SIL Open Font License 1.1, see assets/fonts/ibm-plex-sans/OFL.txt
 - Windows ConPTY: see licenses/conpty-LICENSE
 
 Other Rust dependencies retain the licenses declared in their Cargo manifests.

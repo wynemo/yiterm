@@ -918,8 +918,8 @@ fn paint_ui_text(
 ) {
     let run = TextRun {
         font: gpui::Font {
-            weight: gpui::FontWeight::LIGHT,
-            ..gpui::font("Ubuntu")
+            weight: gpui::FontWeight::NORMAL,
+            ..gpui::font("IBM Plex Sans")
         },
         ..text_run(text, color)
     };
@@ -1616,8 +1616,8 @@ impl Render for TerminalUi {
             .flex_col()
             .bg(theme.background())
             .text_color(theme.foreground())
-            .font_family("Ubuntu")
-            .font_weight(gpui::FontWeight::LIGHT)
+            .font_family("IBM Plex Sans")
+            .font_weight(gpui::FontWeight::NORMAL)
             .text_size(px(13.))
             .line_height(px(18.))
             .track_focus(&self.focus)
@@ -2102,6 +2102,8 @@ impl TerminalUi {
                     .h(px(220.))
                     .mt(px(12.))
                     .overflow_y_scroll()
+                    .child("IBM Plex Sans · SIL Open Font License 1.1")
+                    .child(include_str!("../assets/fonts/ibm-plex-sans/OFL.txt"))
                     .child("Lilex · SIL Open Font License 1.1")
                     .child(include_str!("../assets/fonts/lilex/OFL.txt"))
                     .child("GPUI · Apache-2.0")
@@ -2254,7 +2256,10 @@ fn component_theme(theme: ThemeMode) -> gpui_component::ThemeMode {
 
 fn apply_component_theme(theme: ThemeMode, window: Option<&mut Window>, cx: &mut App) {
     gpui_component::Theme::change(component_theme(theme), window, cx);
-    gpui_component::Theme::global_mut(cx).ring = gpui::rgb(0x3B82F6).into();
+    let theme = gpui_component::Theme::global_mut(cx);
+    theme.ring = gpui::rgb(0x3B82F6).into();
+    theme.font_family = "IBM Plex Sans".into();
+    theme.font_size = px(13.);
 }
 
 pub(super) fn run(app: TerminalApp) -> Result<()> {
@@ -2268,7 +2273,9 @@ pub(super) fn run(app: TerminalApp) -> Result<()> {
             apply_component_theme(app.theme, None, cx);
             if let Err(error) = cx.text_system().add_fonts(vec![
                 Cow::Borrowed(include_bytes!("../assets/fonts/lilex/Lilex-Regular.ttf")),
-                Cow::Borrowed(include_bytes!("../assets/fonts/ubuntu/Ubuntu-Light.ttf")),
+                Cow::Borrowed(include_bytes!(
+                    "../assets/fonts/ibm-plex-sans/IBMPlexSans-Regular.ttf"
+                )),
             ]) {
                 *outcome.borrow_mut() = Err(error);
                 cx.quit();

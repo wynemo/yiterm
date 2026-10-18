@@ -1278,6 +1278,9 @@ fn show_about(ctx: &egui::Context, licenses: &mut bool) -> egui::ModalResponse<b
             egui::ScrollArea::vertical()
                 .max_height(220.0)
                 .show(ui, |ui| {
+                    ui.heading("IBM Plex Sans · SIL Open Font License 1.1");
+                    ui.label(include_str!("../assets/fonts/ibm-plex-sans/OFL.txt"));
+                    ui.separator();
                     ui.heading("Lilex · SIL Open Font License 1.1");
                     ui.label(include_str!("../assets/fonts/lilex/OFL.txt"));
                     ui.separator();
@@ -1506,6 +1509,17 @@ fn configure_fonts(ctx: &egui::Context) {
 
 fn configure_fonts_for(ctx: &egui::Context, family: &str) {
     let mut fonts = egui::FontDefinitions::default();
+    fonts.font_data.insert(
+        "IBM Plex Sans".into(),
+        std::sync::Arc::new(egui::FontData::from_static(include_bytes!(
+            "../assets/fonts/ibm-plex-sans/IBMPlexSans-Regular.ttf"
+        ))),
+    );
+    fonts
+        .families
+        .entry(egui::FontFamily::Proportional)
+        .or_default()
+        .insert(0, "IBM Plex Sans".into());
     fonts.font_data.insert(
         "Lilex".into(),
         std::sync::Arc::new(egui::FontData::from_static(include_bytes!(

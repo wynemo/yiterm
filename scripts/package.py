@@ -109,7 +109,7 @@ def main() -> None:
         (ROOT / "TECHNICAL.md", f"{name}/TECHNICAL.md"),
         (ROOT / "THIRD_PARTY_NOTICES.md", f"{name}/THIRD_PARTY_NOTICES.md"),
         (ROOT / "vendor/alacritty_terminal/LICENSE-APACHE", f"{name}/licenses/alacritty-LICENSE-APACHE"),
-        (ROOT / "assets/fonts/ubuntu/UFL.txt", f"{name}/licenses/Ubuntu-UFL.txt"),
+        (ROOT / "assets/fonts/ibm-plex-sans/OFL.txt", f"{name}/licenses/IBMPlexSans-OFL.txt"),
         (ROOT / "assets/fonts/lilex/OFL.txt", f"{name}/licenses/Lilex-OFL.txt"),
     ]
     if args.target == "x86_64-unknown-linux-gnu":
