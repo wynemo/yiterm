@@ -119,6 +119,11 @@ impl Drop for PipeSecurity {
     }
 }
 
+fn create_pipe_server(name: &str, first_pipe_instance: bool) -> Result<NamedPipeServer> {
+    let security = PipeSecurity::new()?;
+    security.server(name, first_pipe_instance)
+}
+
 const MAX_OSC52_FRAME_BYTES: usize = 2 * 1024 * 1024;
 
 pub struct SocksTunnel {
@@ -215,9 +220,7 @@ async fn serve_socks_control(
     pipe_name: String,
     connection: Arc<russh::client::Handle<super::auth::Handler>>,
 ) -> Result<()> {
-    let security = PipeSecurity::new()?;
-    let mut pipe = security.server(&pipe_name, true)?;
-    drop(security);
+    let mut pipe = create_pipe_server(&pipe_name, true)?;
     let mut socks: Option<SocksListener> = None;
     tracing::info!("SSH SOCKS control pipe ready");
 
@@ -225,9 +228,7 @@ async fn serve_socks_control(
         pipe.connect()
             .await
             .context("accepting SSH SOCKS control client")?;
-        let security = PipeSecurity::new()?;
-        let next_pipe = security.server(&pipe_name, false)?;
-        drop(security);
+        let next_pipe = create_pipe_server(&pipe_name, false)?;
 
         let command = match tokio::time::timeout(Duration::from_secs(5), pipe.read_u8()).await {
             Ok(Ok(command)) => command,
