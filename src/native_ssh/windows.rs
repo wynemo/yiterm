@@ -753,9 +753,8 @@ fn run_inner(real_ssh: &Path, directory: &Path, args: Vec<OsString>) -> Result<i
         let mut size = console.size()?;
         let mut channel = super::shell(&handle, size.0, size.1).await?;
         let name = super::pipe_name(directory, std::process::id())?;
-        let security = PipeSecurity::new()?;
-        let pipe = security.server(&name, true)?;
-        drop(security);
+        let pipe = create_pipe_server(&name, true)?;
+        let upload_pipe_name = name.clone();
         let connection = handle.clone();
         let uploads = tokio::spawn(async move {
             let mut pending_connection = tokio::spawn(async move {
@@ -777,9 +776,7 @@ fn run_inner(real_ssh: &Path, directory: &Path, args: Vec<OsString>) -> Result<i
                 // Start waiting on the next instance before processing this
                 // upload. Merely creating it is insufficient: Windows does not
                 // accept clients until ConnectNamedPipe is pending.
-                let next_connection = match PipeSecurity::new()
-                    .and_then(|security| security.server(&name, false))
-                {
+                let next_connection = match create_pipe_server(&upload_pipe_name, false) {
                     Ok(next_pipe) => Some(tokio::spawn(async move {
                         next_pipe.connect().await?;
                         Ok::<_, std::io::Error>(next_pipe)
