@@ -3,6 +3,8 @@
 pub(crate) mod browser;
 
 use super::*;
+#[cfg(windows)]
+use anyhow::Context;
 use gpui::{
     App, Application, Bounds, ContentMask, Context as ViewContext, ElementInputHandler,
     EntityInputHandler, FocusHandle, Focusable, KeyDownEvent, Modifiers, MouseButton,

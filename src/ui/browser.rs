@@ -152,6 +152,7 @@ impl BrowserUi {
         unsafe { options.set_additional_browser_arguments(arguments) };
         let options: ICoreWebView2EnvironmentOptions = options.into();
         let callback_sender = sender.clone();
+        let initial_url = initial_url.to_owned();
         let handler = CreateCoreWebView2EnvironmentCompletedHandler::create(Box::new(
             move |result, environment| {
                 let environment = match result
@@ -164,7 +165,7 @@ impl BrowserUi {
                     }
                 };
                 let controller_sender = callback_sender.clone();
-                let initial_url = initial_url.to_owned();
+                let controller_initial_url = initial_url.clone();
                 let controller_handler = CreateCoreWebView2ControllerCompletedHandler::create(
                     Box::new(move |result, controller| {
                         let controller = match result.and_then(|()| {
@@ -176,7 +177,7 @@ impl BrowserUi {
                                 return Ok(());
                             }
                         };
-                        let state = Self::finish_webview(controller, &initial_url);
+                        let state = Self::finish_webview(controller, &controller_initial_url);
                         let _ = controller_sender.try_send(state);
                         Ok(())
                     }),
