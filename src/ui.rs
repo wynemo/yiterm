@@ -1741,7 +1741,7 @@ impl Render for TerminalUi {
                         "open-ssh-browser",
                         "Open SSH Browser",
                         cx,
-                        |this, _, window, cx| {
+                        |this, window, cx| {
                             this.menu = None;
                             this.open_ssh_browser("about:blank".into(), window, cx);
                         },
