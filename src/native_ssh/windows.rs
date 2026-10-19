@@ -135,7 +135,7 @@ pub struct SocksTunnel {
 impl SocksTunnel {
     pub fn start(pipe_name: String, expected_pid: u32) -> Result<Self> {
         let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_io()
+            .enable_all()
             .build()?;
         let port = runtime.block_on(control_request(&pipe_name, expected_pid, 1))?;
         Ok(Self {
@@ -159,7 +159,7 @@ impl Drop for SocksTunnel {
             .spawn(move || {
                 let result = (|| -> Result<()> {
                     let runtime = tokio::runtime::Builder::new_current_thread()
-                        .enable_io()
+                        .enable_all()
                         .build()?;
                     runtime.block_on(control_request(&pipe_name, expected_pid, 2))?;
                     Ok(())
