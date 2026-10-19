@@ -167,8 +167,11 @@ impl BrowserUi {
             .chain(Some(0))
             .collect();
         let options = CoreWebView2EnvironmentOptions::default();
+        // Chromium applies host mapping to the proxy endpoint too, even when
+        // it is an IP literal. Keep the local proxy reachable while target
+        // hostnames are resolved remotely by SOCKS5 / SSH.
         let arguments = format!(
-            "--proxy-server=socks5://127.0.0.1:{proxy_port} --proxy-bypass-list=<-loopback> --host-resolver-rules=\"MAP * ~NOTFOUND\" --disable-dns-prefetch --disable-quic --force-webrtc-ip-handling-policy=disable_non_proxied_udp"
+            "--proxy-server=socks5://127.0.0.1:{proxy_port} --proxy-bypass-list=<-loopback> --host-resolver-rules=\"MAP * ~NOTFOUND, EXCLUDE 127.0.0.1\" --disable-dns-prefetch --disable-quic --force-webrtc-ip-handling-policy=disable_non_proxied_udp"
         );
         unsafe { options.set_additional_browser_arguments(arguments) };
         let options: ICoreWebView2EnvironmentOptions = options.into();
@@ -269,7 +272,7 @@ impl BrowserUi {
                         unsafe { args.WebErrorStatus(&mut error_status)? };
                         tracing::warn!(error_status = error_status.0, "WebView2 navigation failed");
                         let _ = navigation_sender.try_send(Some(format!(
-                            "Page failed to load (WebView2 error {}). Check SSH TCP forwarding and the remote network.",
+                            "Page failed to load (WebView2 error {}).",
                             error_status.0
                         )));
                     }
@@ -564,17 +567,16 @@ mod tests {
         BrowserUi::start_webview(
             HWND_MESSAGE,
             proxy_port,
-            "http://remote-only.invalid:8080/",
+            "about:blank",
             profile.path(),
             sender,
             navigation_sender,
         )
         .unwrap();
         let state = pump_until(&receiver).unwrap();
-        for url in [None, Some("http://localhost:8080/")] {
-            if let Some(url) = url {
-                BrowserUi::navigate_webview(&state.webview, url).unwrap();
-            }
+        assert_eq!(pump_until(&navigation_receiver), None);
+        for url in ["http://remote-only.invalid:8080/", "http://localhost:8080/"] {
+            BrowserUi::navigate_webview(&state.webview, url).unwrap();
             assert_eq!(
                 pump_until(&navigation_receiver),
                 None,
