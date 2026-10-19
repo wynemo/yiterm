@@ -111,6 +111,30 @@ fn password_login_and_image_upload_share_native_windows_session() {
             .upload_pipe
             .as_ref()
             .expect("Native wrapper was not detected");
+        // Exercise the actual wrapper control pipe, including sharing and
+        // releasing a browser reference, rather than only testing the relay.
+        let listener = runtime.block_on(tokio::net::TcpListener::bind("127.0.0.1:0"))?;
+        *fixture.state.forward_target.lock().unwrap() = Some(listener.local_addr()?);
+        let echo = runtime.spawn(async move {
+            use tokio::io::{AsyncReadExt, AsyncWriteExt};
+            while let Ok((mut socket, _)) = listener.accept().await {
+                tokio::spawn(async move {
+                    let mut bytes = [0; 11];
+                    socket.read_exact(&mut bytes).await.unwrap();
+                    socket.write_all(&bytes).await.unwrap();
+                });
+            }
+        });
+        let control_pipe = yiterm::native_ssh::socks_pipe_name(pipe);
+        let first =
+            yiterm::native_ssh::SocksTunnel::start(control_pipe.clone(), detected.identity.pid)?;
+        let second = yiterm::native_ssh::SocksTunnel::start(control_pipe, detected.identity.pid)?;
+        assert_eq!(first.port(), second.port());
+        probe_socks(first.port())?;
+        drop(first);
+        probe_socks(second.port())?;
+        drop(second);
+        echo.abort();
         let image_path = fixture.directory.path().join("image.png");
         let image = b"\x89PNG\r\n\x1a\nfixture-image";
         std::fs::write(&image_path, image)?;
@@ -167,4 +191,33 @@ fn password_login_and_image_upload_share_native_windows_session() {
     })();
     let _ = child.kill();
     result.unwrap_or_else(|error| panic!("{error:#}; terminal output: {transcript}"));
+}
+
+fn probe_socks(port: u16) -> anyhow::Result<()> {
+    use std::io::Write;
+    let mut stream = std::net::TcpStream::connect(("127.0.0.1", port))?;
+    stream.set_read_timeout(Some(Duration::from_secs(5)))?;
+    stream.write_all(&[5, 1, 0])?;
+    let mut greeting = [0; 2];
+    stream.read_exact(&mut greeting)?;
+    anyhow::ensure!(greeting == [5, 0], "SOCKS greeting rejected: {greeting:?}");
+    let host = b"remote-only.invalid";
+    let mut request = vec![5, 1, 0, 3, host.len() as u8];
+    request.extend_from_slice(host);
+    request.extend_from_slice(&8080u16.to_be_bytes());
+    stream.write_all(&request)?;
+    let mut reply = [0; 10];
+    stream.read_exact(&mut reply)?;
+    anyhow::ensure!(
+        reply[0..3] == [5, 0, 0],
+        "SOCKS CONNECT rejected: {reply:?}"
+    );
+    stream.write_all(b"socks-probe")?;
+    let mut echoed = [0; 11];
+    stream.read_exact(&mut echoed)?;
+    anyhow::ensure!(
+        &echoed == b"socks-probe",
+        "SOCKS data did not reach SSH destination"
+    );
+    Ok(())
 }

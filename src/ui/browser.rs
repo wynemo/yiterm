@@ -477,3 +477,143 @@ fn normalize_url(value: &str) -> anyhow::Result<String> {
     );
     Ok(parsed.to_string())
 }
+
+#[cfg(test)]
+#[path = "../../tests/common/native_server.rs"]
+mod native_server;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::{
+        sync::Arc,
+        time::{Duration, Instant},
+    };
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use windows::Win32::{
+        System::Com::{COINIT_APARTMENTTHREADED, CoInitializeEx, CoUninitialize},
+        UI::WindowsAndMessaging::{
+            DispatchMessageW, HWND_MESSAGE, MSG, PM_REMOVE, PeekMessageW, TranslateMessage,
+        },
+    };
+
+    struct Password;
+    impl yiterm::native_ssh::auth::Prompt for Password {
+        fn ask(&self, _: &str, _: bool) -> anyhow::Result<String> {
+            Ok("fixture-password".into())
+        }
+    }
+
+    fn pump_until<T>(receiver: &async_channel::Receiver<T>) -> T {
+        let deadline = Instant::now() + Duration::from_secs(45);
+        loop {
+            match receiver.try_recv() {
+                Ok(result) => return result,
+                Err(async_channel::TryRecvError::Closed) => {
+                    panic!("WebView2 callback disconnected")
+                }
+                Err(async_channel::TryRecvError::Empty) => {}
+            }
+            assert!(Instant::now() < deadline, "WebView2 callback timed out");
+            let mut message = MSG::default();
+            unsafe {
+                while PeekMessageW(&mut message, None, 0, 0, PM_REMOVE).as_bool() {
+                    let _ = TranslateMessage(&message);
+                    DispatchMessageW(&message);
+                }
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+
+    #[test]
+    fn webview_loads_remote_hostname_and_localhost_through_ssh_socks() {
+        unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED).ok().unwrap() };
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let (fixture, proxy_port, worker) = runtime.block_on(async {
+            let fixture = native_server::Fixture::new().await;
+            let http = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            *fixture.state.forward_target.lock().unwrap() = Some(http.local_addr().unwrap());
+            tokio::spawn(async move {
+                while let Ok((mut socket, _)) = http.accept().await {
+                    tokio::spawn(async move {
+                        let mut request = Vec::new();
+                        while !request.ends_with(b"\r\n\r\n") {
+                            match socket.read_u8().await {
+                                Ok(byte) => request.push(byte),
+                                Err(_) => return,
+                            }
+                        }
+                        let body = b"<!doctype html><html><body>ssh-browser-fixture</body></html>";
+                        let header = format!("HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", body.len());
+                        let _ = socket.write_all(header.as_bytes()).await;
+                        let _ = socket.write_all(body).await;
+                        let _ = socket.shutdown().await;
+                    });
+                }
+            });
+            let handle = Arc::new(yiterm::native_ssh::connect(fixture.config.clone(), Arc::new(Password)).await.unwrap());
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let port = listener.local_addr().unwrap().port();
+            let worker = tokio::spawn(yiterm::native_ssh::socks::serve(listener, handle));
+            (fixture, port, worker)
+        });
+        let profile = tempfile::tempdir().unwrap();
+        let (sender, receiver) = async_channel::bounded(1);
+        let (navigation_sender, navigation_receiver) = async_channel::unbounded();
+        BrowserUi::start_webview(
+            HWND_MESSAGE,
+            proxy_port,
+            "http://remote-only.invalid:8080/",
+            profile.path(),
+            sender,
+            navigation_sender,
+        )
+        .unwrap();
+        let state = pump_until(&receiver).unwrap();
+        for url in [None, Some("http://localhost:8080/")] {
+            if let Some(url) = url {
+                BrowserUi::navigate_webview(&state.webview, url).unwrap();
+            }
+            assert_eq!(
+                pump_until(&navigation_receiver),
+                None,
+                "Navigation must succeed through SOCKS"
+            );
+            let (sender, receiver) = async_channel::bounded(1);
+            let handler = webview2_com::ExecuteScriptCompletedHandler::create(Box::new(
+                move |result, value| {
+                    let result = result.and_then(|()| unsafe { value.to_string() });
+                    let _ = sender.try_send(result);
+                    Ok(())
+                },
+            ));
+            let script: Vec<u16> = "document.body.textContent"
+                .encode_utf16()
+                .chain(Some(0))
+                .collect();
+            unsafe {
+                state
+                    .webview
+                    .ExecuteScript(PCWSTR(script.as_ptr()), &handler)
+                    .unwrap()
+            };
+            assert_eq!(pump_until(&receiver).unwrap(), "\"ssh-browser-fixture\"");
+        }
+        let requests = fixture.state.forward_requests.lock().unwrap().clone();
+        assert!(
+            requests
+                .iter()
+                .any(|(host, port)| host == "remote-only.invalid" && *port == 8080)
+        );
+        assert!(
+            requests
+                .iter()
+                .any(|(host, port)| host == "localhost" && *port == 8080)
+        );
+        drop(state);
+        worker.abort();
+        drop(runtime);
+        unsafe { CoUninitialize() };
+    }
+}

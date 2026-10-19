@@ -25,6 +25,8 @@ pub struct State {
     pub stall_write: AtomicBool,
     pub interactive: AtomicBool,
     pub allowed_key: Mutex<Option<keys::PublicKey>>,
+    pub forward_target: Mutex<Option<std::net::SocketAddr>>,
+    pub forward_requests: Mutex<Vec<(String, u32)>>,
 }
 pub struct Fixture {
     pub state: Arc<State>,
@@ -87,6 +89,32 @@ struct Handler {
 }
 impl server::Handler for Handler {
     type Error = anyhow::Error;
+    async fn channel_open_direct_tcpip(
+        &mut self,
+        channel: Channel<Msg>,
+        host: &str,
+        port: u32,
+        _: &str,
+        _: u32,
+        reply: server::ChannelOpenHandle,
+        _: &mut Session,
+    ) -> Result<()> {
+        self.state
+            .forward_requests
+            .lock()
+            .unwrap()
+            .push((host.to_owned(), port));
+        let target = *self.state.forward_target.lock().unwrap();
+        if let Some(target) = target {
+            let mut remote = tokio::net::TcpStream::connect(target).await?;
+            reply.accept().await;
+            tokio::spawn(async move {
+                let mut stream = channel.into_stream();
+                let _ = tokio::io::copy_bidirectional(&mut remote, &mut stream).await;
+            });
+        }
+        Ok(())
+    }
     async fn auth_publickey(&mut self, user: &str, key: &keys::PublicKey) -> Result<Auth> {
         self.state.authentications.fetch_add(1, Ordering::SeqCst);
         Ok(

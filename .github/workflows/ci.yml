@@ -94,6 +94,30 @@ jobs:
       - name: Test terminal Unicode rendering and emoji column widths
         run: cargo test --locked --release --target ${{ matrix.target }} --bin yiterm terminal_unicode_
 
+      - name: Test SOCKS forwarding over authenticated SSH
+        run: cargo test --locked --release --target ${{ matrix.target }} --test socks
+
+      - name: Test Windows SSH SOCKS control pipe and shared session
+        if: runner.os == 'Windows'
+        run: cargo test --locked --release --target ${{ matrix.target }} --test ssh_windows
+
+      - name: Install WebView2 Runtime for browser integration test
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $roots = @("${env:ProgramFiles(x86)}\Microsoft\EdgeWebView\Application", "$env:LOCALAPPDATA\Microsoft\EdgeWebView\Application")
+          $runtime = Get-ChildItem $roots -Directory -ErrorAction SilentlyContinue | Where-Object { Test-Path (Join-Path $_.FullName 'msedgewebview2.exe') }
+          if ($runtime) { Write-Host 'WebView2 Runtime is already installed'; exit 0 }
+          $installer = Join-Path $env:RUNNER_TEMP 'MicrosoftEdgeWebView2RuntimeInstallerX64.exe'
+          Invoke-WebRequest 'https://go.microsoft.com/fwlink/p/?LinkId=2124703' -OutFile $installer
+          $process = Start-Process $installer -ArgumentList '/silent', '/install' -Wait -PassThru
+          if ($process.ExitCode -ne 0) { throw "WebView2 installer failed: $($process.ExitCode)" }
+
+      - name: Test WebView2 page loading through SSH SOCKS
+        if: runner.os == 'Windows'
+        timeout-minutes: 5
+        run: cargo test --locked --release --target ${{ matrix.target }} --bin yiterm ui::browser::tests::webview_loads_ -- --nocapture
+
       - uses: actions/setup-python@v7
         with:
           python-version: '3.13'

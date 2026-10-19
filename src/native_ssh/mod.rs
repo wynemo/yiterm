@@ -3,6 +3,7 @@
 pub mod auth;
 pub mod config;
 pub mod osc52;
+pub mod socks;
 pub mod transfer;
 #[cfg(windows)]
 mod windows;
