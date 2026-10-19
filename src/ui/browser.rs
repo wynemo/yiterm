@@ -7,7 +7,7 @@ use std::path::Path;
 use webview2_com::{
     CoreWebView2EnvironmentOptions, CreateCoreWebView2ControllerCompletedHandler,
     CreateCoreWebView2EnvironmentCompletedHandler, Microsoft::Web::WebView2::Win32::*,
-    NavigationStartingEventHandler,
+    NavigationCompletedEventHandler, NavigationStartingEventHandler,
 };
 use windows::{
     Win32::Foundation::{E_POINTER, HWND, RECT},
@@ -20,6 +20,7 @@ struct WebViewState {
     controller: ICoreWebView2Controller,
     webview: ICoreWebView2,
     navigation_token: i64,
+    navigation_completed_token: i64,
 }
 
 impl Drop for WebViewState {
@@ -28,6 +29,9 @@ impl Drop for WebViewState {
             let _ = self
                 .webview
                 .remove_NavigationStarting(self.navigation_token);
+            let _ = self
+                .webview
+                .remove_NavigationCompleted(self.navigation_completed_token);
             let _ = self.controller.Close();
         }
     }
@@ -58,6 +62,7 @@ impl BrowserUi {
             .tempdir()
             .ok();
         let (sender, receiver) = async_channel::bounded::<anyhow::Result<WebViewState>>(1);
+        let (navigation_sender, navigation_receiver) = async_channel::unbounded();
         let status = Some("Starting WebView2…".to_owned());
         let parent = Self::parent_hwnd(window);
         match (parent, user_data.as_ref()) {
@@ -68,6 +73,7 @@ impl BrowserUi {
                     &initial_url,
                     user_data.path(),
                     sender.clone(),
+                    navigation_sender.clone(),
                 ) {
                     let _ = sender.try_send(Err(error));
                 }
@@ -120,6 +126,20 @@ impl BrowserUi {
             });
         })
         .detach();
+        cx.spawn_in(window, async move |this, cx| {
+            while let Ok(status) = navigation_receiver.recv().await {
+                if this
+                    .update(cx, |this, cx| {
+                        this.status = status;
+                        cx.notify();
+                    })
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        })
+        .detach();
         this
     }
 
@@ -139,6 +159,7 @@ impl BrowserUi {
         initial_url: &str,
         user_data_path: &Path,
         sender: async_channel::Sender<anyhow::Result<WebViewState>>,
+        navigation_sender: async_channel::Sender<Option<String>>,
     ) -> anyhow::Result<()> {
         let folder: Vec<u16> = user_data_path
             .to_string_lossy()
@@ -147,11 +168,12 @@ impl BrowserUi {
             .collect();
         let options = CoreWebView2EnvironmentOptions::default();
         let arguments = format!(
-            "--proxy-server=socks5://127.0.0.1:{proxy_port} --proxy-bypass-list=<-loopback> --host-resolver-rules=\"MAP * ~NOTFOUND, EXCLUDE localhost, EXCLUDE 127.0.0.1, EXCLUDE ::1\" --disable-quic --force-webrtc-ip-handling-policy=disable_non_proxied_udp"
+            "--proxy-server=socks5://127.0.0.1:{proxy_port} --proxy-bypass-list=<-loopback> --host-resolver-rules=\"MAP * ~NOTFOUND\" --disable-dns-prefetch --disable-quic --force-webrtc-ip-handling-policy=disable_non_proxied_udp"
         );
         unsafe { options.set_additional_browser_arguments(arguments) };
         let options: ICoreWebView2EnvironmentOptions = options.into();
         let callback_sender = sender.clone();
+        let callback_navigation_sender = navigation_sender.clone();
         let initial_url = initial_url.to_owned();
         let handler = CreateCoreWebView2EnvironmentCompletedHandler::create(Box::new(
             move |result, environment| {
@@ -165,6 +187,7 @@ impl BrowserUi {
                     }
                 };
                 let controller_sender = callback_sender.clone();
+                let controller_navigation_sender = callback_navigation_sender.clone();
                 let controller_initial_url = initial_url.clone();
                 let controller_handler = CreateCoreWebView2ControllerCompletedHandler::create(
                     Box::new(move |result, controller| {
@@ -177,7 +200,11 @@ impl BrowserUi {
                                 return Ok(());
                             }
                         };
-                        let state = Self::finish_webview(controller, &controller_initial_url);
+                        let state = Self::finish_webview(
+                            controller,
+                            &controller_initial_url,
+                            controller_navigation_sender,
+                        );
                         let _ = controller_sender.try_send(state);
                         Ok(())
                     }),
@@ -204,6 +231,7 @@ impl BrowserUi {
     fn finish_webview(
         controller: ICoreWebView2Controller,
         initial_url: &str,
+        navigation_sender: async_channel::Sender<Option<String>>,
     ) -> anyhow::Result<WebViewState> {
         unsafe {
             controller.SetBounds(RECT::default())?;
@@ -229,6 +257,31 @@ impl BrowserUi {
         unsafe {
             webview.add_NavigationStarting(&navigation, &mut navigation_token)?;
         }
+        let navigation_completed = NavigationCompletedEventHandler::create(Box::new(
+            move |_, args| {
+                if let Some(args) = args {
+                    let mut is_success = BOOL(0);
+                    unsafe { args.IsSuccess(&mut is_success)? };
+                    if is_success.0 != 0 {
+                        let _ = navigation_sender.try_send(None);
+                    } else {
+                        let mut error_status = COREWEBVIEW2_WEB_ERROR_STATUS(0);
+                        unsafe { args.WebErrorStatus(&mut error_status)? };
+                        tracing::warn!(error_status = error_status.0, "WebView2 navigation failed");
+                        let _ = navigation_sender.try_send(Some(format!(
+                            "Page failed to load (WebView2 error {}). Check SSH TCP forwarding and the remote network.",
+                            error_status.0
+                        )));
+                    }
+                }
+                Ok(())
+            },
+        ));
+        let mut navigation_completed_token = 0;
+        unsafe {
+            webview
+                .add_NavigationCompleted(&navigation_completed, &mut navigation_completed_token)?;
+        }
         if !initial_url.is_empty() {
             Self::navigate_webview(&webview, initial_url)?;
         }
@@ -236,6 +289,7 @@ impl BrowserUi {
             controller,
             webview,
             navigation_token,
+            navigation_completed_token,
         })
     }
 

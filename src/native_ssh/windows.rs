@@ -374,6 +374,7 @@ async fn serve_socks_client(
         }
     };
     let port = client.read_u16().await?;
+    tracing::debug!(%host, port, "Opening SSH SOCKS TCP channel");
     let channel = match connection
         .channel_open_direct_tcpip(&host, u32::from(port), "127.0.0.1", 0)
         .await
@@ -381,9 +382,11 @@ async fn serve_socks_client(
         Ok(channel) => channel,
         Err(error) => {
             write_socks_reply(&mut client, 1).await?;
+            tracing::warn!(%host, port, %error, "SSH server refused SOCKS TCP forwarding");
             return Err(error).context("SSH server refused TCP forwarding");
         }
     };
+    tracing::debug!(%host, port, "SSH SOCKS TCP channel opened");
     write_socks_reply(&mut client, 0).await?;
     let mut remote = channel.into_stream();
     tokio::io::copy_bidirectional(&mut client, &mut remote).await?;
