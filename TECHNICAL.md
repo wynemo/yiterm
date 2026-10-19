@@ -76,7 +76,7 @@ Windows 的 **Tools → Open SSH Browser** 会从当前聚焦 pane 检测前台 
 
 服务器必须允许 TCP 转发（`AllowTcpForwarding yes`）。远端拒绝转发时浏览器显示连接失败，不会回退到本机直连。SOCKS5 不支持 UDP；浏览器参数禁用 QUIC 和非代理 WebRTC UDP，因此这些基于 UDP 的功能不可用。该功能要求 Microsoft Edge WebView2 Runtime，以及 YiTerm 内置 Windows SSH 客户端；显式使用 `ssh --system` 或普通系统 OpenSSH 时，YiTerm 无法取得其已认证连接，会提示在内置 SSH 会话中重试。Windows 链接点击不再调用系统默认浏览器。
 
-Chromium 的 `host-resolver-rules` 同样会作用于代理入口的 IP 地址，因此阻止本地 DNS 时必须保留 `EXCLUDE 127.0.0.1`，使本地 SOCKS 监听端口仍可连接。Windows CI 会启动真实 WebView2，通过已认证 SSH 的 SOCKS 代理加载测试页面并读取 DOM，覆盖远端域名和 `localhost`，同时验证 wrapper 命名管道的代理引用生命周期。
+Chromium 的 `host-resolver-rules` 同样会作用于代理入口的 IP 地址，因此阻止本地 DNS 时必须保留 `EXCLUDE 127.0.0.1`，使本地 SOCKS 监听端口仍可连接。Windows CI 会启动真实 WebView2，通过已认证 SSH 的 SOCKS 代理加载测试页面并读取 DOM，覆盖远端域名和 `localhost`。
 
 本机开发只运行当前平台的 `cargo test --locked`；Windows 控制台、命名管道、窗口缩放和登录后连续传图的集成测试由 Windows CI runner 执行，不在 macOS 上安装 Windows 工具链或交叉编译。
 
