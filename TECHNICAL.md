@@ -68,6 +68,14 @@ Windows 下，YiTerm 的私有 `ssh.exe` wrapper 使用内置 Rust SSH 客户端
 
 内置上传单张限制为 50 MiB，远端文件名为 `/tmp/yiterm-drop-<UUID>.png`，创建权限为 `0600`。GUI 通过仅当前 Windows 用户可访问的命名管道请求当前分栏的 wrapper 上传，不传递密码；上传完成且目标进程仍有效才粘贴远端路径。失败或取消时尽力清理未完成文件；服务器断开时可能无法清理。
 
+### Windows 内置浏览器与 SSH SOCKS5
+
+Windows 的 **Tools → Open SSH Browser** 会从当前聚焦 pane 检测前台 SSH 进程，并通过该 YiTerm 内置 SSH wrapper 已认证的连接启动 WebView2。终端中的 HTTP/HTTPS 链接按住 **Ctrl** 点击也会使用此浏览器。浏览器工具栏可前进、后退、刷新和输入网址；没有协议的地址按 HTTPS 处理。
+
+主程序通过受当前 Windows 用户 ACL 保护的 SSH 私有命名管道请求 SOCKS5 监听端口，只传递开始/结束和状态，不传递 SSH 凭据。浏览器侧使用无认证 SOCKS5，不需要单独填写 SOCKS 用户名或密码；SSH 凭据仍按原 SSH 登录流程处理。监听地址仅为 `127.0.0.1`，只支持 TCP CONNECT；目标主机名随 SSH `direct-tcpip` 通道发送，由远端解析 DNS。每个网页 TCP 连接复用同一条已认证 SSH transport 上的新 SSH channel。关闭最后一个该会话的浏览器窗口会停止 SOCKS 监听，SSH 会话退出时也会关闭。WebView2 使用单独的临时用户数据目录，并通过 Chromium 参数关闭 localhost 的隐式代理绕过、限制本地 DNS 解析、禁用 QUIC 和非代理 WebRTC UDP。
+
+服务器必须允许 TCP 转发（`AllowTcpForwarding yes`）。远端拒绝转发时浏览器显示连接失败，不会回退到本机直连。SOCKS5 不支持 UDP；浏览器参数禁用 QUIC 和非代理 WebRTC UDP，因此这些基于 UDP 的功能不可用。该功能要求 Microsoft Edge WebView2 Runtime，以及 YiTerm 内置 Windows SSH 客户端；显式使用 `ssh --system` 或普通系统 OpenSSH 时，YiTerm 无法取得其已认证连接，会提示在内置 SSH 会话中重试。Windows 链接点击不再调用系统默认浏览器。
+
 本机开发只运行当前平台的 `cargo test --locked`；Windows 控制台、命名管道、窗口缩放和登录后连续传图的集成测试由 Windows CI runner 执行，不在 macOS 上安装 Windows 工具链或交叉编译。
 
 
@@ -84,7 +92,7 @@ SSH 远端程序可通过 OSC 52 的 `c` 目标把文本复制到主机剪贴板
 
 ## 终端链接
 
-自动识别终端文字中的 HTTP/HTTPS 链接（支持自动折行）和 OSC 8 超链接。悬停时为整个链接加下划线并显示目标地址；macOS 按住 **Cmd** 点击，Windows / Linux 按住 **Ctrl** 点击，在系统默认浏览器打开。普通拖动仍用于选择文字。仅打开 HTTP/HTTPS 地址。
+自动识别终端文字中的 HTTP/HTTPS 链接（支持自动折行）和 OSC 8 超链接。悬停时为整个链接加下划线并显示目标地址；macOS 按住 **Cmd** 点击、Linux 按住 **Ctrl** 点击，在系统默认浏览器打开；Windows 按住 **Ctrl** 点击时，使用“Windows 内置浏览器与 SSH SOCKS5”所述的当前聚焦 SSH pane。普通拖动仍用于选择文字。仅打开 HTTP/HTTPS 地址。
 
 ## 多标签页
 

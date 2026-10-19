@@ -8,6 +8,11 @@ use std::{
     time::{Duration, Instant},
 };
 use tokio::net::windows::named_pipe::{ClientOptions, NamedPipeServer, ServerOptions};
+use tokio::{
+    io::{AsyncReadExt, AsyncWriteExt},
+    net::{TcpListener, TcpStream},
+    task::{JoinHandle, JoinSet},
+};
 use windows_sys::Win32::{
     Foundation::{CloseHandle, HANDLE, INVALID_HANDLE_VALUE, LocalFree},
     Security::{
@@ -115,6 +120,281 @@ impl Drop for PipeSecurity {
 }
 
 const MAX_OSC52_FRAME_BYTES: usize = 2 * 1024 * 1024;
+
+pub struct SocksTunnel {
+    pipe_name: String,
+    expected_pid: u32,
+    port: u16,
+}
+
+impl SocksTunnel {
+    pub fn start(pipe_name: String, expected_pid: u32) -> Result<Self> {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_io()
+            .build()?;
+        let port = runtime.block_on(control_request(&pipe_name, expected_pid, 1))?;
+        Ok(Self {
+            pipe_name,
+            expected_pid,
+            port,
+        })
+    }
+
+    pub fn port(&self) -> u16 {
+        self.port
+    }
+}
+
+impl Drop for SocksTunnel {
+    fn drop(&mut self) {
+        let pipe_name = self.pipe_name.clone();
+        let expected_pid = self.expected_pid;
+        let _ = thread::Builder::new()
+            .name("yiterm-socks-stop".into())
+            .spawn(move || {
+                let result = (|| -> Result<()> {
+                    let runtime = tokio::runtime::Builder::new_current_thread()
+                        .enable_io()
+                        .build()?;
+                    runtime.block_on(control_request(&pipe_name, expected_pid, 2))?;
+                    Ok(())
+                })();
+                if let Err(error) = result {
+                    tracing::debug!(%error, "Could not release SSH SOCKS tunnel reference");
+                }
+            });
+    }
+}
+
+async fn control_request(pipe_name: &str, expected_pid: u32, command: u8) -> Result<u16> {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    let mut pipe = loop {
+        match ClientOptions::new().open(pipe_name) {
+            Ok(pipe) => break pipe,
+            Err(error)
+                if matches!(error.raw_os_error(), Some(2 | 231))
+                    && tokio::time::Instant::now() < deadline =>
+            {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+            Err(error) => return Err(error).context("connecting to SSH SOCKS control pipe"),
+        }
+    };
+    use std::os::windows::io::AsRawHandle;
+    let mut server_pid = 0;
+    check(unsafe { GetNamedPipeServerProcessId(pipe.as_raw_handle().cast(), &mut server_pid) })?;
+    ensure!(
+        server_pid == expected_pid,
+        "SSH session changed before opening browser"
+    );
+    tokio::time::timeout(Duration::from_secs(5), async {
+        pipe.write_u8(command).await?;
+        pipe.flush().await?;
+        let status = pipe.read_u8().await?;
+        ensure!(status == 0, "SSH session rejected SOCKS control request");
+        let port = pipe.read_u16().await?;
+        Ok(port)
+    })
+    .await
+    .context("waiting for SSH SOCKS control response")?
+}
+
+struct SocksListener {
+    port: u16,
+    references: usize,
+    task: JoinHandle<()>,
+}
+
+impl Drop for SocksListener {
+    fn drop(&mut self) {
+        self.task.abort();
+    }
+}
+
+async fn serve_socks_control(
+    pipe_name: String,
+    connection: Arc<russh::client::Handle<super::auth::Handler>>,
+) -> Result<()> {
+    let security = PipeSecurity::new()?;
+    let mut pipe = security.server(&pipe_name, true)?;
+    drop(security);
+    let mut socks: Option<SocksListener> = None;
+    tracing::info!("SSH SOCKS control pipe ready");
+
+    loop {
+        pipe.connect()
+            .await
+            .context("accepting SSH SOCKS control client")?;
+        let security = PipeSecurity::new()?;
+        let next_pipe = security.server(&pipe_name, false)?;
+        drop(security);
+
+        let command = match tokio::time::timeout(Duration::from_secs(5), pipe.read_u8()).await {
+            Ok(Ok(command)) => command,
+            Ok(Err(error)) => {
+                tracing::debug!(%error, "Discarding invalid SSH SOCKS control request");
+                pipe = next_pipe;
+                continue;
+            }
+            Err(_) => {
+                tracing::debug!("Discarding timed out SSH SOCKS control request");
+                pipe = next_pipe;
+                continue;
+            }
+        };
+        let response = match command {
+            1 => {
+                if socks
+                    .as_ref()
+                    .is_some_and(|listener| listener.task.is_finished())
+                {
+                    socks = None;
+                }
+                if let Some(listener) = &mut socks {
+                    listener.references += 1;
+                    (0, listener.port)
+                } else {
+                    match TcpListener::bind(("127.0.0.1", 0)).await {
+                        Ok(listener) => {
+                            let port = listener.local_addr()?.port();
+                            let connection = connection.clone();
+                            let task = tokio::spawn(async move {
+                                if let Err(error) = serve_socks(listener, connection).await {
+                                    tracing::warn!(error = %format!("{error:#}"), "SSH SOCKS listener stopped");
+                                }
+                            });
+                            socks = Some(SocksListener {
+                                port,
+                                references: 1,
+                                task,
+                            });
+                            (0, port)
+                        }
+                        Err(error) => {
+                            tracing::warn!(%error, "Could not bind local SSH SOCKS listener");
+                            (1, 0)
+                        }
+                    }
+                }
+            }
+            2 => {
+                let should_stop = if let Some(listener) = &mut socks {
+                    listener.references = listener.references.saturating_sub(1);
+                    listener.references == 0
+                } else {
+                    false
+                };
+                if should_stop && let Some(listener) = socks.take() {
+                    listener.task.abort();
+                }
+                (0, 0)
+            }
+            _ => (1, 0),
+        };
+        pipe.write_u8(response.0).await?;
+        pipe.write_u16(response.1).await?;
+        pipe.flush().await?;
+        pipe = next_pipe;
+    }
+}
+
+async fn serve_socks(
+    listener: TcpListener,
+    connection: Arc<russh::client::Handle<super::auth::Handler>>,
+) -> Result<()> {
+    const MAX_CLIENTS: usize = 128;
+    let mut clients = JoinSet::new();
+    loop {
+        tokio::select! {
+            accepted = listener.accept() => {
+                let (client, _) = accepted?;
+                if clients.len() >= MAX_CLIENTS {
+                    drop(client);
+                    continue;
+                }
+                let connection = connection.clone();
+                clients.spawn(async move {
+                    if let Err(error) = serve_socks_client(client, connection).await {
+                        tracing::debug!(%error, "SOCKS client connection ended");
+                    }
+                });
+            }
+            _ = clients.join_next(), if !clients.is_empty() => {}
+        }
+    }
+}
+
+async fn serve_socks_client(
+    mut client: TcpStream,
+    connection: Arc<russh::client::Handle<super::auth::Handler>>,
+) -> Result<()> {
+    let version = client.read_u8().await?;
+    let methods = client.read_u8().await? as usize;
+    ensure!(
+        version == 5 && (1..=32).contains(&methods),
+        "Invalid SOCKS5 greeting"
+    );
+    let mut offered = vec![0; methods];
+    client.read_exact(&mut offered).await?;
+    if !offered.contains(&0) {
+        client.write_all(&[5, 0xff]).await?;
+        bail!("SOCKS5 client requires an unsupported authentication method");
+    }
+    client.write_all(&[5, 0]).await?;
+
+    let mut request = [0; 4];
+    client.read_exact(&mut request).await?;
+    ensure!(request[0] == 5 && request[2] == 0, "Invalid SOCKS5 request");
+    if request[1] != 1 {
+        write_socks_reply(&mut client, 7).await?;
+        bail!("Only SOCKS5 TCP CONNECT is supported");
+    }
+    let host = match request[3] {
+        1 => {
+            let mut address = [0; 4];
+            client.read_exact(&mut address).await?;
+            std::net::Ipv4Addr::from(address).to_string()
+        }
+        3 => {
+            let length = client.read_u8().await? as usize;
+            ensure!(length > 0, "SOCKS5 domain name is empty");
+            let mut name = vec![0; length];
+            client.read_exact(&mut name).await?;
+            String::from_utf8(name).context("SOCKS5 domain name is not UTF-8")?
+        }
+        4 => {
+            let mut address = [0; 16];
+            client.read_exact(&mut address).await?;
+            std::net::Ipv6Addr::from(address).to_string()
+        }
+        _ => {
+            write_socks_reply(&mut client, 8).await?;
+            bail!("Unsupported SOCKS5 address type");
+        }
+    };
+    let port = client.read_u16().await?;
+    let channel = match connection
+        .channel_open_direct_tcpip(&host, u32::from(port), "127.0.0.1", 0)
+        .await
+    {
+        Ok(channel) => channel,
+        Err(error) => {
+            write_socks_reply(&mut client, 1).await?;
+            return Err(error).context("SSH server refused TCP forwarding");
+        }
+    };
+    write_socks_reply(&mut client, 0).await?;
+    let mut remote = channel.into_stream();
+    tokio::io::copy_bidirectional(&mut client, &mut remote).await?;
+    Ok(())
+}
+
+async fn write_socks_reply(client: &mut TcpStream, status: u8) -> Result<()> {
+    client
+        .write_all(&[5, status, 0, 1, 0, 0, 0, 0, 0, 0])
+        .await?;
+    Ok(())
+}
 
 pub struct ClipboardRequests {
     receiver: mpsc::Receiver<Vec<u8>>,
@@ -539,6 +819,13 @@ fn run_inner(real_ssh: &Path, directory: &Path, args: Vec<OsString>) -> Result<i
                 pending_connection = next_connection;
             }
         });
+        let socks_pipe = format!("{name}-socks");
+        let socks_connection = handle.clone();
+        let socks = tokio::spawn(async move {
+            if let Err(error) = serve_socks_control(socks_pipe, socks_connection).await {
+                tracing::warn!(error = %format!("{error:#}"), "SSH SOCKS control pipe stopped");
+            }
+        });
         let (tx, mut rx) = tokio::sync::mpsc::channel(16);
         // A normal thread avoids Tokio runtime shutdown waiting for console
         // input after the remote shell exits. The shim exits immediately after
@@ -613,6 +900,8 @@ fn run_inner(real_ssh: &Path, directory: &Path, args: Vec<OsString>) -> Result<i
         }.await;
         uploads.abort();
         let _ = uploads.await;
+        socks.abort();
+        let _ = socks.await;
         let _ = tokio::time::timeout(Duration::from_secs(2), handle.disconnect(russh::Disconnect::ByApplication, "Session closed", "en")).await;
         result
     });

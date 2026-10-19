@@ -1,4 +1,7 @@
 //! GPUI window, terminal canvas, input routing, and application controls.
+#[cfg(windows)]
+mod browser;
+
 use super::*;
 use gpui::{
     App, Application, Bounds, ContentMask, Context as ViewContext, ElementInputHandler,
@@ -577,29 +580,39 @@ impl TerminalUi {
             return;
         }
         let cell = self.cell;
-        let pane = self.session();
-        let (pos, side) = selection_point(
-            geo.terminal,
-            cell,
-            pane.size,
-            pane.term.grid().display_offset(),
-            event.position,
-        );
-        let report = pane.term.mode().intersects(TermMode::MOUSE_MODE)
-            && !event.modifiers.shift
-            && pane.term.grid().display_offset() == 0;
-        if event.button == MouseButton::Left
-            && (if cfg!(target_os = "macos") {
-                event.modifiers.platform
+        let (pos, side, report, link) = {
+            let pane = self.app.tabs[self.app.active].focused();
+            let (pos, side) = selection_point(
+                geo.terminal,
+                cell,
+                pane.size,
+                pane.term.grid().display_offset(),
+                event.position,
+            );
+            let report = pane.term.mode().intersects(TermMode::MOUSE_MODE)
+                && !event.modifiers.shift
+                && pane.term.grid().display_offset() == 0;
+            let link = if event.button == MouseButton::Left
+                && (if cfg!(target_os = "macos") {
+                    event.modifiers.platform
+                } else {
+                    event.modifiers.control
+                }) {
+                terminal_link(&pane.term, pos)
             } else {
-                event.modifiers.control
-            })
-            && let Some(link) = terminal_link(&pane.term, pos)
-        {
+                None
+            };
+            (pos, side, report, link)
+        };
+        if let Some(link) = link {
+            #[cfg(windows)]
+            self.open_ssh_browser(link, cx);
+            #[cfg(not(windows))]
             cx.open_url(&link);
             cx.notify();
             return;
         }
+        let pane = self.session();
         let button = button_code(event.button);
         pane.mouse_button = button;
         if report {
@@ -1694,6 +1707,18 @@ impl Render for TerminalUi {
                         }
                     },
                 ));
+                #[cfg(windows)]
+                {
+                    items = items.child(self.menu_button(
+                        "open-ssh-browser",
+                        "Open SSH Browser",
+                        cx,
+                        |this, _, cx| {
+                            this.menu = None;
+                            this.open_ssh_browser("about:blank".into(), cx);
+                        },
+                    ));
+                }
             }
             root = root.child(
                 div()
@@ -1782,6 +1807,71 @@ impl Render for TerminalUi {
 }
 
 impl TerminalUi {
+    #[cfg(windows)]
+    fn open_ssh_browser(&mut self, initial_url: String, cx: &mut ViewContext<Self>) {
+        let pane = self.session();
+        let root = pane.child.process_id();
+        let group = pane.foreground_group();
+        let this = cx.entity().downgrade();
+        cx.spawn(async move |_, cx| {
+            let (sender, receiver) = async_channel::bounded(1);
+            let _worker = std::thread::Builder::new()
+                .name("yiterm-browser-tunnel".into())
+                .spawn(move || {
+                    let result = (|| -> anyhow::Result<(yiterm::native_ssh::SocksTunnel, u32)> {
+                        let root = root.context("Focused pane has no live terminal process")?;
+                        let detection = ssh::detect(root, group)?
+                            .context("No SSH process is running in the focused pane")?;
+                        let pipe = detection.upload_pipe.context(
+                            "The active SSH process is not YiTerm's built-in Windows session; system OpenSSH cannot share its authenticated connection",
+                        )?;
+                        let tunnel = yiterm::native_ssh::SocksTunnel::start(
+                            yiterm::native_ssh::socks_pipe_name(&pipe),
+                            detection.identity.pid,
+                        )?;
+                        Ok((tunnel, detection.identity.pid))
+                    })();
+                    let _ = sender.send_blocking(result);
+                });
+            let result = receiver.recv().await;
+            match result {
+                Ok(Ok((tunnel, pid))) => {
+                    let options = WindowOptions {
+                        window_min_size: Some(size(px(620.), px(420.))),
+                        ..Default::default()
+                    };
+                    if let Err(error) = cx.open_window(options, move |window, app| {
+                        let view = app.new(|cx| {
+                            browser::BrowserUi::new(tunnel, pid, initial_url, window, cx)
+                        });
+                        app.new(|cx| Root::new(view, window, cx))
+                    }) {
+                        let message = format!("Cannot open SSH browser: {error:#}");
+                        let _ = this.update(cx, |this, cx| {
+                            this.app.error = Some(message);
+                            cx.notify();
+                        });
+                    }
+                }
+                Ok(Err(error)) => {
+                    let message = format!("Cannot open SSH browser: {error:#}");
+                    let _ = this.update(cx, |this, cx| {
+                        this.app.error = Some(message);
+                        cx.notify();
+                    });
+                }
+                Err(error) => {
+                    let message = format!("Cannot open SSH browser: {error}");
+                    let _ = this.update(cx, |this, cx| {
+                        this.app.error = Some(message);
+                        cx.notify();
+                    });
+                }
+            }
+        })
+        .detach();
+    }
+
     fn close_pane(&mut self) {
         let tab = &mut self.app.tabs[self.app.active];
         tab.close_pane(tab.active);

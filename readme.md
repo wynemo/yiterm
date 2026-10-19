@@ -19,6 +19,7 @@ Download and extract the package for your platform from [Releases](https://githu
 - Multiple tabs with independent sessions.
 - Horizontal and vertical split panes with draggable dividers.
 - Local shells and SSH sessions.
+- Windows embedded WebView2 browser routed through the focused YiTerm SSH session.
 - Drag to select and copy text.
 - Paste text and images; images are saved as files and their paths inserted, with remote uploads supported in SSH sessions.
 - An embedded monospace font, with no extra font installation required.

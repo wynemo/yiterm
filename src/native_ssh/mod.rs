@@ -7,7 +7,7 @@ pub mod transfer;
 #[cfg(windows)]
 mod windows;
 #[cfg(windows)]
-pub use windows::{ClipboardRequests, run, upload};
+pub use windows::{ClipboardRequests, SocksTunnel, run, upload};
 
 use anyhow::{Context, Result, bail};
 use auth::{Handler, Prompt};
@@ -204,6 +204,11 @@ fn shell_request_reply(message: &ChannelMsg, pending: &mut bool) -> Result<bool>
 pub fn pipe_name(directory: &std::path::Path, pid: u32) -> Result<String> {
     let name = integration_name(directory)?;
     Ok(format!(r"\\.\pipe\{name}-ssh-{pid}"))
+}
+
+#[cfg(windows)]
+pub fn socks_pipe_name(upload_pipe: &str) -> String {
+    format!("{upload_pipe}-socks")
 }
 
 pub fn osc52_pipe_name(directory: &std::path::Path) -> Result<String> {
