@@ -260,8 +260,8 @@ impl BrowserUi {
         unsafe {
             webview.add_NavigationStarting(&navigation, &mut navigation_token)?;
         }
-        let navigation_completed = NavigationCompletedEventHandler::create(Box::new(
-            move |_, args| {
+        let navigation_completed =
+            NavigationCompletedEventHandler::create(Box::new(move |_, args| {
                 if let Some(args) = args {
                     let mut is_success = BOOL(0);
                     unsafe { args.IsSuccess(&mut is_success)? };
@@ -278,8 +278,7 @@ impl BrowserUi {
                     }
                 }
                 Ok(())
-            },
-        ));
+            }));
         let mut navigation_completed_token = 0;
         unsafe {
             webview
@@ -585,7 +584,7 @@ mod tests {
             let (sender, receiver) = async_channel::bounded(1);
             let handler = webview2_com::ExecuteScriptCompletedHandler::create(Box::new(
                 move |result, value| {
-                    let result = result.and_then(|()| unsafe { value.to_string() });
+                    let result = result.map(|()| value);
                     let _ = sender.try_send(result);
                     Ok(())
                 },
