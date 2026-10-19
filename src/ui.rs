@@ -1815,27 +1815,50 @@ impl TerminalUi {
         let this = cx.entity().downgrade();
         cx.spawn(async move |_, cx| {
             let (sender, receiver) = async_channel::bounded(1);
-            let _worker = std::thread::Builder::new()
+            let worker = std::thread::Builder::new()
                 .name("yiterm-browser-tunnel".into())
                 .spawn(move || {
-                    let result = (|| -> anyhow::Result<(yiterm::native_ssh::SocksTunnel, u32)> {
-                        let root = root.context("Focused pane has no live terminal process")?;
-                        let detection = ssh::detect(root, group)?
-                            .context("No SSH process is running in the focused pane")?;
-                        let pipe = detection.upload_pipe.context(
-                            "The active SSH process is not YiTerm's built-in Windows session; system OpenSSH cannot share its authenticated connection",
-                        )?;
-                        let tunnel = yiterm::native_ssh::SocksTunnel::start(
-                            yiterm::native_ssh::socks_pipe_name(&pipe),
-                            detection.identity.pid,
-                        )?;
-                        Ok((tunnel, detection.identity.pid))
-                    })();
+                    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        (|| -> anyhow::Result<(yiterm::native_ssh::SocksTunnel, u32)> {
+                            let root = root.context("Focused pane has no live terminal process")?;
+                            let detection = ssh::detect(root, group)?
+                                .context("No SSH process is running in the focused pane")?;
+                            let pipe = detection.upload_pipe.context(
+                                "The active SSH process is not YiTerm's built-in Windows session; system OpenSSH cannot share its authenticated connection",
+                            )?;
+                            let tunnel = yiterm::native_ssh::SocksTunnel::start(
+                                yiterm::native_ssh::socks_pipe_name(&pipe),
+                                detection.identity.pid,
+                            )?;
+                            Ok((tunnel, detection.identity.pid))
+                        })()
+                    }));
+                    let result = match result {
+                        Ok(result) => result,
+                        Err(payload) => {
+                            let reason = payload
+                                .downcast_ref::<&str>()
+                                .copied()
+                                .or_else(|| payload.downcast_ref::<String>().map(String::as_str))
+                                .unwrap_or("non-string panic payload");
+                            Err(anyhow::anyhow!(
+                                "SSH browser setup worker panicked: {reason}"
+                            ))
+                        }
+                    };
                     let _ = sender.send_blocking(result);
                 });
-            let result = receiver.recv().await;
+            let result = match worker {
+                Ok(_worker) => receiver
+                    .recv()
+                    .await
+                    .map_err(anyhow::Error::new)
+                    .and_then(|result| result)
+                    .context("SSH browser setup worker stopped before returning a result"),
+                Err(error) => Err(error).context("starting SSH browser setup worker"),
+            };
             match result {
-                Ok(Ok((tunnel, pid))) => {
+                Ok((tunnel, pid)) => {
                     let options = WindowOptions {
                         window_min_size: Some(size(px(620.), px(420.))),
                         ..Default::default()
@@ -1852,13 +1875,6 @@ impl TerminalUi {
                             cx.notify();
                         });
                     }
-                }
-                Ok(Err(error)) => {
-                    let message = format!("Cannot open SSH browser: {error:#}");
-                    let _ = this.update(cx, |this, cx| {
-                        this.app.error = Some(message);
-                        cx.notify();
-                    });
                 }
                 Err(error) => {
                     let message = format!("Cannot open SSH browser: {error}");
