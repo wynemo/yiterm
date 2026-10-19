@@ -266,6 +266,7 @@ impl BrowserUi {
                     let mut is_success = BOOL(0);
                     unsafe { args.IsSuccess(&mut is_success)? };
                     if is_success.0 != 0 {
+                        tracing::info!("WebView2 page navigation completed");
                         let _ = navigation_sender.try_send(None);
                     } else {
                         let mut error_status = COREWEBVIEW2_WEB_ERROR_STATUS(0);
@@ -333,7 +334,7 @@ impl BrowserUi {
         if let Some(state) = &self.webview
             && let Err(error) = unsafe { state.controller.SetIsVisible(visible) }
         {
-            tracing::debug!(%error, "Could not change WebView2 visibility");
+            tracing::warn!(%error, "Could not change WebView2 visibility");
         }
     }
 
@@ -526,6 +527,145 @@ mod tests {
             }
             std::thread::sleep(Duration::from_millis(5));
         }
+    }
+
+    struct CompositionView {
+        _webview: std::rc::Rc<std::cell::RefCell<Option<WebViewState>>>,
+    }
+
+    impl Render for CompositionView {
+        fn render(&mut self, _: &mut Window, _: &mut ViewContext<Self>) -> impl IntoElement {
+            div().size_full().bg(rgb(0xC02020))
+        }
+    }
+
+    #[test]
+    fn webview_loads_visible_pixels_over_gpui() {
+        use std::{cell::RefCell, rc::Rc, sync::Mutex};
+        use windows::{
+            Win32::{
+                Foundation::{LPARAM, POINT, WPARAM},
+                Graphics::Gdi::{ClientToScreen, GetDC, GetPixel, ReleaseDC},
+                UI::WindowsAndMessaging::{
+                    HWND_TOPMOST, PostMessageW, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE,
+                    SetWindowPos, WM_CLOSE,
+                },
+            },
+            core::w,
+        };
+        fn red(color: u32) -> bool {
+            let (r, g, b) = (color & 255, (color >> 8) & 255, (color >> 16) & 255);
+            r > 100 && r > g * 2 && r > b * 2
+        }
+        fn green(color: u32) -> bool {
+            let (r, g, b) = (color & 255, (color >> 8) & 255, (color >> 16) & 255);
+            g > 100 && g > r * 2 && g > b * 2
+        }
+        let pixels = Arc::new(Mutex::new((0u32, 0u32)));
+        let sampled = pixels.clone();
+        let profile = tempfile::tempdir().unwrap();
+        let profile_path = profile.path().to_owned();
+        gpui::Application::new().run(move |cx: &mut gpui::App| {
+            let bounds = Bounds::centered(None, size(px(640.), px(480.)), cx);
+            cx.open_window(
+                WindowOptions {
+                    window_bounds: Some(WindowBounds::Windowed(bounds)),
+                    ..Default::default()
+                },
+                move |window, cx| {
+                    let parent = BrowserUi::parent_hwnd(window).unwrap();
+                    let live = Rc::new(RefCell::new(None));
+                    let retained = live.clone();
+                    let (sender, receiver) = async_channel::bounded(1);
+                    let (navigation_sender, _navigation_receiver) = async_channel::unbounded();
+                    BrowserUi::start_webview(
+                        parent,
+                        9,
+                        "about:blank",
+                        &profile_path,
+                        sender,
+                        navigation_sender,
+                    )
+                    .unwrap();
+                    cx.spawn(async move |_| {
+                        let state = receiver.recv().await.unwrap().unwrap();
+                        unsafe {
+                            state
+                                .controller
+                                .SetBounds(RECT {
+                                    left: 100,
+                                    top: 100,
+                                    right: 400,
+                                    bottom: 300,
+                                })
+                                .unwrap();
+                            state
+                                .webview
+                                .NavigateToString(w!(
+                                    "<html><body style='margin:0;height:100vh;background:#20c040'></body></html>"
+                                ))
+                                .unwrap();
+                            state.controller.SetIsVisible(true).unwrap();
+                        }
+                        *retained.borrow_mut() = Some(state);
+                    })
+                    .detach();
+                    let parent_raw = parent.0 as usize;
+                    std::thread::spawn(move || {
+                        let parent = HWND(parent_raw as *mut _);
+                        unsafe {
+                            SetWindowPos(
+                                parent,
+                                Some(HWND_TOPMOST),
+                                0,
+                                0,
+                                0,
+                                0,
+                                SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
+                            )
+                            .unwrap()
+                        };
+                        for _ in 0..200 {
+                            std::thread::sleep(Duration::from_millis(100));
+                            let mut origin = POINT { x: 0, y: 0 };
+                            let colors = unsafe {
+                                let _ = ClientToScreen(parent, &mut origin);
+                                let screen = GetDC(None);
+                                let background = GetPixel(screen, origin.x + 30, origin.y + 50).0;
+                                let browser = GetPixel(screen, origin.x + 250, origin.y + 200).0;
+                                let _ = ReleaseDC(None, screen);
+                                (background, browser)
+                            };
+                            *sampled.lock().unwrap() = colors;
+                            if red(colors.0) && green(colors.1) {
+                                break;
+                            }
+                        }
+                        unsafe {
+                            let _ = PostMessageW(Some(parent), WM_CLOSE, WPARAM(0), LPARAM(0));
+                        }
+                    });
+                    cx.new(|_| CompositionView { _webview: live })
+                },
+            )
+            .unwrap();
+            cx.on_window_closed(|cx| {
+                if cx.windows().is_empty() {
+                    cx.quit();
+                }
+            })
+            .detach();
+            cx.activate(true);
+        });
+        let (background, browser) = *pixels.lock().unwrap();
+        assert!(
+            red(background),
+            "GPUI background did not render: {background:#08x}"
+        );
+        assert!(
+            green(browser),
+            "WebView2 is covered by GPUI: background={background:#08x}, browser={browser:#08x}"
+        );
     }
 
     #[test]

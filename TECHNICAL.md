@@ -78,6 +78,8 @@ Windows 的 **Tools → Open SSH Browser** 会从当前聚焦 pane 检测前台 
 
 Chromium 的 `host-resolver-rules` 同样会作用于代理入口的 IP 地址，因此阻止本地 DNS 时必须保留 `EXCLUDE 127.0.0.1`，使本地 SOCKS 监听端口仍可连接。Windows CI 会启动真实 WebView2，通过已认证 SSH 的 SOCKS 代理加载测试页面并读取 DOM，覆盖远端域名和 `localhost`。
 
+Windows 的 GPUI DirectComposition 合成层放在原生子窗口下方，让 WebView2 子窗口能显示在终端界面之上。这项修正在 `vendor/gpui` 中维护（基于 GPUI 0.2.2）；上游的 `topmost = true` 会让不透明 GPUI 背景覆盖浏览器，造成请求成功、DOM 已加载但仍看到空白。Windows CI 同时打开真实 GPUI 窗口与 WebView2，并检查屏幕像素，验证浏览器内容没有被覆盖。
+
 本机开发只运行当前平台的 `cargo test --locked`；Windows 控制台、命名管道、窗口缩放和登录后连续传图的集成测试由 Windows CI runner 执行，不在 macOS 上安装 Windows 工具链或交叉编译。
 
 
