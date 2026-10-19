@@ -1623,30 +1623,36 @@ impl Render for TerminalUi {
                 .size_full(),
             );
 
-        let content = div().flex().flex_1().min_h_0().child(terminal);
+        let content = div().flex().flex_1().min_h_0();
         #[cfg(windows)]
         let browser = self.app.tabs[self.app.active].browser.clone();
         #[cfg(windows)]
         let show_browser = !self.app.settings_open && !self.app.about_open;
         #[cfg(windows)]
         if !show_browser && let Some(browser) = &browser {
-            let _ = browser.update(cx, |browser, _| browser.set_visible(false));
+            let _ = browser.update(cx, |browser, cx| browser.set_visible(false, cx));
         }
         #[cfg(windows)]
         let content = if show_browser && let Some(browser) = browser {
+            use gpui_component::resizable::{h_resizable, resizable_panel};
             content.child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .min_h_0()
-                    .overflow_hidden()
-                    .border_l_1()
-                    .border_color(theme.border())
-                    .child(browser),
+                h_resizable(("terminal-browser-split", self.app.tabs[self.app.active].id))
+                    .child(
+                        resizable_panel()
+                            .size_range(px(180.)..Pixels::MAX)
+                            .child(terminal),
+                    )
+                    .child(
+                        resizable_panel()
+                            .size_range(px(320.)..Pixels::MAX)
+                            .child(browser),
+                    ),
             )
         } else {
-            content
+            content.child(terminal)
         };
+        #[cfg(not(windows))]
+        let content = content.child(terminal);
 
         let status = self.app.tabs[self.app.active].focused().status.clone();
         let footer = div()
@@ -1845,7 +1851,7 @@ impl TerminalUi {
                 if tab.id != selected_id
                     && let Some(browser) = &tab.browser
                 {
-                    let _ = browser.update(_cx, |browser, _| browser.set_visible(false));
+                    let _ = browser.update(_cx, |browser, cx| browser.set_visible(false, cx));
                 }
             }
         }
@@ -1857,7 +1863,7 @@ impl TerminalUi {
         if let Some(tab) = self.app.tabs.get(self.app.active)
             && let Some(browser) = &tab.browser
         {
-            let _ = browser.update(_cx, |browser, _| browser.set_visible(false));
+            let _ = browser.update(_cx, |browser, cx| browser.set_visible(false, cx));
         }
         self.app.new_tab();
     }
@@ -1919,6 +1925,25 @@ impl TerminalUi {
             };
             match result {
                 Ok((tunnel, pid)) => {
+                    let reused = this.update_in(cx, |this, window, cx| {
+                        let Some(tab) = this.app.tabs.iter().find(|tab| tab.id == tab_id) else {
+                            return false;
+                        };
+                        if let Some(browser) = &tab.browser
+                            && browser.read(cx).ssh_pid() == pid
+                        {
+                            browser.update(cx, |browser, cx| {
+                                browser.open_tab(initial_url.clone(), window, cx);
+                                if this.app.tabs[this.app.active].id != tab_id {
+                                    browser.set_visible(false, cx);
+                                }
+                            });
+                            cx.notify();
+                            return true;
+                        }
+                        false
+                    });
+                    if matches!(reused, Ok(true)) { return; }
                     let browser = match cx.new_window_entity(|window, cx| {
                         browser::BrowserUi::new(tunnel, pid, initial_url, window, cx)
                     }) {
@@ -1937,7 +1962,19 @@ impl TerminalUi {
                         else {
                             return false;
                         };
-                        tab.browser = Some(browser);
+                        cx.subscribe(&browser, move |this, browser, _: &browser::CloseBrowser, cx| {
+                            browser.update(cx, |browser, cx| browser.set_visible(false, cx));
+                            if let Some(tab) = this.app.tabs.iter_mut().find(|tab| tab.id == tab_id)
+                                && tab.browser.as_ref() == Some(&browser)
+                            {
+                                tab.browser = None;
+                            }
+                            cx.notify();
+                        }).detach();
+                        tab.browser = Some(browser.clone());
+                        if this.app.tabs[this.app.active].id != tab_id {
+                            browser.update(cx, |browser, cx| browser.set_visible(false, cx));
+                        }
                         cx.notify();
                         true
                     });

@@ -3,11 +3,12 @@ use anyhow::{Context as _, ensure};
 use gpui::Subscription;
 use gpui_component::input::{Input, InputEvent, InputState};
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
-use std::path::Path;
+use std::{path::Path, rc::Rc};
 use webview2_com::{
     CoreWebView2EnvironmentOptions, CreateCoreWebView2ControllerCompletedHandler,
     CreateCoreWebView2EnvironmentCompletedHandler, Microsoft::Web::WebView2::Win32::*,
     NavigationCompletedEventHandler, NavigationStartingEventHandler,
+    NewWindowRequestedEventHandler,
 };
 use windows::{
     Win32::Foundation::{E_POINTER, HWND, RECT},
@@ -21,6 +22,7 @@ struct WebViewState {
     webview: ICoreWebView2,
     navigation_token: i64,
     navigation_completed_token: i64,
+    new_window_token: Option<i64>,
 }
 
 impl Drop for WebViewState {
@@ -32,21 +34,30 @@ impl Drop for WebViewState {
             let _ = self
                 .webview
                 .remove_NavigationCompleted(self.navigation_completed_token);
+            if let Some(token) = self.new_window_token {
+                let _ = self.webview.remove_NewWindowRequested(token);
+            }
             let _ = self.controller.Close();
         }
     }
 }
 
+pub(super) struct CloseBrowser;
+struct OpenBrowserTab(String);
+impl gpui::EventEmitter<OpenBrowserTab> for BrowserPage {}
+
+/// A terminal tab owns one browser panel; its pages share the SSH proxy/profile.
 pub(crate) struct BrowserUi {
-    _tunnel: yiterm::native_ssh::SocksTunnel,
-    _ssh_pid: u32,
-    webview: Option<WebViewState>,
+    tunnel: Rc<yiterm::native_ssh::SocksTunnel>,
+    ssh_pid: u32,
+    user_data: Rc<Option<tempfile::TempDir>>,
+    pages: Vec<(u64, gpui::Entity<BrowserPage>)>,
+    active: usize,
+    next_id: u64,
     visible: bool,
-    _user_data: Option<tempfile::TempDir>,
-    address: gpui::Entity<InputState>,
-    status: Option<String>,
-    _address_subscription: Option<Subscription>,
 }
+
+impl gpui::EventEmitter<CloseBrowser> for BrowserUi {}
 
 impl BrowserUi {
     pub(super) fn new(
@@ -56,16 +67,211 @@ impl BrowserUi {
         window: &mut Window,
         cx: &mut ViewContext<Self>,
     ) -> Self {
+        let mut this = Self {
+            tunnel: Rc::new(tunnel),
+            ssh_pid,
+            user_data: Rc::new(
+                tempfile::Builder::new()
+                    .prefix("yiterm-webview-")
+                    .tempdir()
+                    .ok(),
+            ),
+            pages: Vec::new(),
+            active: 0,
+            next_id: 0,
+            visible: false,
+        };
+        this.open_tab(initial_url, window, cx);
+        this
+    }
+
+    pub(super) fn ssh_pid(&self) -> u32 {
+        self.ssh_pid
+    }
+
+    pub(super) fn open_tab(
+        &mut self,
+        url: String,
+        window: &mut Window,
+        cx: &mut ViewContext<Self>,
+    ) {
+        self.set_visible(false, cx);
+        let page = cx.new(|cx| {
+            BrowserPage::new(
+                self.tunnel.clone(),
+                self.ssh_pid,
+                self.user_data.clone(),
+                url,
+                window,
+                cx,
+            )
+        });
+        cx.observe(&page, |_, _, cx| cx.notify()).detach();
+        cx.subscribe_in(
+            &page,
+            window,
+            |this, _, event: &OpenBrowserTab, window, cx| {
+                let visible = this.visible;
+                this.open_tab(event.0.clone(), window, cx);
+                this.set_visible(visible, cx);
+            },
+        )
+        .detach();
+        self.pages.push((self.next_id, page));
+        self.next_id += 1;
+        self.active = self.pages.len() - 1;
+        self.set_visible(true, cx);
+        cx.notify();
+    }
+
+    pub(super) fn set_visible(&mut self, visible: bool, cx: &mut ViewContext<Self>) {
+        self.visible = visible;
+        for (index, (_, page)) in self.pages.iter().enumerate() {
+            page.update(cx, |page, _| {
+                page.set_visible(visible && index == self.active)
+            });
+        }
+    }
+
+    fn select(&mut self, index: usize, cx: &mut ViewContext<Self>) {
+        self.active = index;
+        self.set_visible(self.visible, cx);
+        cx.notify();
+    }
+
+    fn close_tab(&mut self, index: usize, cx: &mut ViewContext<Self>) {
+        self.pages[index]
+            .1
+            .update(cx, |page, _| page.set_visible(false));
+        self.pages.remove(index);
+        if self.pages.is_empty() {
+            cx.emit(CloseBrowser);
+        } else {
+            if index < self.active {
+                self.active -= 1;
+            }
+            self.active = self.active.min(self.pages.len() - 1);
+            self.set_visible(self.visible, cx);
+        }
+        cx.notify();
+    }
+}
+
+impl Render for BrowserUi {
+    fn render(&mut self, _: &mut Window, cx: &mut ViewContext<Self>) -> impl IntoElement {
+        self.set_visible(true, cx);
+        let tabs = self
+            .pages
+            .iter()
+            .enumerate()
+            .map(|(index, (id, page))| {
+                let address = page.read(cx).address.read(cx).value().to_string();
+                div()
+                    .flex()
+                    .flex_shrink_0()
+                    .items_center()
+                    .min_w_0()
+                    .bg(rgb(if index == self.active {
+                        0xFFFFFF
+                    } else {
+                        0xE8EAED
+                    }))
+                    .child(
+                        Button::new(("browser-tab", *id))
+                            .small()
+                            .label(if address == "about:blank" {
+                                "New Tab".to_owned()
+                            } else {
+                                let mut caption: String = address.chars().take(28).collect();
+                                if address.chars().count() > 28 {
+                                    caption.push('…');
+                                }
+                                caption
+                            })
+                            .on_click(cx.listener(move |this, _, _, cx| this.select(index, cx))),
+                    )
+                    .child(
+                        Button::new(("browser-tab-close", *id))
+                            .small()
+                            .label("×")
+                            .on_click(cx.listener(move |this, _, _, cx| this.close_tab(index, cx))),
+                    )
+            })
+            .collect::<Vec<_>>();
+        div()
+            .size_full()
+            .flex()
+            .flex_col()
+            .min_w_0()
+            .overflow_hidden()
+            .bg(rgb(0xF3F4F6))
+            .text_color(rgb(0x202124))
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .flex_shrink_0()
+                    .gap(px(4.))
+                    .child(
+                        div()
+                            .id("browser-tabs")
+                            .flex()
+                            .flex_1()
+                            .min_w_0()
+                            .overflow_x_scroll()
+                            .children(tabs),
+                    )
+                    .child(
+                        Button::new("browser-new-tab")
+                            .small()
+                            .label("+")
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.open_tab("about:blank".into(), window, cx)
+                            })),
+                    )
+                    .child(
+                        Button::new("browser-close")
+                            .small()
+                            .label("Close")
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.set_visible(false, cx);
+                                cx.emit(CloseBrowser);
+                            })),
+                    ),
+            )
+            .when_some(self.pages.get(self.active), |this, (_, page)| {
+                this.child(div().flex_1().min_h_0().child(page.clone()))
+            })
+    }
+}
+
+struct BrowserPage {
+    _tunnel: Rc<yiterm::native_ssh::SocksTunnel>,
+    _ssh_pid: u32,
+    webview: Option<WebViewState>,
+    visible: bool,
+    _user_data: Rc<Option<tempfile::TempDir>>,
+    address: gpui::Entity<InputState>,
+    status: Option<String>,
+    _address_subscription: Option<Subscription>,
+}
+
+impl BrowserPage {
+    pub(super) fn new(
+        tunnel: Rc<yiterm::native_ssh::SocksTunnel>,
+        ssh_pid: u32,
+        user_data: Rc<Option<tempfile::TempDir>>,
+        initial_url: String,
+        window: &mut Window,
+        cx: &mut ViewContext<Self>,
+    ) -> Self {
         let address = cx.new(|cx| InputState::new(window, cx).default_value(initial_url.clone()));
-        let user_data = tempfile::Builder::new()
-            .prefix("yiterm-webview-")
-            .tempdir()
-            .ok();
         let (sender, receiver) = async_channel::bounded::<anyhow::Result<WebViewState>>(1);
         let (navigation_sender, navigation_receiver) = async_channel::unbounded();
+        let (popup_sender, popup_receiver) = async_channel::unbounded();
         let status = Some("Starting WebView2…".to_owned());
         let parent = Self::parent_hwnd(window);
-        match (parent, user_data.as_ref()) {
+        match (parent, user_data.as_ref().as_ref()) {
             (Ok(parent), Some(user_data)) => {
                 if let Err(error) = Self::start_webview(
                     parent,
@@ -87,6 +293,9 @@ impl BrowserUi {
                 )));
             }
         }
+        // Retain the proxy/profile until an in-flight native initialization has
+        // delivered (and closed) its controller, even if the page is closed early.
+        let initializing_resources = (tunnel.clone(), user_data.clone());
         let mut this = Self {
             _tunnel: tunnel,
             _ssh_pid: ssh_pid,
@@ -106,14 +315,34 @@ impl BrowserUi {
             });
         this._address_subscription = Some(subscription);
         cx.spawn_in(window, async move |this, cx| {
+            let _initializing_resources = initializing_resources;
             let result = receiver.recv().await.unwrap_or_else(|_| {
                 Err(anyhow::anyhow!("WebView2 initialization was cancelled"))
             });
             let _ = this.update(cx, |this, cx| {
                 match result {
-                    Ok(webview) => {
+                    Ok(mut webview) => {
+                        let handler = NewWindowRequestedEventHandler::create(Box::new(move |_, args| {
+                            if let Some(args) = args {
+                                unsafe { args.SetHandled(true)?; }
+                                let mut uri = PWSTR::null();
+                                unsafe { args.Uri(&mut uri)?; }
+                                let uri = webview2_com::take_pwstr(uri);
+                                if uri == "about:blank" || normalize_url(&uri).is_ok() {
+                                    let _ = popup_sender.try_send(uri);
+                                }
+                            }
+                            Ok(())
+                        }));
+                        let mut token = 0;
+                        match unsafe { webview.webview.add_NewWindowRequested(&handler, &mut token) } {
+                            Ok(()) => webview.new_window_token = Some(token),
+                            Err(error) => tracing::warn!(%error, "Could not handle browser new-window requests"),
+                        }
                         this.webview = Some(webview);
-                        this.visible = false;
+                        if let Some(state) = &this.webview {
+                            let _ = unsafe { state.controller.SetIsVisible(this.visible) };
+                        }
                         this.status = None;
                     }
                     Err(error) => {
@@ -129,10 +358,31 @@ impl BrowserUi {
         cx.spawn_in(window, async move |this, cx| {
             while let Ok(status) = navigation_receiver.recv().await {
                 if this
-                    .update(cx, |this, cx| {
+                    .update_in(cx, |this, window, cx| {
+                        if status.is_none()
+                            && let Some(state) = &this.webview
+                        {
+                            let mut uri = PWSTR::null();
+                            if unsafe { state.webview.Source(&mut uri) }.is_ok() {
+                                let uri = webview2_com::take_pwstr(uri);
+                                this.address
+                                    .update(cx, |input, cx| input.set_value(uri, window, cx));
+                            }
+                        }
                         this.status = status;
                         cx.notify();
                     })
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        })
+        .detach();
+        cx.spawn_in(window, async move |this, cx| {
+            while let Ok(uri) = popup_receiver.recv().await {
+                if this
+                    .update(cx, |_, cx| cx.emit(OpenBrowserTab(uri)))
                     .is_err()
                 {
                     break;
@@ -293,6 +543,7 @@ impl BrowserUi {
             webview,
             navigation_token,
             navigation_completed_token,
+            new_window_token: None,
         })
     }
 
@@ -315,7 +566,11 @@ impl BrowserUi {
             .and_then(|state| Self::navigate_webview(&state.webview, value));
         match result {
             Ok(()) => {
-                if let Ok(url) = normalize_url(value) {
+                if let Ok(url) = if value.eq_ignore_ascii_case("about:blank") {
+                    Ok("about:blank".to_owned())
+                } else {
+                    normalize_url(value)
+                } {
                     self.address
                         .update(cx, |input, cx| input.set_value(url, window, cx));
                 }
@@ -363,9 +618,8 @@ impl BrowserUi {
     }
 }
 
-impl Render for BrowserUi {
+impl Render for BrowserPage {
     fn render(&mut self, _window: &mut Window, cx: &mut ViewContext<Self>) -> impl IntoElement {
-        self.set_visible(true);
         let status = self.status.clone();
         let controller = self.webview.as_ref().map(|state| state.controller.clone());
         div()
@@ -573,12 +827,12 @@ mod tests {
                     ..Default::default()
                 },
                 move |window, cx| {
-                    let parent = BrowserUi::parent_hwnd(window).unwrap();
+                    let parent = BrowserPage::parent_hwnd(window).unwrap();
                     let live = Rc::new(RefCell::new(None));
                     let retained = live.clone();
                     let (sender, receiver) = async_channel::bounded(1);
                     let (navigation_sender, _navigation_receiver) = async_channel::unbounded();
-                    BrowserUi::start_webview(
+                    BrowserPage::start_webview(
                         parent,
                         9,
                         "about:blank",
@@ -703,7 +957,7 @@ mod tests {
         let profile = tempfile::tempdir().unwrap();
         let (sender, receiver) = async_channel::bounded(1);
         let (navigation_sender, navigation_receiver) = async_channel::unbounded();
-        BrowserUi::start_webview(
+        BrowserPage::start_webview(
             HWND_MESSAGE,
             proxy_port,
             "about:blank",
@@ -715,7 +969,7 @@ mod tests {
         let state = pump_until(&receiver).unwrap();
         assert_eq!(pump_until(&navigation_receiver), None);
         for url in ["http://remote-only.invalid:8080/", "http://localhost:8080/"] {
-            BrowserUi::navigate_webview(&state.webview, url).unwrap();
+            BrowserPage::navigate_webview(&state.webview, url).unwrap();
             assert_eq!(
                 pump_until(&navigation_receiver),
                 None,
@@ -741,6 +995,34 @@ mod tests {
             };
             assert_eq!(pump_until(&receiver).unwrap(), "\"ssh-browser-fixture\"");
         }
+        // Browser tabs share one proxy/profile but keep independent native views.
+        let (second_sender, second_receiver) = async_channel::bounded(1);
+        let (second_navigation_sender, second_navigation_receiver) = async_channel::unbounded();
+        BrowserPage::start_webview(
+            HWND_MESSAGE,
+            proxy_port,
+            "http://remote-only.invalid:8080/",
+            profile.path(),
+            second_sender,
+            second_navigation_sender,
+        )
+        .unwrap();
+        let second = pump_until(&second_receiver).unwrap();
+        assert_eq!(pump_until(&second_navigation_receiver), None);
+        let mut source = PWSTR::null();
+        unsafe {
+            state.webview.Source(&mut source).unwrap();
+        }
+        assert_eq!(webview2_com::take_pwstr(source), "http://localhost:8080/");
+        drop(second);
+        BrowserPage::navigate_webview(&state.webview, "http://localhost:8080/after-tab-close")
+            .unwrap();
+        assert_eq!(
+            pump_until(&navigation_receiver),
+            None,
+            "closing one tab must preserve its sibling"
+        );
+
         let requests = fixture.state.forward_requests.lock().unwrap().clone();
         assert!(
             requests
