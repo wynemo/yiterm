@@ -1454,7 +1454,11 @@ pub(super) fn run(app: TerminalApp) -> Result<()> {
     eframe::run_native(
         "yiterm",
         eframe::NativeOptions {
-            viewport: egui::ViewportBuilder::default().with_inner_size([960.0, 640.0]),
+            viewport: egui::ViewportBuilder::default()
+                .with_inner_size([960.0, 640.0])
+                .with_icon(eframe::icon_data::from_png_bytes(include_bytes!(
+                    "../assets/icons/yiterm.png"
+                ))?),
             // Terminal colors are flat; per-pixel gradient dithering wastes
             // substantial CPU when Mesa renders the window in software.
             dithering: false,

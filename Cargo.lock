@@ -10548,6 +10548,7 @@ dependencies = [
  "directories",
  "eframe",
  "egui-winit",
+ "embed-resource",
  "futures-lite 2.6.1",
  "gpui",
  "gpui-component",

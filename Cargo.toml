@@ -61,3 +61,6 @@ alacritty_terminal = { path = "vendor/alacritty_terminal" }
 eframe = { path = "vendor/eframe" }
 egui-winit = { path = "vendor/egui-winit" }
 glutin = { path = "vendor/glutin" }
+
+[target.'cfg(windows)'.build-dependencies]
+embed-resource = "3.0.12"

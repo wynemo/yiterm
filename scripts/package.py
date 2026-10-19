@@ -4,12 +4,14 @@ import argparse
 import hashlib
 import io
 import os
+import plistlib
 import shutil
 from pathlib import Path
 import struct
 import tarfile
 import json
 import subprocess
+import tempfile
 import zipfile
 from urllib.request import urlopen
 
@@ -87,6 +89,34 @@ def prepare_linux_binary(binary: Path) -> Path:
     return packaged
 
 
+def prepare_macos_bundle(binary: Path, version: str, directory: Path) -> Path:
+    """Build a Finder/Dock application while retaining the standalone CLI."""
+    app = directory / "YiTerm.app"
+    contents = app / "Contents"
+    (contents / "MacOS").mkdir(parents=True)
+    (contents / "Resources").mkdir()
+    shutil.copy2(binary, contents / "MacOS/yiterm")
+    (contents / "MacOS/yiterm").chmod(0o755)
+    shutil.copy2(ROOT / "assets/icons/yiterm.icns", contents / "Resources/yiterm.icns")
+    with (contents / "Info.plist").open("wb") as output:
+        plistlib.dump({
+            "CFBundleName": "YiTerm",
+            "CFBundleDisplayName": "YiTerm",
+            "CFBundleIdentifier": "io.github.wynemo.yiterm",
+            "CFBundleExecutable": "yiterm",
+            "CFBundleIconFile": "yiterm.icns",
+            "CFBundlePackageType": "APPL",
+            "CFBundleShortVersionString": version,
+            "CFBundleVersion": version,
+            "NSHighResolutionCapable": True,
+            "LSMinimumSystemVersion": "11.0",
+        }, output)
+    # Ad-hoc signing covers both the executable and bundle resources.
+    subprocess.run(["codesign", "--force", "--deep", "--sign", "-", str(app)], check=True)
+    subprocess.run(["codesign", "--verify", "--deep", "--strict", str(app)], check=True)
+    return app
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--target", required=True, choices=TARGETS)
@@ -139,12 +169,17 @@ def main() -> None:
                 package.writestr(f"{name}/{filename}", content)
     else:
         archive = output / f"{name}.tar.gz"
-        with tarfile.open(archive, "w:gz") as package:
-            for source, destination in files:
-                info = package.gettarinfo(str(source), destination)
-                info.mode = 0o755 if source == binary else 0o644
-                with source.open("rb") as content:
-                    package.addfile(info, content)
+        with tempfile.TemporaryDirectory(prefix="yiterm-package-") as temporary:
+            if args.target == "aarch64-apple-darwin":
+                app = prepare_macos_bundle(binary, version, Path(temporary))
+                files.extend((source, f"{name}/YiTerm.app/{source.relative_to(app)}")
+                             for source in sorted(app.rglob("*")) if source.is_file())
+            with tarfile.open(archive, "w:gz") as package:
+                for source, destination in files:
+                    info = package.gettarinfo(str(source), destination)
+                    info.mode = 0o755 if source == binary or destination.endswith("/Contents/MacOS/yiterm") else 0o644
+                    with source.open("rb") as content:
+                        package.addfile(info, content)
     checksum = hashlib.sha256(archive.read_bytes()).hexdigest()
     archive.with_suffix(archive.suffix + ".sha256").write_text(
         f"{checksum}  {archive.name}\n", encoding="utf-8"

@@ -102,6 +102,10 @@ jobs:
         id: package
         run: python scripts/package.py --target ${{ matrix.target }}
 
+      - name: Verify embedded Windows application icon
+        if: runner.os == 'Windows'
+        run: python scripts/verify_windows_icon.py target/${{ matrix.target }}/release/yiterm.exe
+
       - name: Upload build
         uses: actions/upload-artifact@v7
         with:

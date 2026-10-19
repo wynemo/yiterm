@@ -8,6 +8,10 @@ Rust 原生终端，Windows / macOS 使用 GPUI 0.2.2，Linux 保留原有 egui 
 
 ## 运行
 
+### 项目图标
+
+图标以汉字“驿”为主体，使用深靛色圆角底、浅色字形和薄荷绿终端光标。资源位于 `assets/icons/`：`source.png` 为原始设计图，`yiterm.png` 为 1024×1024 透明背景图，`yiterm.ico` 包含 Windows 常用的 16、32、48、64、128、256 像素尺寸，`yiterm.icns` 包含 macOS 的标准及 Retina 尺寸。Windows 构建通过 `build.rs` 将 ICO 嵌入可执行文件的图标资源 ID 1，GPUI 使用同一资源作为窗口和任务栏图标。Linux 将 PNG 内嵌为窗口图标（Wayland 桌面是否显示取决于合成器）。macOS 发布包额外包含 `YiTerm.app`，其 `Info.plist` 引用 ICNS，Finder 和 Dock 使用该图标；打包时进行 ad-hoc 签名并验证，未进行 Apple 公证。解压后可双击应用或将其拖入“应用程序”。保留包根目录的 `yiterm` 供命令行及现有自动更新流程使用；`.app` 内运行时暂不支持自动更新，需要下载新版替换应用。
+
 下载 GitHub Actions 最新成功的 Windows x64 构建（Python 3.9+ 和 GitHub CLI `gh`）：
 
 ```sh
