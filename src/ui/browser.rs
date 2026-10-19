@@ -10,8 +10,8 @@ use webview2_com::{
     NavigationStartingEventHandler,
 };
 use windows::{
-    Win32::Foundation::{BOOL, E_POINTER, HWND, RECT},
-    core::{PCWSTR, PWSTR},
+    Win32::Foundation::{E_POINTER, HWND, RECT},
+    core::{BOOL, PCWSTR, PWSTR},
 };
 
 const TOOLBAR_HEIGHT: f32 = 50.;
@@ -210,7 +210,7 @@ impl BrowserUi {
             normalize_url(value)?
         };
         let wide: Vec<u16> = value.encode_utf16().chain(Some(0)).collect();
-        unsafe { webview.Navigate(&PCWSTR(wide.as_ptr()))? };
+        unsafe { webview.Navigate(PCWSTR(wide.as_ptr()))? };
         Ok(())
     }
 
@@ -248,7 +248,7 @@ impl BrowserUi {
             right: width.max(0),
             bottom: height.max(top),
         };
-        if let Err(error) = unsafe { state.controller.SetBounds(&bounds) } {
+        if let Err(error) = unsafe { state.controller.SetBounds(bounds) } {
             tracing::warn!(%error, "Could not resize WebView2 content");
         }
     }
