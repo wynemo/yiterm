@@ -3,7 +3,7 @@ use anyhow::{Context as _, ensure};
 use gpui::Subscription;
 use gpui_component::input::{Input, InputEvent, InputState};
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
-use std::{path::Path, sync::mpsc};
+use std::path::Path;
 use webview2_com::{
     CoreWebView2EnvironmentOptions, CreateCoreWebView2ControllerCompletedHandler,
     CreateCoreWebView2EnvironmentCompletedHandler, Microsoft::Web::WebView2::Win32::*,
@@ -33,15 +33,15 @@ impl Drop for WebViewState {
     }
 }
 
-pub(super) struct BrowserUi {
+pub(crate) struct BrowserUi {
     _tunnel: yiterm::native_ssh::SocksTunnel,
     _ssh_pid: u32,
     webview: Option<WebViewState>,
+    visible: bool,
     _user_data: Option<tempfile::TempDir>,
     address: gpui::Entity<InputState>,
     status: Option<String>,
     _address_subscription: Option<Subscription>,
-    _bounds_subscription: Subscription,
 }
 
 impl BrowserUi {
@@ -57,38 +57,40 @@ impl BrowserUi {
             .prefix("yiterm-webview-")
             .tempdir()
             .ok();
-        let mut status = None;
-        let webview = match user_data.as_ref() {
-            Some(user_data) => {
-                match Self::create_webview(window, tunnel.port(), &initial_url, user_data.path()) {
-                    Ok(webview) => Some(webview),
-                    Err(error) => {
-                        status = Some(format!(
-                            "Cannot initialize WebView2. Install the Microsoft Edge WebView2 Runtime. {error:#}"
-                        ));
-                        None
-                    }
+        let (sender, receiver) = async_channel::bounded::<anyhow::Result<WebViewState>>(1);
+        let status = Some("Starting WebView2…".to_owned());
+        let parent = Self::parent_hwnd(window);
+        match (parent, user_data.as_ref()) {
+            (Ok(parent), Some(user_data)) => {
+                if let Err(error) = Self::start_webview(
+                    parent,
+                    tunnel.port(),
+                    &initial_url,
+                    user_data.path(),
+                    sender.clone(),
+                ) {
+                    let _ = sender.try_send(Err(error));
                 }
             }
-            None => {
-                status = Some("Cannot create a temporary WebView2 profile directory.".into());
-                None
+            (Err(error), _) => {
+                let _ = sender.try_send(Err(error));
             }
-        };
-        let bounds_subscription = cx.observe_window_bounds(window, |this, window, _cx| {
-            this.resize_webview(window);
-        });
+            (_, None) => {
+                let _ = sender.try_send(Err(anyhow::anyhow!(
+                    "Cannot create a temporary WebView2 profile directory"
+                )));
+            }
+        }
         let mut this = Self {
             _tunnel: tunnel,
             _ssh_pid: ssh_pid,
-            webview,
+            webview: None,
+            visible: false,
             _user_data: user_data,
             address,
             status,
             _address_subscription: None,
-            _bounds_subscription: bounds_subscription,
         };
-        this.resize_webview(window);
         let subscription =
             cx.subscribe_in(&this.address, window, |this, input, event, window, cx| {
                 if matches!(event, InputEvent::PressEnter { .. }) {
@@ -97,22 +99,47 @@ impl BrowserUi {
                 }
             });
         this._address_subscription = Some(subscription);
+        cx.spawn_in(window, async move |this, cx| {
+            let result = receiver.recv().await.unwrap_or_else(|_| {
+                Err(anyhow::anyhow!("WebView2 initialization was cancelled"))
+            });
+            let _ = this.update(cx, |this, cx| {
+                match result {
+                    Ok(webview) => {
+                        this.webview = Some(webview);
+                        this.visible = false;
+                        this.status = None;
+                    }
+                    Err(error) => {
+                        this.status = Some(format!(
+                            "Cannot initialize WebView2. Install the Microsoft Edge WebView2 Runtime. {error:#}"
+                        ));
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
         this
     }
 
-    fn create_webview(
-        window: &Window,
-        proxy_port: u16,
-        initial_url: &str,
-        user_data_path: &Path,
-    ) -> anyhow::Result<WebViewState> {
-        let parent = match HasWindowHandle::window_handle(window)
+    fn parent_hwnd(window: &Window) -> anyhow::Result<HWND> {
+        match HasWindowHandle::window_handle(window)
             .context("getting the browser window handle")?
             .as_raw()
         {
-            RawWindowHandle::Win32(handle) => HWND(handle.hwnd.get() as *mut _),
+            RawWindowHandle::Win32(handle) => Ok(HWND(handle.hwnd.get() as *mut _)),
             handle => anyhow::bail!("Expected a Win32 browser window, got {handle:?}"),
-        };
+        }
+    }
+
+    fn start_webview(
+        parent: HWND,
+        proxy_port: u16,
+        initial_url: &str,
+        user_data_path: &Path,
+        sender: async_channel::Sender<anyhow::Result<WebViewState>>,
+    ) -> anyhow::Result<()> {
         let folder: Vec<u16> = user_data_path
             .to_string_lossy()
             .encode_utf16()
@@ -124,54 +151,62 @@ impl BrowserUi {
         );
         unsafe { options.set_additional_browser_arguments(arguments) };
         let options: ICoreWebView2EnvironmentOptions = options.into();
-
-        let environment = {
-            let (sender, receiver) = mpsc::channel();
-            CreateCoreWebView2EnvironmentCompletedHandler::wait_for_async_operation(
-                Box::new(move |handler| unsafe {
-                    CreateCoreWebView2EnvironmentWithOptions(
-                        PCWSTR::null(),
-                        PCWSTR(folder.as_ptr()),
-                        &options,
-                        &handler,
-                    )
-                    .map_err(webview2_com::Error::WindowsError)
-                }),
-                Box::new(move |result, environment| {
-                    result?;
-                    sender
-                        .send(environment.ok_or_else(|| windows::core::Error::from(E_POINTER)))
-                        .expect("WebView2 environment receiver remains alive");
-                    Ok(())
-                }),
-            )?;
-            receiver
-                .recv()
-                .context("waiting for WebView2 environment")??
-        };
-
-        let controller = {
-            let (sender, receiver) = mpsc::channel();
-            CreateCoreWebView2ControllerCompletedHandler::wait_for_async_operation(
-                Box::new(move |handler| unsafe {
-                    environment
-                        .CreateCoreWebView2Controller(parent, &handler)
-                        .map_err(webview2_com::Error::WindowsError)
-                }),
-                Box::new(move |result, controller| {
-                    result?;
-                    sender
-                        .send(controller.ok_or_else(|| windows::core::Error::from(E_POINTER)))
-                        .expect("WebView2 controller receiver remains alive");
-                    Ok(())
-                }),
-            )?;
-            receiver
-                .recv()
-                .context("waiting for WebView2 controller")??
-        };
+        let callback_sender = sender.clone();
+        let handler = CreateCoreWebView2EnvironmentCompletedHandler::create(Box::new(
+            move |result, environment| {
+                let environment = match result
+                    .and_then(|()| environment.ok_or_else(|| windows::core::Error::from(E_POINTER)))
+                {
+                    Ok(environment) => environment,
+                    Err(error) => {
+                        let _ = callback_sender.try_send(Err(error.into()));
+                        return Ok(());
+                    }
+                };
+                let controller_sender = callback_sender.clone();
+                let initial_url = initial_url.to_owned();
+                let controller_handler = CreateCoreWebView2ControllerCompletedHandler::create(
+                    Box::new(move |result, controller| {
+                        let controller = match result.and_then(|()| {
+                            controller.ok_or_else(|| windows::core::Error::from(E_POINTER))
+                        }) {
+                            Ok(controller) => controller,
+                            Err(error) => {
+                                let _ = controller_sender.try_send(Err(error.into()));
+                                return Ok(());
+                            }
+                        };
+                        let state = Self::finish_webview(controller, &initial_url);
+                        let _ = controller_sender.try_send(state);
+                        Ok(())
+                    }),
+                );
+                if let Err(error) =
+                    unsafe { environment.CreateCoreWebView2Controller(parent, &controller_handler) }
+                {
+                    let _ = callback_sender.try_send(Err(error.into()));
+                }
+                Ok(())
+            },
+        ));
         unsafe {
-            controller.SetIsVisible(true)?;
+            CreateCoreWebView2EnvironmentWithOptions(
+                PCWSTR::null(),
+                PCWSTR(folder.as_ptr()),
+                &options,
+                &handler,
+            )?;
+        }
+        Ok(())
+    }
+
+    fn finish_webview(
+        controller: ICoreWebView2Controller,
+        initial_url: &str,
+    ) -> anyhow::Result<WebViewState> {
+        unsafe {
+            controller.SetBounds(RECT::default())?;
+            controller.SetIsVisible(false)?;
         }
         let webview = unsafe { controller.CoreWebView2()? };
         let navigation = NavigationStartingEventHandler::create(Box::new(|_, args| {
@@ -233,23 +268,15 @@ impl BrowserUi {
         cx.notify();
     }
 
-    fn resize_webview(&mut self, window: &Window) {
-        let Some(state) = &self.webview else {
+    pub(super) fn set_visible(&mut self, visible: bool) {
+        if self.visible == visible {
             return;
-        };
-        let bounds = window.bounds();
-        let scale = window.scale_factor();
-        let width = (f32::from(bounds.size.width) * scale).round() as i32;
-        let height = (f32::from(bounds.size.height) * scale).round() as i32;
-        let top = (TOOLBAR_HEIGHT * scale).round() as i32;
-        let bounds = RECT {
-            left: 0,
-            top,
-            right: width.max(0),
-            bottom: height.max(top),
-        };
-        if let Err(error) = unsafe { state.controller.SetBounds(bounds) } {
-            tracing::warn!(%error, "Could not resize WebView2 content");
+        }
+        self.visible = visible;
+        if let Some(state) = &self.webview
+            && let Err(error) = unsafe { state.controller.SetIsVisible(visible) }
+        {
+            tracing::debug!(%error, "Could not change WebView2 visibility");
         }
     }
 
@@ -280,7 +307,9 @@ impl BrowserUi {
 
 impl Render for BrowserUi {
     fn render(&mut self, _window: &mut Window, cx: &mut ViewContext<Self>) -> impl IntoElement {
+        self.set_visible(true);
         let status = self.status.clone();
+        let controller = self.webview.as_ref().map(|state| state.controller.clone());
         div()
             .size_full()
             .flex()
@@ -329,14 +358,52 @@ impl Render for BrowserUi {
                             })),
                     ),
             )
-            .child(div().flex_1().min_h_0().when_some(status, |this, status| {
-                this.flex()
-                    .items_center()
-                    .justify_center()
-                    .p(px(24.))
-                    .text_color(rgb(0x9B1C1C))
-                    .child(status)
-            }))
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .flex_1()
+                    .min_h_0()
+                    .when_some(status, |this, status| {
+                        this.child(
+                            div()
+                                .flex_shrink_0()
+                                .px(px(8.))
+                                .py(px(4.))
+                                .text_color(rgb(0x9B1C1C))
+                                .child(status),
+                        )
+                    })
+                    .child(
+                        canvas(
+                            |_, _, _| (),
+                            move |bounds, _, window, _| {
+                                let Some(controller) = &controller else {
+                                    return;
+                                };
+                                let scale = window.scale_factor();
+                                let left = (f32::from(bounds.origin.x) * scale).round() as i32;
+                                let top = (f32::from(bounds.origin.y) * scale).round() as i32;
+                                let right = (f32::from(bounds.origin.x + bounds.size.width) * scale)
+                                    .round() as i32;
+                                let bottom = (f32::from(bounds.origin.y + bounds.size.height)
+                                    * scale)
+                                    .round() as i32;
+                                let bounds = RECT {
+                                    left,
+                                    top,
+                                    right: right.max(left),
+                                    bottom: bottom.max(top),
+                                };
+                                if let Err(error) = unsafe { controller.SetBounds(bounds) } {
+                                    tracing::warn!(%error, "Could not resize WebView2 content");
+                                }
+                            },
+                        )
+                        .flex_1()
+                        .min_h_0(),
+                    ),
+            )
     }
 }
 

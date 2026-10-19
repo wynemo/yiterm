@@ -547,17 +547,27 @@ impl PaneLayout {
     }
 }
 struct TerminalTab {
+    #[cfg(windows)]
+    id: u64,
     panes: Vec<TerminalSession>,
     layout: PaneLayout,
     active: usize,
+    #[cfg(windows)]
+    browser: Option<gpui::Entity<ui::browser::BrowserUi>>,
 }
 
 impl TerminalTab {
     fn new(session: TerminalSession) -> Self {
+        #[cfg(windows)]
+        static NEXT_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
         Self {
+            #[cfg(windows)]
+            id: NEXT_ID.fetch_add(1, Ordering::Relaxed),
             panes: vec![session],
             layout: PaneLayout::Leaf(0),
             active: 0,
+            #[cfg(windows)]
+            browser: None,
         }
     }
 

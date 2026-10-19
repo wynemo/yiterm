@@ -1,6 +1,6 @@
 //! GPUI window, terminal canvas, input routing, and application controls.
 #[cfg(windows)]
-mod browser;
+pub(crate) mod browser;
 
 use super::*;
 use gpui::{
@@ -447,6 +447,9 @@ impl TerminalUi {
             // while a modal is open.
             return;
         }
+        if !self.focus.is_focused(window) {
+            return;
+        }
         if !self.session().ime_preedit.is_empty() {
             return;
         }
@@ -457,7 +460,7 @@ impl TerminalUi {
         };
         if command && matches!(key, "t" | "w" | "v" | "c") {
             match key {
-                "t" => self.app.new_tab(),
+                "t" => self.new_tab(cx),
                 "w" => self.app.close_tab(self.app.active),
                 "v" => self.session().paste(),
                 "c" => self.session().copy_selection(),
@@ -470,7 +473,7 @@ impl TerminalUi {
         if key == "tab" && m.control && self.app.tabs.len() > 1 {
             let n = self.app.tabs.len();
             let delta = if m.shift { n - 1 } else { 1 };
-            self.app.select((self.app.active + delta) % n);
+            self.select_tab((self.app.active + delta) % n, cx);
             cx.stop_propagation();
             cx.notify();
             return;
@@ -606,7 +609,7 @@ impl TerminalUi {
         };
         if let Some(link) = link {
             #[cfg(windows)]
-            self.open_ssh_browser(link, cx);
+            self.open_ssh_browser(link, window, cx);
             #[cfg(not(windows))]
             cx.open_url(&link);
             cx.notify();
@@ -1505,7 +1508,7 @@ impl Render for TerminalUi {
                                 tab.focused().title
                             )))
                             .on_click(cx.listener(move |this, _, _, cx| {
-                                this.app.select(index);
+                                this.select_tab(index, cx);
                                 this.hover = None;
                                 cx.notify();
                             })),
@@ -1531,7 +1534,7 @@ impl Render for TerminalUi {
                     ),
             );
         }
-        tabs = tabs.child(self.button("new-tab", "+", cx, |this, _, _| this.app.new_tab()));
+        tabs = tabs.child(self.button("new-tab", "+", cx, |this, _, cx| this.new_tab(cx)));
         let mut top = div()
             .flex()
             .flex_col()
@@ -1618,6 +1621,31 @@ impl Render for TerminalUi {
                 .size_full(),
             );
 
+        let content = div().flex().flex_1().min_h_0().child(terminal);
+        #[cfg(windows)]
+        let browser = self.app.tabs[self.app.active].browser.clone();
+        #[cfg(windows)]
+        let show_browser = !self.app.settings_open && !self.app.about_open;
+        #[cfg(windows)]
+        if !show_browser && let Some(browser) = &browser {
+            let _ = browser.update(cx, |browser, _| browser.set_visible(false));
+        }
+        #[cfg(windows)]
+        let content = if show_browser && let Some(browser) = browser {
+            content.child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .min_h_0()
+                    .overflow_hidden()
+                    .border_l_1()
+                    .border_color(theme.border())
+                    .child(browser),
+            )
+        } else {
+            content
+        };
+
         let status = self.app.tabs[self.app.active].focused().status.clone();
         let footer = div()
             .flex()
@@ -1655,7 +1683,7 @@ impl Render for TerminalUi {
                     }))
             })
             .child(top)
-            .child(terminal)
+            .child(content)
             .child(footer);
         if let Some(menu) = self.menu {
             let mut items = div()
@@ -1713,9 +1741,9 @@ impl Render for TerminalUi {
                         "open-ssh-browser",
                         "Open SSH Browser",
                         cx,
-                        |this, _, cx| {
+                        |this, _, window, cx| {
                             this.menu = None;
-                            this.open_ssh_browser("about:blank".into(), cx);
+                            this.open_ssh_browser("about:blank".into(), window, cx);
                         },
                     ));
                 }
@@ -1807,13 +1835,43 @@ impl Render for TerminalUi {
 }
 
 impl TerminalUi {
+    fn select_tab(&mut self, index: usize, _cx: &mut ViewContext<Self>) {
+        #[cfg(windows)]
+        if let Some(tab) = self.app.tabs.get(index) {
+            let selected_id = tab.id;
+            for tab in &self.app.tabs {
+                if tab.id != selected_id
+                    && let Some(browser) = &tab.browser
+                {
+                    let _ = browser.update(_cx, |browser, _| browser.set_visible(false));
+                }
+            }
+        }
+        self.app.select(index);
+    }
+
+    fn new_tab(&mut self, _cx: &mut ViewContext<Self>) {
+        #[cfg(windows)]
+        if let Some(tab) = self.app.tabs.get(self.app.active)
+            && let Some(browser) = &tab.browser
+        {
+            let _ = browser.update(_cx, |browser, _| browser.set_visible(false));
+        }
+        self.app.new_tab();
+    }
+
     #[cfg(windows)]
-    fn open_ssh_browser(&mut self, initial_url: String, cx: &mut ViewContext<Self>) {
+    fn open_ssh_browser(
+        &mut self,
+        initial_url: String,
+        window: &mut Window,
+        cx: &mut ViewContext<Self>,
+    ) {
         let pane = self.session();
         let root = pane.child.process_id();
         let group = pane.foreground_group();
-        let this = cx.entity().downgrade();
-        cx.spawn(async move |_, cx| {
+        let tab_id = self.app.tabs[self.app.active].id;
+        cx.spawn_in(window, async move |this, cx| {
             let (sender, receiver) = async_channel::bounded(1);
             let worker = std::thread::Builder::new()
                 .name("yiterm-browser-tunnel".into())
@@ -1859,21 +1917,30 @@ impl TerminalUi {
             };
             match result {
                 Ok((tunnel, pid)) => {
-                    let options = WindowOptions {
-                        window_min_size: Some(size(px(620.), px(420.))),
-                        ..Default::default()
-                    };
-                    if let Err(error) = cx.open_window(options, move |window, app| {
-                        let view = app.new(|cx| {
-                            browser::BrowserUi::new(tunnel, pid, initial_url, window, cx)
-                        });
-                        app.new(|cx| Root::new(view, window, cx))
+                    let browser = match cx.new_window_entity(|window, cx| {
+                        browser::BrowserUi::new(tunnel, pid, initial_url, window, cx)
                     }) {
-                        let message = format!("Cannot open SSH browser: {error:#}");
-                        let _ = this.update(cx, |this, cx| {
-                            this.app.error = Some(message);
-                            cx.notify();
-                        });
+                        Ok(browser) => browser,
+                        Err(error) => {
+                            let message = format!("Cannot open SSH browser: {error:#}");
+                            let _ = this.update(cx, |this, cx| {
+                                this.app.error = Some(message);
+                                cx.notify();
+                            });
+                            return;
+                        }
+                    };
+                    let attached = this.update(cx, |this, cx| {
+                        let Some(tab) = this.app.tabs.iter_mut().find(|tab| tab.id == tab_id)
+                        else {
+                            return false;
+                        };
+                        tab.browser = Some(browser);
+                        cx.notify();
+                        true
+                    });
+                    if matches!(attached, Ok(false)) {
+                        tracing::debug!(tab_id, "SSH browser target tab was closed");
                     }
                 }
                 Err(error) => {
