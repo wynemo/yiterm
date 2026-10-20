@@ -5,6 +5,7 @@
 
 # Windows 验证
 
+- 构建与测试统一使用 Release 模式，不使用 Debug 构建。
 - 不在 macOS 上安装 Windows 工具链、SDK 或交叉编译 Windows。
 - 本机只运行 macOS 构建与测试；Windows 构建和测试交给 Windows CI runner。
 - 汇报时区分本机已验证结果与尚未运行的 Windows CI 验证。
