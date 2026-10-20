@@ -1,7 +1,46 @@
 #![cfg(windows)]
 
 use portable_pty::{CommandBuilder, PtySize};
-use std::{io::Read, path::Path, sync::mpsc, time::Duration};
+use std::{
+    io::{Read, Write},
+    path::Path,
+    sync::{Arc, Mutex, mpsc},
+    time::Duration,
+};
+
+type TerminalWriter = Arc<Mutex<Box<dyn Write + Send>>>;
+
+// portable-pty requests inherited cursor position. Unlike the GUI's VT parser,
+// a raw pipe reader must explicitly answer DSR or ConPTY can block startup.
+// Keep draining after assertions so ClosePseudoConsole cannot block on output.
+fn terminal_io(master: &dyn portable_pty::MasterPty) -> (TerminalWriter, mpsc::Receiver<Vec<u8>>) {
+    let writer = Arc::new(Mutex::new(master.take_writer().unwrap()));
+    let replies = writer.clone();
+    let mut reader = master.try_clone_reader().unwrap();
+    let (tx, rx) = mpsc::channel();
+    std::thread::spawn(move || {
+        let mut tail = Vec::new();
+        let mut buffer = [0; 4096];
+        while let Ok(count) = reader.read(&mut buffer) {
+            if count == 0 {
+                break;
+            }
+            tail.extend_from_slice(&buffer[..count]);
+            for query in tail.windows(4) {
+                if query == b"\x1b[6n" {
+                    let mut writer = replies.lock().unwrap();
+                    let _ = writer.write_all(b"\x1b[1;1R");
+                    let _ = writer.flush();
+                }
+            }
+            if tail.len() > 3 {
+                tail.drain(..tail.len() - 3);
+            }
+            let _ = tx.send(buffer[..count].to_vec());
+        }
+    });
+    (writer, rx)
+}
 
 #[test]
 fn packaged_ssh_returns_output_and_exit_status_to_each_shell() {
@@ -53,31 +92,24 @@ fn check_console(integration: &yiterm::ssh::Integration, shell: &str) {
         ]);
     }
     integration.configure(&mut command).unwrap();
+    let (_writer, receiver) = terminal_io(pair.master.as_ref());
+    eprintln!("Starting {shell} with packaged SSH helper");
     let mut child = pair.slave.spawn_command(command).unwrap();
     drop(pair.slave);
-    let mut reader = pair.master.try_clone_reader().unwrap();
-    let (sender, receiver) = mpsc::channel();
-    std::thread::spawn(move || {
-        let mut text = Vec::new();
-        let mut buffer = [0; 4096];
-        while let Ok(count) = reader.read(&mut buffer) {
-            if count == 0 {
-                break;
-            }
-            text.extend_from_slice(&buffer[..count]);
-            if String::from_utf8_lossy(&text).contains("OpenSSH") {
-                break;
-            }
-        }
-        let _ = sender.send(text);
-    });
-    let output = receiver.recv_timeout(Duration::from_secs(15));
     let result = || {
-        let output = output.expect("SSH output did not return to the original ConPTY");
-        assert!(
-            String::from_utf8_lossy(&output).contains("OpenSSH"),
-            "{shell}"
-        );
+        let deadline = std::time::Instant::now() + Duration::from_secs(15);
+        let mut output = Vec::new();
+        while !String::from_utf8_lossy(&output).contains("OpenSSH") {
+            let bytes = receiver
+                .recv_timeout(deadline.saturating_duration_since(std::time::Instant::now()))
+                .unwrap_or_else(|error| {
+                    panic!(
+                        "{shell}: {error}; terminal: {}",
+                        String::from_utf8_lossy(&output)
+                    )
+                });
+            output.extend(bytes);
+        }
         let deadline = std::time::Instant::now() + Duration::from_secs(10);
         loop {
             if let Some(status) = child.try_wait().unwrap() {
@@ -104,7 +136,7 @@ mod native_server;
 
 #[test]
 fn password_login_and_image_upload_share_native_windows_session() {
-    use std::{io::Write, sync::atomic::Ordering, time::Instant};
+    use std::{sync::atomic::Ordering, time::Instant};
     let runtime = tokio::runtime::Runtime::new().unwrap();
     let fixture = runtime.block_on(native_server::Fixture::new());
     let config = fixture.directory.path().join("config");
@@ -132,19 +164,10 @@ fn password_login_and_image_upload_share_native_windows_session() {
         ),
     ]);
     integration.configure(&mut command).unwrap();
+    let (writer, rx) = terminal_io(pair.master.as_ref());
+    eprintln!("Starting native SSH password/upload session");
     let mut child = pair.slave.spawn_command(command).unwrap();
     drop(pair.slave);
-    let mut writer = pair.master.take_writer().unwrap();
-    let mut reader = pair.master.try_clone_reader().unwrap();
-    let (tx, rx) = mpsc::channel();
-    std::thread::spawn(move || {
-        let mut buffer = [0; 4096];
-        while let Ok(count) = reader.read(&mut buffer) {
-            if count == 0 || tx.send(buffer[..count].to_vec()).is_err() {
-                break;
-            }
-        }
-    });
     let mut transcript = String::new();
     let result = (|| -> anyhow::Result<()> {
         let mut wait_for = |marker: &str| -> anyhow::Result<()> {
@@ -156,8 +179,8 @@ fn password_login_and_image_upload_share_native_windows_session() {
             Ok(())
         };
         wait_for("password:")?;
-        writer.write_all(b"fixture-password\r")?;
-        writer.flush()?;
+        writer.lock().unwrap().write_all(b"fixture-password\r")?;
+        writer.lock().unwrap().flush()?;
         wait_for("fixture-shell-ready")?;
         let detected = yiterm::ssh::detect(
             child.process_id().unwrap(),
@@ -199,11 +222,11 @@ fn password_login_and_image_upload_share_native_windows_session() {
             anyhow::ensure!(Instant::now() < deadline, "Remote terminal did not resize");
             std::thread::sleep(Duration::from_millis(50));
         }
-        writer.write_all(b"\x03still-connected")?;
-        writer.flush()?;
+        writer.lock().unwrap().write_all(b"\x03still-connected")?;
+        writer.lock().unwrap().flush()?;
         wait_for("still-connected")?;
-        writer.write_all(b"exit\r")?;
-        writer.flush()?;
+        writer.lock().unwrap().write_all(b"exit\r")?;
+        writer.lock().unwrap().flush()?;
         let deadline = Instant::now() + Duration::from_secs(10);
         loop {
             if let Some(status) = child.try_wait()? {

@@ -71,10 +71,21 @@ jobs:
         run: |
           cargo test --locked --release --target ${{ matrix.target }} --lib settings::
 
-      - name: Test SSH entry points and session routing
+      - name: Test SSH parsing and authentication
+        timeout-minutes: 5
         run: |
           cargo test --locked --release --target ${{ matrix.target }} --lib ssh::
-          cargo test --locked --release --target ${{ matrix.target }} --test ssh_windows --test ssh_sessions --test native_ssh
+          cargo test --locked --release --target ${{ matrix.target }} --test native_ssh
+
+      - name: Test Unix SSH session routing
+        if: runner.os == 'macOS'
+        timeout-minutes: 3
+        run: cargo test --locked --release --target ${{ matrix.target }} --test ssh_sessions -- --nocapture
+
+      - name: Test Windows SSH console entry points and uploads
+        if: runner.os == 'Windows'
+        timeout-minutes: 5
+        run: cargo test --locked --release --target ${{ matrix.target }} --test ssh_windows -- --nocapture --test-threads=1
 
       - name: Test SOCKS forwarding over authenticated SSH
         run: cargo test --locked --release --target ${{ matrix.target }} --test socks --test vnc

@@ -2,6 +2,7 @@
 use portable_pty::{MasterPty, PtySize};
 use std::{
     io::{Read, Write},
+    sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
 use yiterm::ssh;
@@ -10,7 +11,7 @@ struct Session {
     child: Box<dyn portable_pty::Child + Send + Sync>,
     master: Box<dyn MasterPty + Send>,
     writer: Box<dyn Write + Send>,
-    reader: Option<Box<dyn Read + Send>>,
+    transcript: Arc<Mutex<Vec<u8>>>,
     // Keep bootstrap scripts/sockets alive until the PTY is closed.
     _integration: ssh::Integration,
 }
@@ -29,14 +30,46 @@ impl Session {
         let command = integration.shell(shell).unwrap();
         let child = pair.slave.spawn_command(command).unwrap();
         drop(pair.slave);
-        Self {
+        let transcript = Arc::new(Mutex::new(Vec::new()));
+        let captured = transcript.clone();
+        let mut reader = pair.master.try_clone_reader().unwrap();
+        std::thread::spawn(move || {
+            let mut buffer = [0; 4096];
+            while let Ok(count) = reader.read(&mut buffer) {
+                if count == 0 {
+                    break;
+                }
+                captured.lock().unwrap().extend_from_slice(&buffer[..count]);
+            }
+        });
+        let mut session = Self {
             child,
             writer: pair.master.take_writer().unwrap(),
-            reader: Some(pair.master.try_clone_reader().unwrap()),
+            transcript,
             master: pair.master,
             _integration: integration,
+        };
+        // Drain PTY output throughout the test and wait until shell startup has
+        // completed before sending interactive CR-terminated commands.
+        session.send("printf 'yiterm-%s\\n' ready\n");
+        session.wait_output("yiterm-ready\r\n");
+        session
+    }
+    fn output(&self) -> String {
+        String::from_utf8_lossy(&self.transcript.lock().unwrap()).into_owned()
+    }
+    fn wait_output(&self, marker: &str) {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !self.output().contains(marker) {
+            assert!(
+                Instant::now() < deadline,
+                "Missing {marker:?}; terminal: {}",
+                self.output()
+            );
+            std::thread::sleep(Duration::from_millis(30));
         }
     }
+
     fn send(&mut self, command: &str) {
         self.writer.write_all(command.as_bytes()).unwrap();
         self.writer.flush().unwrap();
@@ -72,9 +105,10 @@ impl Session {
                     );
                 }
                 panic!(
-                    "Foreground SSH was not detected (group {:?}, error {:?})",
+                    "Foreground SSH was not detected (group {:?}, error {:?}); terminal: {}",
                     self.master.process_group_leader(),
-                    result.err()
+                    result.err(),
+                    self.output()
                 );
             }
             std::thread::sleep(Duration::from_millis(30));
@@ -141,27 +175,11 @@ fn shell_bootstrap_preserves_typed_ssh_and_enables_multiplexing() {
     }
     for shell in shells {
         let mut session = Session::new(shell);
-        let mut reader = session.reader.take().unwrap();
-        let (tx, rx) = std::sync::mpsc::channel();
-        std::thread::spawn(move || {
-            let mut output = Vec::new();
-            let mut buffer = [0; 4096];
-            while let Ok(n) = reader.read(&mut buffer) {
-                if n == 0 {
-                    break;
-                }
-                output.extend_from_slice(&buffer[..n]);
-                if String::from_utf8_lossy(&output).contains("\nyiterm-done-marker\r\n") {
-                    break;
-                }
-            }
-            let _ = tx.send(output);
-        });
-        session.send("ssh -G -F /dev/null alice@yiterm-test.invalid; echo yiterm-done-marker\r");
-        let output = rx
-            .recv_timeout(Duration::from_secs(10))
-            .expect("SSH config query timed out");
-        let output = String::from_utf8_lossy(&output);
+        session.send(
+            "ssh -G -F /dev/null alice@yiterm-test.invalid; printf 'yiterm-done-%s\\n' marker\r",
+        );
+        session.wait_output("yiterm-done-marker\r\n");
+        let output = session.output();
         assert!(
             output.contains("controlmaster auto"),
             "{shell}: SSH did not get the multiplexing default"
@@ -199,7 +217,8 @@ fn jump_transport_child_does_not_replace_interactive_destination() {
         }
         assert!(
             Instant::now() < deadline,
-            "SSH proxy child did not start: {text}"
+            "SSH proxy child did not start: {text}; terminal: {}",
+            session.output()
         );
         std::thread::sleep(Duration::from_millis(30));
     }
