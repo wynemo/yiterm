@@ -46,7 +46,7 @@ def download_conpty() -> dict[str, bytes]:
         return conpty_files(response.read())
 
 
-def verify_binary(data: bytes, target: str) -> None:
+def verify_binary(data: bytes, target: str, subsystem=None) -> None:
     if target == "x86_64-pc-windows-msvc":
         if len(data) < 64 or data[:2] != b"MZ":
             raise ValueError("Expected a Windows PE executable")
@@ -55,6 +55,9 @@ def verify_binary(data: bytes, target: str) -> None:
             raise ValueError("Invalid Windows PE header")
         if struct.unpack_from("<H", data, offset + 4)[0] != 0x8664:
             raise ValueError("Expected a Windows x64 executable")
+        if subsystem is not None:
+            if offset + 94 > len(data) or struct.unpack_from("<H", data, offset + 92)[0] != subsystem:
+                raise ValueError(f"Expected Windows subsystem {subsystem}")
     elif target == "x86_64-unknown-linux-gnu":
         if len(data) < 64 or data[:7] != b"\x7fELF\x02\x01\x01":
             raise ValueError("Expected a little-endian ELF64 executable")
@@ -159,6 +162,9 @@ def main() -> None:
         # portable-pty loads an app-local conpty.dll and its OpenConsole.exe.
         # The system ConPTY can swallow native console mouse-mode changes;
         # ship the same runtime family used by Windows Terminal instead.
+        helper = binary.parent / "ssh.exe"
+        verify_binary(helper.read_bytes(), args.target, subsystem=3)
+        files.append((helper, f"{name}/bin/ssh.exe"))
         runtime = download_conpty()
         files.append((ROOT / "licenses/conpty-LICENSE", f"{name}/licenses/conpty-LICENSE"))
         archive = output / f"{name}.zip"

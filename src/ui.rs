@@ -2006,6 +2006,7 @@ impl TerminalUi {
         let pane = self.session();
         let root = pane.child.process_id();
         let group = pane.foreground_group();
+        let ssh_context = pane.integration.detection_context();
         let tab_id = self.app.tabs[self.app.active].id;
         cx.spawn_in(window, async move |this, cx| {
             let (sender, receiver) = async_channel::bounded(1);
@@ -2015,7 +2016,7 @@ impl TerminalUi {
                     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                         (|| -> anyhow::Result<(yiterm::native_ssh::SocksTunnel, u32)> {
                             let root = root.context("Focused pane has no live terminal process")?;
-                            let detection = ssh::detect(root, group)?
+                            let detection = ssh::detect(root, group, &ssh_context)?
                                 .context("No SSH process is running in the focused pane")?;
                             let pipe = detection.upload_pipe.context(
                                 "The active SSH process is not YiTerm's built-in Windows session; system OpenSSH cannot share its authenticated connection",

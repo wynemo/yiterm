@@ -17,7 +17,7 @@ import tempfile
 from urllib.parse import urlencode
 import zipfile
 
-FILES = ("yiterm.exe", "conpty.dll", "OpenConsole.exe")
+FILES = ("yiterm.exe", "bin/ssh.exe", "conpty.dll", "OpenConsole.exe")
 
 
 class GitHub:
@@ -78,7 +78,7 @@ def unpack(data):
         result = {}
         for filename in FILES:
             matches = [n for n in package.namelist()
-                       if PurePosixPath(n).name == filename and not n.endswith("/")]
+                       if PurePosixPath(n).as_posix().endswith("/" + filename) and not n.endswith("/")]
             if len(matches) != 1:
                 raise ValueError(f"压缩包中未找到唯一的 {filename}")
             result[filename] = package.read(matches[0])
@@ -109,9 +109,11 @@ def main():
     # Validate all files before replacing existing binaries.
     with tempfile.TemporaryDirectory(prefix=".yiterm-download-", dir=args.output) as staging:
         for name, content in files.items():
+            Path(staging, name).parent.mkdir(parents=True, exist_ok=True)
             Path(staging, name).write_bytes(content)
         for name in files:
             destination = args.output / name
+            destination.parent.mkdir(parents=True, exist_ok=True)
             os.replace(Path(staging, name), destination)
             print(f"已保存 {destination.resolve()}")
 

@@ -17,6 +17,7 @@ pub struct Remote {
 
 pub struct Integration {
     directory: tempfile::TempDir,
+    bin: PathBuf,
     real_ssh: Option<PathBuf>,
     pub real_scp: PathBuf,
 }
@@ -29,50 +30,51 @@ impl Integration {
             .tempdir_in("/tmp")?;
         #[cfg(not(unix))]
         let directory = tempfile::Builder::new().prefix("yiterm-").tempdir()?;
-        let real_ssh = std::env::var_os("YITERM_REAL_SSH")
-            .map(PathBuf::from)
-            .filter(|path| path.is_file())
-            .or_else(|| find_program("ssh"));
-        let real_scp = find_program("scp").unwrap_or_else(|| PathBuf::from("scp"));
+        #[cfg(windows)]
+        let bin = windows_helper(executable)?
+            .parent()
+            .context("SSH helper has no parent directory")?
+            .to_path_buf();
+        #[cfg(not(windows))]
         let bin = directory.path().join("bin");
-        std::fs::create_dir(&bin)?;
-        if real_ssh.is_some() {
-            let shim = bin.join(if cfg!(windows) { "ssh.exe" } else { "ssh" });
-            #[cfg(unix)]
-            std::os::unix::fs::symlink(executable, shim)?;
-            #[cfg(windows)]
-            {
-                // The GUI executable must stay windowless, but its SSH shim
-                // must inherit ConPTY and make PowerShell wait for its exit.
-                // Write a private copy: changing a hard link would also change
-                // the original application's subsystem.
-                let mut image = std::fs::read(executable)?;
-                console_shim_image(&mut image)?;
-                std::fs::write(&shim, image)?;
+        let real_ssh = std::env::var_os("YITERM_REAL_SSH")
+            .and_then(|path| PathBuf::from(path).canonicalize().ok())
+            .filter(|path| {
+                !same_file(
+                    path,
+                    &bin.join(if cfg!(windows) { "ssh.exe" } else { "ssh" }),
+                )
+            })
+            .or_else(|| find_program("ssh", Some(&bin)));
+        let real_scp = find_program("scp", None).unwrap_or_else(|| PathBuf::from("scp"));
+        #[cfg(not(windows))]
+        {
+            std::fs::create_dir(&bin)?;
+            if real_ssh.is_some() {
+                let shim = bin.join("ssh");
+                #[cfg(unix)]
+                std::os::unix::fs::symlink(executable, shim)?;
+                #[cfg(not(unix))]
+                std::fs::copy(executable, &shim)?;
             }
-            #[cfg(all(not(unix), not(windows)))]
-            std::fs::copy(executable, &shim)?;
         }
         Ok(Self {
             directory,
+            bin,
             real_ssh,
             real_scp,
         })
     }
     pub fn direct(&self, host: &str) -> Result<portable_pty::CommandBuilder> {
         ensure!(self.real_ssh.is_some(), "OpenSSH is not installed");
-        let executable =
-            self.directory
-                .path()
-                .join("bin")
-                .join(if cfg!(windows) { "ssh.exe" } else { "ssh" });
+        let executable = self.bin.join(if cfg!(windows) { "ssh.exe" } else { "ssh" });
         let mut command = portable_pty::CommandBuilder::new(executable);
         command.args(["-tt", "--", host]);
         self.configure(&mut command)?;
         Ok(command)
     }
     pub fn configure(&self, command: &mut portable_pty::CommandBuilder) -> Result<()> {
-        let bin = self.directory.path().join("bin");
+        let bin = self.bin.clone();
         let mut paths = vec![bin];
         paths.extend(std::env::split_paths(
             &std::env::var_os("PATH").unwrap_or_default(),
@@ -103,12 +105,7 @@ impl Integration {
             .to_str()
             .context("Shell path is not valid Unicode")?;
         let mut command = portable_pty::CommandBuilder::new(shell);
-        let bin = self
-            .directory
-            .path()
-            .join("bin")
-            .to_string_lossy()
-            .into_owned();
+        let bin = self.bin.to_string_lossy().into_owned();
         let quoted = crate::paste::quote_posix(&bin);
         let home = std::env::var_os("HOME")
             .or_else(|| {
@@ -184,41 +181,71 @@ impl Integration {
     }
 }
 
-// PE32 and PE32+ both store Subsystem at optional-header offset 68.
-// https://learn.microsoft.com/en-us/windows/win32/debug/pe-format
-#[cfg(any(windows, test))]
-fn console_shim_image(image: &mut [u8]) -> Result<()> {
-    ensure!(image.get(..2) == Some(b"MZ"), "Invalid SSH shim DOS header");
-    let offset = image
-        .get(0x3c..0x40)
-        .context("Missing SSH shim PE offset")?;
-    let pe = u32::from_le_bytes(offset.try_into()?) as usize;
-    let header_end = pe.checked_add(24).context("Invalid SSH shim PE offset")?;
-    let header = image
-        .get(pe..header_end)
-        .context("Missing SSH shim PE header")?;
-    ensure!(&header[..4] == b"PE\0\0", "Invalid SSH shim PE signature");
-    let size = u16::from_le_bytes(header[20..22].try_into()?) as usize;
-    let end = header_end
-        .checked_add(size)
-        .context("Invalid SSH shim header size")?;
-    let optional = image
-        .get_mut(header_end..end)
-        .context("Missing SSH shim optional header")?;
-    ensure!(
-        optional.len() >= 70,
-        "SSH shim optional header is too short"
-    );
-    let magic = u16::from_le_bytes(optional[..2].try_into()?);
-    ensure!(
-        matches!(magic, 0x10b | 0x20b),
-        "Unsupported SSH shim PE format"
-    );
-    optional[68..70].copy_from_slice(&3u16.to_le_bytes());
-    Ok(())
+/// Resolve the shipped helper; Cargo builds place both binaries side by side.
+#[cfg(windows)]
+fn windows_helper(executable: &Path) -> Result<PathBuf> {
+    let parent = executable
+        .parent()
+        .context("Application has no parent directory")?;
+    let packaged = parent.join("bin/ssh.exe");
+    if packaged.is_file() {
+        return Ok(packaged);
+    }
+    // Only use the sibling helper in this build's actual Cargo output directory
+    // (including custom target directories), never in an installed release.
+    let cargo_profile = Path::new(env!("OUT_DIR")).ancestors().nth(3);
+    if let Some(profile) = cargo_profile
+        && (same_file(parent, profile) || same_file(parent, &profile.join("deps")))
+    {
+        let cargo = profile.join("ssh.exe");
+        if cargo.is_file() {
+            return Ok(cargo);
+        }
+    }
+    bail!(
+        "Missing SSH helper: extract the complete Windows release ZIP alongside yiterm.exe (bin/ssh.exe); for source builds run cargo build --locked --release --bins"
+    )
 }
 
-fn find_program(name: &str) -> Option<PathBuf> {
+/// Snapshot used by background workers without retaining the pane itself.
+#[derive(Clone)]
+pub struct DetectionContext {
+    directory: PathBuf,
+    #[cfg(windows)]
+    executable: PathBuf,
+}
+
+impl Integration {
+    pub fn detection_context(&self) -> DetectionContext {
+        DetectionContext {
+            directory: self.directory.path().to_path_buf(),
+            #[cfg(windows)]
+            executable: self.bin.join("ssh.exe"),
+        }
+    }
+}
+
+impl DetectionContext {
+    fn is_wrapper(&self, executable: Option<&Path>) -> bool {
+        #[cfg(windows)]
+        {
+            executable.is_some_and(|path| same_file(path, &self.executable))
+        }
+        #[cfg(not(windows))]
+        {
+            shim_directory(executable).is_some()
+        }
+    }
+}
+
+fn same_file(left: &Path, right: &Path) -> bool {
+    left.canonicalize()
+        .ok()
+        .zip(right.canonicalize().ok())
+        .is_some_and(|(left, right)| left == right)
+}
+
+fn find_program(name: &str, excluded_directory: Option<&Path>) -> Option<PathBuf> {
     let name = if cfg!(windows) {
         format!("{name}.exe")
     } else {
@@ -226,10 +253,13 @@ fn find_program(name: &str) -> Option<PathBuf> {
     };
     std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default())
         .map(|dir| dir.join(&name))
-        .find(|path| path.is_file())
+        .filter(|path| path.is_file())
+        .filter(|path| excluded_directory.is_none_or(|dir| !same_file(path, &dir.join(&name))))
+        .find_map(|path| path.canonicalize().ok())
 }
 
 /// Called before GUI startup when invoked as the session's `ssh` shim.
+#[cfg(unix)]
 pub fn is_wrapper() -> bool {
     std::env::args_os()
         .next()
@@ -469,19 +499,27 @@ fn is_descendant(system: &System, mut pid: Pid, root: Pid) -> bool {
     false
 }
 
-pub fn detect(root: u32, group: Option<i32>) -> Result<Option<Detection>> {
+pub fn detect(
+    root: u32,
+    group: Option<i32>,
+    context: &DetectionContext,
+) -> Result<Option<Detection>> {
     // exec/exit can briefly expose an SSH process with incomplete argv. Retry
     // before reporting an error; never fall back to a local path on an error.
     for _ in 0..3 {
-        match detect_once(root, group) {
+        match detect_once(root, group, context) {
             Ok(found) => return Ok(found),
             Err(_) => std::thread::sleep(std::time::Duration::from_millis(20)),
         }
     }
-    detect_once(root, group)
+    detect_once(root, group, context)
 }
 
-fn detect_once(root: u32, group: Option<i32>) -> Result<Option<Detection>> {
+fn detect_once(
+    root: u32,
+    group: Option<i32>,
+    context: &DetectionContext,
+) -> Result<Option<Detection>> {
     #[cfg(unix)]
     ensure!(
         group.is_some(),
@@ -537,7 +575,7 @@ fn detect_once(root: u32, group: Option<i32>) -> Result<Option<Detection>> {
         };
         // Explicit system-SSH invocations still have a waiting shim parent.
         // Native shims own the connection themselves and must be selected.
-        if shim_directory(process.exe()).is_some()
+        if context.is_wrapper(process.exe())
             && (!cfg!(windows)
                 || crate::native_ssh::config::system_requested(
                     &process.cmd().iter().skip(1).cloned().collect::<Vec<_>>(),
@@ -576,8 +614,9 @@ fn detect_once(root: u32, group: Option<i32>) -> Result<Option<Detection>> {
         found.push(Detection {
             remote,
             upload_pipe: if cfg!(windows) {
-                shim_directory(process.exe())
-                    .map(|directory| crate::native_ssh::pipe_name(directory, pid.as_u32()))
+                context
+                    .is_wrapper(process.exe())
+                    .then(|| crate::native_ssh::pipe_name(&context.directory, pid.as_u32()))
                     .transpose()?
             } else {
                 None
@@ -596,6 +635,7 @@ fn detect_once(root: u32, group: Option<i32>) -> Result<Option<Detection>> {
     Ok(found.pop())
 }
 
+#[cfg(not(windows))]
 fn shim_directory(executable: Option<&Path>) -> Option<&Path> {
     let bin = executable?.parent()?;
     let directory = bin.parent()?;
@@ -627,29 +667,36 @@ pub fn target_is_alive(target: TargetIdentity, group: Option<i32>) -> bool {
 mod tests {
     use super::*;
 
+    #[cfg(windows)]
     #[test]
-    fn ssh_shim_uses_console_subsystem_for_both_pe_formats() {
-        for magic in [0x10bu16, 0x20b] {
-            let mut image = vec![0u8; 512];
-            image[..2].copy_from_slice(b"MZ");
-            image[0x3c..0x40].copy_from_slice(&128u32.to_le_bytes());
-            image[128..132].copy_from_slice(b"PE\0\0");
-            image[148..150].copy_from_slice(&240u16.to_le_bytes());
-            image[152..154].copy_from_slice(&magic.to_le_bytes());
-            image[220..222].copy_from_slice(&2u16.to_le_bytes());
-            let original = image.clone();
-            console_shim_image(&mut image).unwrap();
-            assert_eq!(&image[220..222], &3u16.to_le_bytes());
-            image[220..222].copy_from_slice(&2u16.to_le_bytes());
-            assert_eq!(image, original);
-            for length in [0, 63, 131, 151, 221, 391] {
-                assert!(console_shim_image(&mut original[..length].to_vec()).is_err());
-            }
-        }
-        let mut invalid = vec![0u8; 64];
-        invalid[..2].copy_from_slice(b"MZ");
-        invalid[0x3c..0x40].copy_from_slice(&u32::MAX.to_le_bytes());
-        assert!(console_shim_image(&mut invalid).is_err());
+    fn panes_share_packaged_helper_without_writing_executables() {
+        let root = tempfile::tempdir().unwrap();
+        let app = root.path().join("release with spaces");
+        std::fs::create_dir_all(app.join("bin")).unwrap();
+        let executable = app.join("yiterm.exe");
+        let helper = app.join("bin/ssh.exe");
+        std::fs::write(&executable, b"GUI image").unwrap();
+        std::fs::write(&helper, b"console image").unwrap();
+        let first = Integration::new(&executable).unwrap();
+        let second = Integration::new(&executable).unwrap();
+        assert_eq!(first.bin, second.bin);
+        assert_ne!(first.directory.path(), second.directory.path());
+        assert_eq!(
+            std::fs::read_dir(first.directory.path()).unwrap().count(),
+            0
+        );
+        assert_eq!(
+            std::fs::read_dir(second.directory.path()).unwrap().count(),
+            0
+        );
+        assert!(first.detection_context().is_wrapper(Some(&helper)));
+        assert!(!first.detection_context().is_wrapper(Some(&executable)));
+        assert_eq!(std::fs::read(&helper).unwrap(), b"console image");
+        assert_eq!(std::fs::read(&executable).unwrap(), b"GUI image");
+        std::fs::remove_file(&helper).unwrap();
+        // An unrelated sibling ssh.exe must not hide an incomplete release.
+        std::fs::write(app.join("ssh.exe"), b"unrelated").unwrap();
+        assert!(Integration::new(&executable).is_err());
     }
 
     fn args(values: &[&str]) -> Vec<String> {

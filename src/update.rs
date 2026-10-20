@@ -337,7 +337,7 @@ fn payload_files(root: &Path) -> Result<Vec<PathBuf>> {
 
 fn validate_payload(root: &Path, files: &[PathBuf]) -> Result<()> {
     let required: &[&str] = if cfg!(windows) {
-        &["yiterm.exe", "conpty.dll", "OpenConsole.exe"]
+        &["yiterm.exe", "bin/ssh.exe", "conpty.dll", "OpenConsole.exe"]
     } else {
         &["yiterm"]
     };
@@ -597,6 +597,19 @@ impl Drop for Parent {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_payload_requires_the_dedicated_ssh_helper() {
+        let root = tempfile::tempdir().unwrap();
+        for name in ["yiterm.exe", "conpty.dll", "OpenConsole.exe"] {
+            fs::write(root.path().join(name), b"image").unwrap();
+        }
+        assert!(validate_payload(root.path(), &payload_files(root.path()).unwrap()).is_err());
+        fs::create_dir(root.path().join("bin")).unwrap();
+        fs::write(root.path().join("bin/ssh.exe"), b"console image").unwrap();
+        validate_payload(root.path(), &payload_files(root.path()).unwrap()).unwrap();
+    }
 
     #[test]
     fn versions_only_upgrade_to_newer_stable_releases() {

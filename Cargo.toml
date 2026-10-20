@@ -2,6 +2,7 @@
 name = "yiterm"
 version = "0.0.13"
 edition = "2024"
+default-run = "yiterm"
 
 [features]
 default = ["x11", "wayland"]

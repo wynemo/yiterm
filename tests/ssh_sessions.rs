@@ -45,6 +45,7 @@ impl Session {
         ssh::detect(
             self.child.process_id().unwrap(),
             self.master.process_group_leader(),
+            &self._integration.detection_context(),
         )
     }
     fn wait_remote(&self) -> ssh::Detection {

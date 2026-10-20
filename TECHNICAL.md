@@ -19,7 +19,7 @@ gh auth login
 python scripts/download_latest.py
 ```
 
-首次运行前执行 `gh auth login`，脚本通过 `gh api` 复用登录状态，也支持 gh 的 `GH_TOKEN` / `GITHUB_TOKEN` 环境变量。脚本默认选择默认分支最新成功、未过期的 push 构建，校验 SHA-256 后把 `yiterm.exe`、`conpty.dll`、`OpenConsole.exe` 写入当前目录（覆盖同名文件）。可用 `--branch main` 指定分支，或用 `--output 路径` 指定目录。
+首次运行前执行 `gh auth login`，脚本通过 `gh api` 复用登录状态，也支持 gh 的 `GH_TOKEN` / `GITHUB_TOKEN` 环境变量。脚本默认选择默认分支最新成功、未过期的 push 构建，校验 SHA-256 后把 `yiterm.exe`、`bin/ssh.exe`、`conpty.dll`、`OpenConsole.exe` 写入当前目录（覆盖同名文件）。可用 `--branch main` 指定分支，或用 `--output 路径` 指定目录。
 
 安装 Rust stable；macOS 还需 Xcode Command Line Tools，Windows 需 MSVC C++ 构建工具。
 
@@ -74,7 +74,9 @@ Linux 使用本地补丁 `vendor/eframe`：优先创建默认 OpenGL 3.3 core �
 
 ### Windows SSH 与图片上传
 
-Windows 下，YiTerm 的私有 `ssh.exe` wrapper 使用内置 Rust SSH 客户端（`russh`）。登录时输入密码或密钥口令，图片上传通过同一条已认证连接的新 SFTP 通道完成，无需再次输入密码。也支持服务器的 keyboard-interactive 认证。密码不会保存到配置文件或日志。
+Windows 发布包携带独立的控制台程序 `bin/ssh.exe`，所有标签页和分栏共用该文件，各连接运行独立进程。YiTerm 将随包 `bin` 加入其子 shell 的 PATH 最前面，输入 `ssh host` 即调用内置客户端；`--ssh` 直接启动该程序。不修改系统 PATH，不使用 shell 函数、别名或转发脚本。会话临时目录只保存会话数据和必要的 shell 初始化脚本，不复制 exe，也不修改 PE 头；不要单独移动主程序或删除 `bin/ssh.exe`。从源码运行 Windows 版本前执行 `cargo build --locked --release --bins`，Cargo 输出目录中的 `ssh.exe` 可供同目录的主程序使用。
+
+Windows 下，独立 `ssh.exe` 使用内置 Rust SSH 客户端（`russh`）。登录时输入密码或密钥口令，图片上传通过同一条已认证连接的新 SFTP 通道完成，无需再次输入密码。也支持服务器的 keyboard-interactive 认证。密码不会保存到配置文件或日志。
 
 仍需安装系统 OpenSSH：内置客户端通过 `ssh -G` 解析 SSH config 中的别名、HostName、User、Port、IdentityFile、ProxyJump 和 known_hosts 路径。`ProxyJump` 的跳板链路由系统 OpenSSH 建立，目标主机仍由内置客户端认证并复用连接上传图片；跳板机认证按系统 OpenSSH 的配置和提示处理。支持 OpenSSH 格式私钥文件和 Windows OpenSSH agent；`IdentitiesOnly=yes` 时仅尝试密钥文件。首次连接显示 SHA-256 主机指纹，确认后写入 known_hosts；主机密钥变化或被撤销时拒绝连接。`StrictHostKeyChecking` 支持 `ask`、`yes` 和 `accept-new`。握手/指纹确认和认证阶段各有 120 秒期限。`ssh -G` 可能去掉 known_hosts 路径列表的引号；多个绝对路径可以包含空格，无法判断分隔的相对路径列表会报错，应改用绝对路径或系统客户端。
 
@@ -154,7 +156,7 @@ SSH 远端程序可通过 OSC 52 的 `c` 目标把文本复制到主机剪贴板
 
 在 **About → Check for Updates** 手动检查正式版，发现新版本后可打开 **Release Notes** 查看发布说明，点击 **Download Update** 下载当前平台的完整发布包。检查、下载和校验在后台执行，不阻塞终端；网络错误或 GitHub API 限流会显示错误，可稍后重新检查。当前版本不做启动时自动检查。
 
-下载完成后点击 **Update and Restart** 安装。此操作会关闭所有标签页和分栏、断开本地 shell 与 SSH 会话；不会恢复原会话，请先保存工作。准备完成后由独立更新进程等待主程序退出，再替换文件并以原命令行参数和工作目录重启。Windows 同时更新 `yiterm.exe`、`conpty.dll`、`OpenConsole.exe` 及随包文档和许可证。配置文件与日志不在更新包内，保持原位。
+下载完成后点击 **Update and Restart** 安装。此操作会关闭所有标签页和分栏、断开本地 shell 与 SSH 会话；不会恢复原会话，请先保存工作。准备完成后由独立更新进程等待主程序退出，再替换文件并以原命令行参数和工作目录重启。Windows 同时更新 `yiterm.exe`、`bin/ssh.exe`、`conpty.dll`、`OpenConsole.exe` 及随包文档和许可证。配置文件与日志不在更新包内，保持原位。
 
 更新使用 Rust `self_update` 的 GitHub 后端、下载解压和 `MoveAll` 多文件替换，以及 `self-replace` 的更新进程清理能力；无需独立更新服务器或 GitHub Token。按 `Cargo.toml` 版本比较，只接受更高的稳定版本，并精确匹配现有 `yiterm-<版本>-<平台>` 发布包及其 `.sha256` 文件。下载后先校验 SHA-256，成功后才准备安装。该校验检查下载完整性，不是独立的发布签名验证。
 

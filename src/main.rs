@@ -283,6 +283,7 @@ impl TerminalSession {
         let root = self.child.process_id();
         let group = self.foreground_group();
         let scp = self.integration.real_scp.clone();
+        let ssh_context = self.integration.detection_context();
         std::thread::spawn(move || {
             let started = Instant::now();
             tracing::debug!("Clipboard paste started");
@@ -291,7 +292,7 @@ impl TerminalSession {
                 if let Ok(image) = clipboard.get_image() {
                     let path = paste::save_image(image)?;
                     let root = root.context("Shell process is unavailable")?;
-                    let detected = ssh::detect(root, group)?;
+                    let detected = ssh::detect(root, group, &ssh_context)?;
                     let (text, target) = if let Some(detected) = detected {
                         (
                             paste::upload_detected(&path, &detected, &scp)?,
@@ -874,6 +875,7 @@ fn main() -> Result<()> {
     if let Some(result) = yiterm::update::run_helper_if_requested() {
         return result;
     }
+    #[cfg(unix)]
     if ssh::is_wrapper() {
         return ssh::run_wrapper();
     }

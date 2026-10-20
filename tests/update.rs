@@ -57,9 +57,11 @@ fn helper_waits_for_parent_installs_all_files_and_restarts_without_gui() {
     fs::write(target.join(exe), b"old executable").unwrap();
     let mut files = vec![exe, "TECHNICAL.md"];
     if cfg!(windows) {
-        files.extend(["conpty.dll", "OpenConsole.exe"]);
+        files.extend(["conpty.dll", "OpenConsole.exe", "bin/ssh.exe"]);
     }
     for name in files.iter().skip(1) {
+        fs::create_dir_all(target.join(name).parent().unwrap()).unwrap();
+        fs::create_dir_all(payload.join(name).parent().unwrap()).unwrap();
         fs::write(target.join(name), b"old file").unwrap();
         fs::write(payload.join(name), b"new file").unwrap();
     }

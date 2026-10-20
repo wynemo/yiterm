@@ -4,10 +4,32 @@ use portable_pty::{CommandBuilder, PtySize};
 use std::{io::Read, path::Path, sync::mpsc, time::Duration};
 
 #[test]
-fn ssh_shim_returns_output_to_conpty_without_a_new_console() {
-    let executable = Path::new(env!("CARGO_BIN_EXE_yiterm"));
-    let original = std::fs::read(executable).unwrap();
-    let integration = yiterm::ssh::Integration::new(executable).unwrap();
+fn packaged_ssh_returns_output_and_exit_status_to_each_shell() {
+    let release = tempfile::tempdir().unwrap();
+    let app = release.path().join("release with spaces");
+    std::fs::create_dir_all(app.join("bin")).unwrap();
+    let executable = app.join("yiterm.exe");
+    let helper = app.join("bin/ssh.exe");
+    std::fs::copy(env!("CARGO_BIN_EXE_yiterm"), &executable).unwrap();
+    std::fs::copy(env!("CARGO_BIN_EXE_ssh"), &helper).unwrap();
+    let original = std::fs::read(&helper).unwrap();
+    let pe = u32::from_le_bytes(original[0x3c..0x40].try_into().unwrap()) as usize;
+    assert_eq!(
+        u16::from_le_bytes(original[pe + 92..pe + 94].try_into().unwrap()),
+        3
+    );
+    let integration = yiterm::ssh::Integration::new(&executable).unwrap();
+    for shell in ["powershell.exe", "pwsh.exe", "cmd.exe"] {
+        check_console(&integration, shell);
+    }
+    let bash = Path::new(r"C:\Program Files\Git\bin\bash.exe");
+    if bash.is_file() {
+        check_console(&integration, bash.to_str().unwrap());
+    }
+    assert_eq!(std::fs::read(&helper).unwrap(), original);
+}
+
+fn check_console(integration: &yiterm::ssh::Integration, shell: &str) {
     let pair = portable_pty::native_pty_system()
         .openpty(PtySize {
             rows: 24,
@@ -16,10 +38,20 @@ fn ssh_shim_returns_output_to_conpty_without_a_new_console() {
             pixel_height: 0,
         })
         .unwrap();
-    // PowerShell must wait for the shim, and OpenSSH's output must return
-    // through the original PTY rather than a newly allocated console.
-    let mut command = CommandBuilder::new("powershell.exe");
-    command.args(["-NoProfile", "-Command", "ssh -V; exit $LASTEXITCODE"]);
+    // --system is understood only by our helper, so this also proves PATH
+    // selected it. Output and exit status must return through the same PTY.
+    let mut command = CommandBuilder::new(shell);
+    if shell == "cmd.exe" {
+        command.args(["/d", "/c", "ssh --system -V"]);
+    } else if shell.ends_with("bash.exe") {
+        command.args(["--noprofile", "--norc", "-c", "ssh --system -V"]);
+    } else {
+        command.args([
+            "-NoProfile",
+            "-Command",
+            "ssh --system -V; exit $LASTEXITCODE",
+        ]);
+    }
     integration.configure(&mut command).unwrap();
     let mut child = pair.slave.spawn_command(command).unwrap();
     drop(pair.slave);
@@ -40,10 +72,31 @@ fn ssh_shim_returns_output_to_conpty_without_a_new_console() {
         let _ = sender.send(text);
     });
     let output = receiver.recv_timeout(Duration::from_secs(15));
+    let result = || {
+        let output = output.expect("SSH output did not return to the original ConPTY");
+        assert!(
+            String::from_utf8_lossy(&output).contains("OpenSSH"),
+            "{shell}"
+        );
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            if let Some(status) = child.try_wait().unwrap() {
+                assert_eq!(status.exit_code(), 0, "{shell}");
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "{shell} did not wait/exit correctly"
+            );
+            std::thread::sleep(Duration::from_millis(30));
+        }
+    };
+    // Keep cleanup outside assertions even if the test fails.
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(result));
     let _ = child.kill();
-    let output = output.expect("SSH output did not return to the original ConPTY");
-    assert!(String::from_utf8_lossy(&output).contains("OpenSSH"));
-    assert_eq!(std::fs::read(executable).unwrap(), original);
+    if let Err(error) = result {
+        std::panic::resume_unwind(error);
+    }
 }
 
 #[path = "common/native_server.rs"]
@@ -106,7 +159,12 @@ fn password_login_and_image_upload_share_native_windows_session() {
         writer.write_all(b"fixture-password\r")?;
         writer.flush()?;
         wait_for("fixture-shell-ready")?;
-        let detected = yiterm::ssh::detect(child.process_id().unwrap(), None)?.unwrap();
+        let detected = yiterm::ssh::detect(
+            child.process_id().unwrap(),
+            None,
+            &integration.detection_context(),
+        )?
+        .unwrap();
         let pipe = detected
             .upload_pipe
             .as_ref()

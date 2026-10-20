@@ -65,11 +65,16 @@ jobs:
       - name: Build release
         env:
           YITERM_BUILD_REV: ${{ github.sha }}
-        run: cargo build --locked --release --target ${{ matrix.target }}
+        run: cargo build --locked --release --bins --target ${{ matrix.target }}
 
       - name: Test settings persistence
         run: |
           cargo test --locked --release --target ${{ matrix.target }} --lib settings::
+
+      - name: Test SSH entry points and session routing
+        run: |
+          cargo test --locked --release --target ${{ matrix.target }} --lib ssh::
+          cargo test --locked --release --target ${{ matrix.target }} --test ssh_windows --test ssh_sessions --test native_ssh
 
       - name: Test SOCKS forwarding over authenticated SSH
         run: cargo test --locked --release --target ${{ matrix.target }} --test socks --test vnc

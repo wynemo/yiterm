@@ -5,3 +5,5 @@ __pycache__/
 /conpty.dll
 /OpenConsole.exe
 /yiterm.exe
+
+/bin/ssh.exe
