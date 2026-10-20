@@ -44,7 +44,7 @@ pub fn load(path: &Path) -> Result<CursorSettings> {
 }
 
 pub fn save(path: &Path, cursor: CursorSettings) -> Result<()> {
-    save_values(path, cursor, None, None)
+    save_values(path, cursor, None, None, None)
 }
 
 fn save_values(
@@ -52,6 +52,7 @@ fn save_values(
     cursor: CursorSettings,
     theme: Option<crate::theme::ThemeMode>,
     font: Option<&FontSettings>,
+    browser: Option<BrowserSettings>,
 ) -> Result<()> {
     let mut value = match std::fs::read_to_string(path) {
         Ok(text) => toml::from_str::<toml::Value>(&text)?,
@@ -79,6 +80,12 @@ fn save_values(
             .as_table_mut()
             .context("Expected configuration table")?
             .insert("font".into(), toml::Value::try_from(font)?);
+    }
+    if let Some(browser) = browser {
+        value
+            .as_table_mut()
+            .context("Expected configuration table")?
+            .insert("browser".into(), toml::Value::try_from(browser)?);
     }
     if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
         std::fs::create_dir_all(parent)?;
@@ -146,7 +153,7 @@ pub fn load_theme(path: &Path) -> Result<crate::theme::ThemeMode> {
 }
 
 pub fn save_all(path: &Path, cursor: CursorSettings, theme: crate::theme::ThemeMode) -> Result<()> {
-    save_values(path, cursor, Some(theme), None)
+    save_values(path, cursor, Some(theme), None, None)
 }
 
 #[cfg(test)]
@@ -229,7 +236,7 @@ pub fn save_with_font(
     theme: crate::theme::ThemeMode,
     font: &FontSettings,
 ) -> Result<()> {
-    save_values(path, cursor, Some(theme), Some(font))
+    save_values(path, cursor, Some(theme), Some(font), None)
 }
 #[cfg(test)]
 mod font_tests {
@@ -262,5 +269,86 @@ mod font_tests {
         }
         std::fs::write(&path, "[font]\nsize = 100\n").unwrap();
         assert!(load_font(&path).is_err());
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct BrowserSettings {
+    pub open_links_in_browser: bool,
+}
+
+impl Default for BrowserSettings {
+    fn default() -> Self {
+        Self {
+            open_links_in_browser: true,
+        }
+    }
+}
+
+pub fn load_browser(path: &Path) -> Result<BrowserSettings> {
+    let text = match std::fs::read_to_string(path) {
+        Ok(text) => text,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Default::default()),
+        Err(error) => return Err(error.into()),
+    };
+    let value: toml::Value = toml::from_str(&text)?;
+    value
+        .get("browser")
+        .cloned()
+        .map(|value| value.try_into::<BrowserSettings>())
+        .transpose()
+        .map(|value| value.unwrap_or_default())
+        .context("Invalid browser settings")
+}
+
+pub fn save_preferences(
+    path: &Path,
+    cursor: CursorSettings,
+    theme: crate::theme::ThemeMode,
+    font: &FontSettings,
+    browser: BrowserSettings,
+) -> Result<()> {
+    save_values(path, cursor, Some(theme), Some(font), Some(browser))
+}
+
+#[cfg(test)]
+mod browser_tests {
+    use super::*;
+
+    #[test]
+    fn browser_defaults_and_roundtrip_preserve_other_settings() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        assert!(load_browser(&path).unwrap().open_links_in_browser);
+        std::fs::write(&path, "[logging]\nfilter = 'debug'\n").unwrap();
+        assert_eq!(load_browser(&path).unwrap(), BrowserSettings::default());
+        for enabled in [false, true] {
+            let browser = BrowserSettings {
+                open_links_in_browser: enabled,
+            };
+            save_preferences(
+                &path,
+                CursorSettings::default(),
+                Default::default(),
+                &FontSettings::default(),
+                browser,
+            )
+            .unwrap();
+            assert_eq!(load_browser(&path).unwrap(), browser);
+            save_with_font(
+                &path,
+                CursorSettings::default(),
+                Default::default(),
+                &FontSettings::default(),
+            )
+            .unwrap();
+            assert_eq!(load_browser(&path).unwrap(), browser);
+            let value: toml::Value =
+                toml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+            assert_eq!(value["logging"]["filter"].as_str(), Some("debug"));
+        }
+        std::fs::write(&path, "[browser]\nopen_links_in_browser = 'invalid'\n").unwrap();
+        assert!(load_browser(&path).is_err());
     }
 }

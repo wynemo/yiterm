@@ -377,11 +377,12 @@ impl TerminalUi {
             .map(Ok)
             .unwrap_or_else(logging::config_path)
             .and_then(|path| {
-                settings::save_with_font(
+                settings::save_preferences(
                     &path,
                     self.app.cursor_settings,
                     self.app.theme,
                     &self.app.font_settings,
+                    self.app.browser_settings,
                 )
             });
         if let Err(error) = result {
@@ -405,6 +406,7 @@ impl TerminalUi {
         self.app.cursor_settings = CursorSettings::default();
         self.app.theme = ThemeMode::default();
         self.app.font_settings = settings::FontSettings::default();
+        self.app.browser_settings = settings::BrowserSettings::default();
         apply_component_theme(self.app.theme, Some(window), cx);
         let names = available_font_families(cx, &self.app.font_settings.family);
         let selected = names
@@ -611,7 +613,11 @@ impl TerminalUi {
         };
         if let Some(link) = link {
             #[cfg(windows)]
-            self.open_ssh_browser(link, window, cx);
+            if self.app.browser_settings.open_links_in_browser {
+                self.open_ssh_browser(link, window, cx);
+            } else {
+                cx.open_url(&link);
+            }
             #[cfg(not(windows))]
             cx.open_url(&link);
             cx.notify();
@@ -2198,6 +2204,27 @@ impl TerminalUi {
                     ),
             )
             .child(divider())
+            .when(cfg!(windows), |element| {
+                element
+                    .child(
+                        row()
+                            .child(description(
+                                "Open Links in Built-in Browser",
+                                "Off uses the system browser; on uses the current SSH session.",
+                            ))
+                            .child(
+                                Switch::new("open-links-in-browser")
+                                    .checked(self.app.browser_settings.open_links_in_browser)
+                                    .small()
+                                    .on_click(cx.listener(|this, checked: &bool, _, cx| {
+                                        this.app.browser_settings.open_links_in_browser = *checked;
+                                        this.apply_settings();
+                                        cx.notify();
+                                    })),
+                            ),
+                    )
+                    .child(divider())
+            })
             .child(
                 div()
                     .mt(px(16.))

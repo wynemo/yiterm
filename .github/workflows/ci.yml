@@ -67,6 +67,9 @@ jobs:
           YITERM_BUILD_REV: ${{ github.sha }}
         run: cargo build --locked --release --target ${{ matrix.target }}
 
+      - name: Test settings persistence
+        run: cargo test --locked --release --target ${{ matrix.target }} --lib settings::
+
       - name: Test SOCKS forwarding over authenticated SSH
         run: cargo test --locked --release --target ${{ matrix.target }} --test socks --test vnc
 

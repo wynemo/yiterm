@@ -1,7 +1,10 @@
 use super::*;
 use anyhow::{Context as _, ensure};
 use gpui::Subscription;
-use gpui_component::input::{Input, InputEvent, InputState};
+use gpui_component::{
+    Disableable,
+    input::{Input, InputEvent, InputState},
+};
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use std::{path::Path, rc::Rc};
 use webview2_com::{
@@ -639,6 +642,13 @@ impl BrowserPage {
         }
     }
 
+    fn current_url(&self) -> Option<String> {
+        let state = self.webview.as_ref()?;
+        let mut uri = PWSTR::null();
+        unsafe { state.webview.Source(&mut uri) }.ok()?;
+        crate::browser_url(&webview2_com::take_pwstr(uri))
+    }
+
     fn go_back(&self) {
         if let Some(state) = &self.webview
             && let Err(error) = unsafe { state.webview.GoBack() }
@@ -707,12 +717,26 @@ impl Render for BrowserPage {
                                 .min_w_0()
                                 .child(Input::new(&self.address).small()),
                         )
-                        .child(Button::new("browser-go").label("Go").small().on_click(
-                            cx.listener(|this, _, window, cx| {
-                                let value = this.address.read(cx).value().to_string();
-                                this.navigate(&value, window, cx);
-                            }),
-                        )),
+                        .child(
+                            Button::new("browser-go")
+                                .label("Go")
+                                .small()
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    let value = this.address.read(cx).value().to_string();
+                                    this.navigate(&value, window, cx);
+                                })),
+                        )
+                        .child(
+                            Button::new("browser-open-system")
+                                .label("Open in System Browser")
+                                .small()
+                                .disabled(self.current_url().is_none())
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    if let Some(url) = this.current_url() {
+                                        cx.open_url(&url);
+                                    }
+                                })),
+                        ),
                 )
             })
             .when(self._vnc.is_some(), |element| {

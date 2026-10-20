@@ -3022,6 +3022,7 @@ mod tests {
             theme: ThemeMode::Dark,
             cursor_settings: CursorSettings::default(),
             font_settings: settings::FontSettings::default(),
+            browser_settings: settings::BrowserSettings::default(),
         };
         // Set different titles through each real PTY; the background session
         // must parse output too, without changing the foreground session title.

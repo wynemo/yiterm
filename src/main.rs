@@ -632,6 +632,7 @@ struct TerminalApp {
     theme: ThemeMode,
     cursor_settings: CursorSettings,
     font_settings: settings::FontSettings,
+    browser_settings: settings::BrowserSettings,
 }
 
 impl TerminalApp {
@@ -662,6 +663,7 @@ impl TerminalApp {
             theme: settings::load_theme(&path)?,
             cursor_settings,
             font_settings: settings::load_font(&path)?,
+            browser_settings: settings::load_browser(&path)?,
         })
     }
 

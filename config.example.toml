@@ -20,3 +20,7 @@ theme = "dark"
 [font]
 family = "Lilex"
 size = 16.0
+
+# Windows: open Ctrl-clicked terminal links in the built-in SSH browser.
+[browser]
+open_links_in_browser = true
