@@ -133,7 +133,7 @@ fn typed_ssh_is_detected_and_exit_restores_local_routing() {
     let mut session = Session::new("/bin/sh");
     assert!(session.detect().unwrap().is_none());
     // ProxyCommand provides a live SSH process without contacting any host.
-    session.send("ssh -F /dev/null -oProxyCommand='exec sleep 60' -oConnectTimeout=30 alice@yiterm-test.invalid\r");
+    session.send("ssh -F /dev/null -oProxyCommand='sleep 60' -oConnectTimeout=30 alice@yiterm-test.invalid\r");
     let detected = session.wait_remote();
     assert_eq!(detected.remote.host, "alice@yiterm-test.invalid");
     assert!(
@@ -195,7 +195,7 @@ fn shell_bootstrap_preserves_typed_ssh_and_enables_multiplexing() {
 fn jump_transport_child_does_not_replace_interactive_destination() {
     let mut session = Session::new("/bin/sh");
     // Keep the outer SSH and its -W proxy child alive without network access.
-    session.send("ssh -F /dev/null -oProxyCommand='exec /usr/bin/ssh -F /dev/null -oProxyCommand=\"exec sleep 60\" -oConnectTimeout=30 -W target.invalid:22 jump.invalid' -oConnectTimeout=30 alice@target.invalid\r");
+    session.send("ssh -F /dev/null -oProxyCommand='/usr/bin/ssh -F /dev/null -oProxyCommand=\"sleep 60\" -oConnectTimeout=30 -W target.invalid:22 jump.invalid' -oConnectTimeout=30 alice@target.invalid\r");
     let deadline = Instant::now() + Duration::from_secs(10);
     // Wait until the proxy child really exists so the regression is exercised.
     loop {
