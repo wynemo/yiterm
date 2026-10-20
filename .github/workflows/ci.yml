@@ -105,7 +105,9 @@ jobs:
       - name: Test logging and child process forwarding
         env:
           YITERM_BUILD_REV: ${{ github.sha }}
-        run: cargo test --locked --release --target ${{ matrix.target }} --test logging
+        run: |
+          cargo test --locked --release --target ${{ matrix.target }} --lib logging::tests
+          cargo test --locked --release --target ${{ matrix.target }} --test logging
 
       - name: Test release updater and restart helper
         run: |

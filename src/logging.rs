@@ -66,6 +66,8 @@ struct Config {
     _appearance: crate::settings::AppearanceSettings,
     #[serde(rename = "font")]
     _font: crate::settings::FontSettings,
+    #[serde(rename = "browser")]
+    _browser: crate::settings::BrowserSettings,
 }
 
 pub struct Logging {
@@ -260,10 +262,22 @@ mod tests {
             crate::theme::ThemeMode::Dark,
             crate::theme::ThemeMode::Light,
         ] {
-            crate::settings::save_all(&path, crate::settings::CursorSettings::default(), theme)
+            for enabled in [false, true] {
+                let browser = crate::settings::BrowserSettings {
+                    open_links_in_browser: enabled,
+                };
+                crate::settings::save_preferences(
+                    &path,
+                    crate::settings::CursorSettings::default(),
+                    theme,
+                    &crate::settings::FontSettings::default(),
+                    browser,
+                )
                 .unwrap();
-            assert!(load(&path, true).is_ok());
-            assert_eq!(crate::settings::load_theme(&path).unwrap(), theme);
+                load(&path, true).unwrap();
+                assert_eq!(crate::settings::load_theme(&path).unwrap(), theme);
+                assert_eq!(crate::settings::load_browser(&path).unwrap(), browser);
+            }
         }
     }
 

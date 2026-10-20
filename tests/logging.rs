@@ -57,7 +57,7 @@ fn files_filters_flush_and_fallback() {
         std::fs::write(
             directory.path().join("config.toml"),
             format!(
-                "[logging]\nfilter = 'warn,yiterm=info'\nconsole = true\ndirectory = '{}'\n",
+                "[logging]\nfilter = 'warn,yiterm=info'\nconsole = true\ndirectory = '{}'\n[browser]\nopen_links_in_browser = false\n",
                 logs.display()
             ),
         )
@@ -102,7 +102,7 @@ fn app_and_child_processes_share_one_log_file() {
     std::fs::write(
         directory.path().join("config.toml"),
         format!(
-            "[logging]\nfilter = 'warn,yiterm=info'\ndirectory = '{}'\n",
+            "[logging]\nfilter = 'warn,yiterm=info'\ndirectory = '{}'\n[browser]\nopen_links_in_browser = false\n",
             logs.display()
         ),
     )
