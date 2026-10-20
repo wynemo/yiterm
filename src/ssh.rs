@@ -263,8 +263,13 @@ fn bundled_windows_ssh(path: &Path) -> bool {
 }
 
 fn find_program(name: &str, excluded_directory: Option<&Path>) -> Option<PathBuf> {
+    let executable = if cfg!(windows) {
+        format!("{name}.exe")
+    } else {
+        name.to_string()
+    };
     find_program_in(
-        name,
+        &executable,
         excluded_directory,
         std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default()),
     )
@@ -275,18 +280,12 @@ fn find_program_in(
     excluded_directory: Option<&Path>,
     directories: impl IntoIterator<Item = PathBuf>,
 ) -> Option<PathBuf> {
-    let is_ssh = name == "ssh";
-    let name = if cfg!(windows) {
-        format!("{name}.exe")
-    } else {
-        name.to_string()
-    };
     directories
         .into_iter()
-        .map(|dir| dir.join(&name))
+        .map(|dir| dir.join(name))
         .filter(|path| path.is_file())
-        .filter(|path| excluded_directory.is_none_or(|dir| !same_file(path, &dir.join(&name))))
-        .filter(|path| !(cfg!(windows) && is_ssh && bundled_windows_ssh(path)))
+        .filter(|path| excluded_directory.is_none_or(|dir| !same_file(path, &dir.join(name))))
+        .filter(|path| !(name.eq_ignore_ascii_case("ssh.exe") && bundled_windows_ssh(path)))
         .find_map(|path| path.canonicalize().ok())
 }
 
@@ -746,9 +745,12 @@ mod tests {
         assert!(bundled_windows_ssh(&packaged.join("ssh.exe")));
         assert!(bundled_windows_ssh(&cargo.join("ssh.exe")));
         assert!(!bundled_windows_ssh(&system.join("ssh.exe")));
-        #[cfg(windows)]
         assert_eq!(
-            find_program_in("ssh", Some(&packaged), [cargo, packaged, system.clone()]),
+            find_program_in(
+                "ssh.exe",
+                Some(&packaged),
+                [cargo, packaged.clone(), system.clone()]
+            ),
             Some(system.join("ssh.exe").canonicalize().unwrap())
         );
     }
