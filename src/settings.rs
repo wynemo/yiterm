@@ -786,12 +786,41 @@ mod windows_shell_pty_tests {
     use super::*;
     use std::{
         io::{Read, Write},
-        sync::mpsc,
-        time::Duration,
+        sync::{Arc, Mutex, mpsc},
+        time::{Duration, Instant},
     };
 
     #[test]
     fn git_bash_and_mintty_run_inside_pty() {
+        // ConPTY teardown can block in the Windows API. Bound the entire smoke
+        // test in a separate process, including startup and destruction.
+        const WORKER: &str = "YITERM_GIT_SHELL_TEST_WORKER";
+        if std::env::var_os(WORKER).is_none() {
+            let mut worker = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "settings::windows_shell_pty_tests::git_bash_and_mintty_run_inside_pty",
+                    "--nocapture",
+                ])
+                .env(WORKER, "1")
+                .spawn()
+                .unwrap();
+            let deadline = Instant::now() + Duration::from_secs(90);
+            loop {
+                if let Some(status) = worker.try_wait().unwrap() {
+                    assert!(status.success(), "Git shell PTY worker failed: {status}");
+                    return;
+                }
+                if Instant::now() >= deadline {
+                    let _ = std::process::Command::new("taskkill")
+                        .args(["/PID", &worker.id().to_string(), "/T", "/F"])
+                        .status();
+                    let _ = worker.kill();
+                    panic!("Git shell PTY worker timed out after 90 seconds");
+                }
+                std::thread::sleep(Duration::from_millis(100));
+            }
+        }
         let shells = available_shell_programs();
         let integration = crate::ssh::Integration::new(&std::env::current_exe().unwrap()).unwrap();
         for name in ["git-bash.exe", "mintty.exe"] {
@@ -807,6 +836,7 @@ mod windows_shell_pty_tests {
                 eprintln!("Skipping {name} PTY test: Git for Windows is not installed");
                 continue;
             };
+            eprintln!("Testing {name}: {launcher}");
             let pair = portable_pty::native_pty_system()
                 .openpty(portable_pty::PtySize {
                     rows: 24,
@@ -815,37 +845,53 @@ mod windows_shell_pty_tests {
                     pixel_height: 0,
                 })
                 .unwrap();
-            let command = integration.shell(launcher).unwrap();
+            let mut command = integration.shell(launcher).unwrap();
             assert_eq!(
                 Path::new(&command.get_argv()[0]).file_name().unwrap(),
                 "bash.exe"
             );
-            let mut child = pair.slave.spawn_command(command).unwrap();
-            drop(pair.slave);
+            command.args(["-c", "printf 'yiterm-%s' 'git-shell-ok'"]);
             let mut reader = pair.master.try_clone_reader().unwrap();
-            let mut writer = pair.master.take_writer().unwrap();
+            let writer = Arc::new(Mutex::new(pair.master.take_writer().unwrap()));
             let (tx, rx) = mpsc::channel();
-            std::thread::spawn(move || {
+            let reader_writer = writer.clone();
+            let drain = std::thread::spawn(move || {
                 let mut output = Vec::new();
                 let mut buffer = [0; 4096];
+                let mut reported = false;
+                let mut answered_cursor = false;
                 loop {
                     match reader.read(&mut buffer) {
                         Ok(0) | Err(_) => break,
                         Ok(n) => output.extend_from_slice(&buffer[..n]),
                     }
-                    if String::from_utf8_lossy(&output).contains("yiterm-git-shell-ok") {
-                        break;
+                    // portable-pty enables INHERIT_CURSOR; act like the terminal
+                    // and answer its initial cursor position query.
+                    if !answered_cursor && output.windows(4).any(|w| w == b"\x1b[6n") {
+                        let _ = reader_writer.lock().unwrap().write_all(b"\x1b[1;1R");
+                        answered_cursor = true;
                     }
+                    if !reported && String::from_utf8_lossy(&output).contains("yiterm-git-shell-ok")
+                    {
+                        let _ = tx.send(output.clone());
+                        reported = true;
+                    }
+                    // Keep draining after the marker: ClosePseudoConsole may
+                    // synchronously flush output while the master is dropped.
                 }
-                let _ = tx.send(output);
+                if !reported {
+                    let _ = tx.send(output);
+                }
             });
-            // Split the marker so terminal input echo cannot satisfy the assertion.
-            writer
-                .write_all(b"printf 'yiterm-%s' 'git-shell-ok'; exit\n")
-                .unwrap();
+            eprintln!("Spawning Bash for {name}");
+            let mut child = pair.slave.spawn_command(command).unwrap();
+            drop(pair.slave);
             let output = rx.recv_timeout(Duration::from_secs(20));
+            eprintln!("Stopping Bash for {name}");
             let _ = child.kill();
-            let _ = child.wait();
+            drop(writer);
+            drop(pair.master);
+            let _ = drain.join();
             let output =
                 output.unwrap_or_else(|error| panic!("{name} produced no PTY output: {error}"));
             assert!(
@@ -853,6 +899,7 @@ mod windows_shell_pty_tests {
                 "{name}: {}",
                 String::from_utf8_lossy(&output)
             );
+            eprintln!("Passed {name}");
         }
     }
 }
