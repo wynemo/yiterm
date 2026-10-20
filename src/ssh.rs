@@ -43,7 +43,7 @@ impl Integration {
                 !same_file(
                     path,
                     &bin.join(if cfg!(windows) { "ssh.exe" } else { "ssh" }),
-                )
+                ) && !(cfg!(windows) && bundled_windows_ssh(path))
             })
             .or_else(|| find_program("ssh", Some(&bin)));
         let real_scp = find_program("scp", None).unwrap_or_else(|| PathBuf::from("scp"));
@@ -245,16 +245,48 @@ fn same_file(left: &Path, right: &Path) -> bool {
         .is_some_and(|(left, right)| left == right)
 }
 
+// A development build or another YiTerm installation can already be in PATH.
+// Never use its helper as the system OpenSSH client, including when the current
+// pane uses a separately packaged copy. Cargo adds build outputs to test PATH.
+fn bundled_windows_ssh(path: &Path) -> bool {
+    path.file_name()
+        .is_some_and(|name| name.to_string_lossy().eq_ignore_ascii_case("ssh.exe"))
+        && path.parent().is_some_and(|parent| {
+            parent.join("yiterm.exe").is_file()
+                || (parent
+                    .file_name()
+                    .is_some_and(|name| name.to_string_lossy().eq_ignore_ascii_case("bin"))
+                    && parent
+                        .parent()
+                        .is_some_and(|root| root.join("yiterm.exe").is_file()))
+        })
+}
+
 fn find_program(name: &str, excluded_directory: Option<&Path>) -> Option<PathBuf> {
+    find_program_in(
+        name,
+        excluded_directory,
+        std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default()),
+    )
+}
+
+fn find_program_in(
+    name: &str,
+    excluded_directory: Option<&Path>,
+    directories: impl IntoIterator<Item = PathBuf>,
+) -> Option<PathBuf> {
+    let is_ssh = name == "ssh";
     let name = if cfg!(windows) {
         format!("{name}.exe")
     } else {
         name.to_string()
     };
-    std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default())
+    directories
+        .into_iter()
         .map(|dir| dir.join(&name))
         .filter(|path| path.is_file())
         .filter(|path| excluded_directory.is_none_or(|dir| !same_file(path, &dir.join(&name))))
+        .filter(|path| !(cfg!(windows) && is_ssh && bundled_windows_ssh(path)))
         .find_map(|path| path.canonicalize().ok())
 }
 
@@ -697,6 +729,28 @@ mod tests {
         // An unrelated sibling ssh.exe must not hide an incomplete release.
         std::fs::write(app.join("ssh.exe"), b"unrelated").unwrap();
         assert!(Integration::new(&executable).is_err());
+    }
+
+    #[test]
+    fn detects_packaged_and_cargo_windows_helpers() {
+        let root = tempfile::tempdir().unwrap();
+        let packaged = root.path().join("installed/bin");
+        let cargo = root.path().join("target/release");
+        let system = root.path().join("OpenSSH");
+        for directory in [&packaged, &cargo, &system] {
+            std::fs::create_dir_all(directory).unwrap();
+            std::fs::write(directory.join("ssh.exe"), b"image").unwrap();
+        }
+        std::fs::write(packaged.parent().unwrap().join("yiterm.exe"), b"GUI").unwrap();
+        std::fs::write(cargo.join("yiterm.exe"), b"GUI").unwrap();
+        assert!(bundled_windows_ssh(&packaged.join("ssh.exe")));
+        assert!(bundled_windows_ssh(&cargo.join("ssh.exe")));
+        assert!(!bundled_windows_ssh(&system.join("ssh.exe")));
+        #[cfg(windows)]
+        assert_eq!(
+            find_program_in("ssh", Some(&packaged), [cargo, packaged, system.clone()]),
+            Some(system.join("ssh.exe").canonicalize().unwrap())
+        );
     }
 
     fn args(values: &[&str]) -> Vec<String> {
