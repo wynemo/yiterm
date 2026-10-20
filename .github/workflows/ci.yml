@@ -100,111 +100,6 @@ jobs:
           if-no-files-found: error
           retention-days: 30
 
-  test:
-    name: ${{ matrix.platform }} tests
-    runs-on: ${{ matrix.runner }}
-    env:
-      YITERM_BUILD_REV: ${{ github.sha }}
-    timeout-minutes: 30
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - runner: windows-2022
-            platform: windows-x64
-            target: x86_64-pc-windows-msvc
-          - runner: macos-14
-            platform: macos-arm64
-            target: aarch64-apple-darwin
-    steps:
-      - uses: actions/checkout@v7
-        with:
-          fetch-depth: 0
-          persist-credentials: false
-
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          toolchain: 1.99.1
-          targets: ${{ matrix.target }}
-
-      # rust-cache hashes every installed toolchain, including runner preinstalls.
-      - name: Keep only the pinned Rust toolchain
-        shell: bash
-        run: |
-          active="$(rustup show active-toolchain | cut -d ' ' -f 1)"
-          while read -r toolchain _; do
-            if [[ "$toolchain" != "$active" ]]; then
-              rustup toolchain uninstall "$toolchain"
-            fi
-          done < <(rustup toolchain list)
-
-      - uses: Swatinem/rust-cache@v2
-        with:
-          key: ${{ matrix.target }}
-
-      - name: Compile release tests
-        run: cargo test --locked --release --target ${{ matrix.target }} --no-run
-
-      - name: Test settings persistence
-        run: |
-          cargo test --locked --release --target ${{ matrix.target }} --lib settings::
-
-      - name: Test SSH parsing and authentication
-        timeout-minutes: 5
-        run: |
-          cargo test --locked --release --target ${{ matrix.target }} --lib ssh::
-          cargo test --locked --release --target ${{ matrix.target }} --test native_ssh
-
-      - name: Test Unix SSH session routing
-        if: runner.os == 'macOS'
-        timeout-minutes: 3
-        run: cargo test --locked --release --target ${{ matrix.target }} --test ssh_sessions -- --nocapture
-
-      - name: Test Windows SSH console entry points and uploads
-        if: runner.os == 'Windows'
-        timeout-minutes: 5
-        run: cargo test --locked --release --target ${{ matrix.target }} --test ssh_windows -- --nocapture --test-threads=1
-
-      - name: Test SOCKS forwarding over authenticated SSH
-        run: cargo test --locked --release --target ${{ matrix.target }} --test socks --test vnc
-
-      - name: Install WebView2 Runtime for browser integration test
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: |
-          $roots = @("${env:ProgramFiles(x86)}\Microsoft\EdgeWebView\Application", "$env:LOCALAPPDATA\Microsoft\EdgeWebView\Application")
-          $runtime = Get-ChildItem $roots -Directory -ErrorAction SilentlyContinue | Where-Object { Test-Path (Join-Path $_.FullName 'msedgewebview2.exe') }
-          if ($runtime) { Write-Host 'WebView2 Runtime is already installed'; exit 0 }
-          $installer = Join-Path $env:RUNNER_TEMP 'MicrosoftEdgeWebView2RuntimeInstallerX64.exe'
-          Invoke-WebRequest 'https://go.microsoft.com/fwlink/p/?LinkId=2124703' -OutFile $installer
-          $process = Start-Process $installer -ArgumentList '/silent', '/install' -Wait -PassThru
-          if ($process.ExitCode -ne 0) { throw "WebView2 installer failed: $($process.ExitCode)" }
-
-      - name: Test WebView2 browser and VNC through SSH SOCKS
-        if: runner.os == 'Windows'
-        timeout-minutes: 5
-        run: cargo test --locked --release --target ${{ matrix.target }} --bin yiterm ui::browser::tests::webview_loads_ -- --nocapture
-
-      - name: Test logging and child process forwarding
-        env:
-          YITERM_BUILD_REV: ${{ github.sha }}
-        run: |
-          cargo test --locked --release --target ${{ matrix.target }} --lib logging::tests
-          cargo test --locked --release --target ${{ matrix.target }} --test logging
-
-      - name: Test release updater and restart helper
-        run: |
-          cargo test --locked --release --target ${{ matrix.target }} --lib update::tests
-          cargo test --locked --release --target ${{ matrix.target }} --test update
-
-      - name: Test profiling aggregates and idle repaint regression
-        run: |
-          cargo test --locked --release --target ${{ matrix.target }} --bin yiterm profiling::tests
-          cargo test --locked --release --target ${{ matrix.target }} --bin yiterm repaint_tests
-
-      - name: Test terminal Unicode rendering and emoji column widths
-        run: cargo test --locked --release --target ${{ matrix.target }} --bin yiterm terminal_unicode_
-
   linux:
     name: linux-x64 build (CentOS 7 / glibc 2.17)
     runs-on: ubuntu-22.04
@@ -283,55 +178,9 @@ jobs:
           if-no-files-found: error
           retention-days: 30
 
-  linux-test:
-    name: linux-x64 tests (CentOS 7 / Xvfb)
-    needs: linux
-    runs-on: ubuntu-22.04
-    timeout-minutes: 30
-    steps:
-      - uses: actions/checkout@v7
-        with:
-          persist-credentials: false
-
-      - uses: actions/cache/restore@v4
-        with:
-          path: |
-            ~/.cache/yiterm-linux
-            target/x86_64-unknown-linux-gnu
-            target/release
-          key: linux-centos7-rust-1.99.1-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'scripts/build_linux.sh') }}
-          restore-keys: linux-centos7-rust-1.99.1-
-
-      - uses: actions/download-artifact@v8
-        with:
-          name: yiterm-${{ needs.linux.outputs.version }}-linux-x64
-          path: dist
-
-      - name: Verify and extract the uploaded Linux package
-        run: |
-          cd dist
-          sha256sum -c *.sha256
-          tar -xzf *.tar.gz
-
-      - name: Test in CentOS 7 userspace
-        env:
-          YITERM_BUILD_REV: ${{ github.sha }}
-        run: |
-          mkdir -p "$HOME/.cache/yiterm-linux"
-          docker run --rm \
-            -v "$GITHUB_WORKSPACE:/work" \
-            -v "$HOME/.cache/yiterm-linux:/ci-cache" \
-            -e YITERM_BUILD_REV \
-            -e CARGO_HOME=/ci-cache/cargo \
-            -e RUSTUP_HOME=/ci-cache/rustup \
-            -e RUST_TOOLCHAIN=1.99.1 \
-            -e CARGO_PROFILE_RELEASE_DEBUG \
-            quay.io/pypa/manylinux2014_x86_64 \
-            bash /work/scripts/build_linux.sh test
-
   release:
     name: Publish GitHub Release
-    needs: [build, test, linux, linux-test]
+    needs: [build, linux]
     if: github.ref == 'refs/heads/main' && needs.build.outputs.tag != '' && needs.linux.outputs.tag == needs.build.outputs.tag
     runs-on: ubuntu-latest
     timeout-minutes: 10

@@ -71,6 +71,3 @@ glutin = { path = "vendor/glutin" }
 
 [target.'cfg(windows)'.build-dependencies]
 embed-resource = "3.0.12"
-
-[dev-dependencies]
-tokio-tungstenite = "0.29"

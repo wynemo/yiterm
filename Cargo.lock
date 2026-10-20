@@ -10744,7 +10744,6 @@ dependencies = [
  "tempfile",
  "time",
  "tokio",
- "tokio-tungstenite",
  "toml 0.8.23",
  "tracing",
  "tracing-appender",

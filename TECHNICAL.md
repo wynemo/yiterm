@@ -19,7 +19,7 @@ gh auth login
 python scripts/download_latest.py
 ```
 
-首次运行前执行 `gh auth login`，脚本通过 `gh api` 复用登录状态，也支持 gh 的 `GH_TOKEN` / `GITHUB_TOKEN` 环境变量。脚本默认选择默认分支最新有可用 Windows 产物、未过期的 push 构建（不等待独立测试 job 完成），校验 SHA-256 后把 `yiterm.exe`、`bin/ssh.exe`、`conpty.dll`、`OpenConsole.exe` 写入当前目录（覆盖同名文件）。可用 `--branch main` 指定分支，或用 `--output 路径` 指定目录。
+首次运行前执行 `gh auth login`，脚本通过 `gh api` 复用登录状态，也支持 gh 的 `GH_TOKEN` / `GITHUB_TOKEN` 环境变量。脚本默认选择默认分支最新有可用 Windows 产物、未过期的 push 构建，校验 SHA-256 后把 `yiterm.exe`、`bin/ssh.exe`、`conpty.dll`、`OpenConsole.exe` 写入当前目录（覆盖同名文件）。可用 `--branch main` 指定分支，或用 `--output 路径` 指定目录。
 
 安装 Rust stable；macOS 还需 Xcode Command Line Tools，Windows 需 MSVC C++ 构建工具。
 
@@ -66,15 +66,15 @@ sudo yum install gcc gcc-c++ make pkgconfig libX11-devel libXcursor-devel libXi-
 cargo build --locked --release --target x86_64-unknown-linux-gnu --no-default-features --features x11
 ```
 
-默认源码构建同时启用 X11 和 Wayland；CentOS 7 包只启用 `x11`，避免依赖其旧版 Wayland 桌面环境。不要在新发行版直接构建后假定兼容 CentOS 7。CI 在 Linux runner 中通过 `quay.io/pypa/manylinux2014_x86_64`（CentOS 7 / glibc 2.17）运行 `scripts/build_linux.sh`，检查 ELF 架构、GLIBC 符号版本和共享库解析，随后打包、生成 SHA-256 并上传 Actions artifact。独立的 Linux 测试 job 下载同一份 artifact、校验 SHA-256，执行日志、性能汇总、刷新、Unicode 测试及 Xvfb/Mesa 窗口启动检查。测试失败不会阻止下载已上传的二进制；正式 Release 仍要求所有平台构建和 Linux 测试通过。
+默认源码构建同时启用 X11 和 Wayland；CentOS 7 包只启用 `x11`，避免依赖其旧版 Wayland 桌面环境。不要在新发行版直接构建后假定兼容 CentOS 7。CI 在 Linux runner 中通过 `quay.io/pypa/manylinux2014_x86_64`（CentOS 7 / glibc 2.17）运行 `scripts/build_linux.sh`，检查 ELF 架构、GLIBC 符号版本和共享库解析，随后打包、生成 SHA-256 并上传 Actions artifact。
 
-Linux 使用本地补丁 `vendor/eframe`：优先创建默认 OpenGL 3.3 core 上下文；失败时先尝试 OpenGL 2.1 compatibility，再尝试上游 GLES 回退。旧版 Mesa / 远程桌面因此可使用 egui_glow 的 GLSL 1.20 渲染路径，兼容不支持 3.3 core 的驱动。`vendor/glutin` 使用 `glXQueryExtensionsString` 查询当前连接与屏幕实际可用的 GLX 扩展，避免把客户端库支持的扩展误认为 X Server 也支持，从而在设置垂直同步时触发异步 `GLXBadContextTag`。窗口测试要求窗口实际可见且已初始化 OpenGL 渲染器。
+Linux 使用本地补丁 `vendor/eframe`：优先创建默认 OpenGL 3.3 core 上下文；失败时先尝试 OpenGL 2.1 compatibility，再尝试上游 GLES 回退。旧版 Mesa / 远程桌面因此可使用 egui_glow 的 GLSL 1.20 渲染路径，兼容不支持 3.3 core 的驱动。`vendor/glutin` 使用 `glXQueryExtensionsString` 查询当前连接与屏幕实际可用的 GLX 扩展，避免把客户端库支持的扩展误认为 X Server 也支持，从而在设置垂直同步时触发异步 `GLXBadContextTag`。
 
 该方案保留系统 glibc，不替换它，也不随包携带显卡驱动。CI 容器共享 runner 的 Linux 内核，Xvfb 使用软件渲染；它不能替代 CentOS 7.8 的旧内核、真实显卡、输入法、剪贴板和桌面交互实机验证。Linux 构建与运行检查只在 Linux CI / Linux 设备执行，macOS 本机不运行 Linux 构建。
 
-### CI 构建与测试
+### CI 构建
 
-Windows 和 macOS 的构建 job 只负责 Release 构建、打包校验和上传产物，测试在独立 job 中运行；构建产物上传后即可下载，无需等待测试通过。Linux 同样分开构建上传与测试。测试失败会标记 CI 失败，但不撤回已上传的构建包；正式 GitHub Release 仍要求所有平台构建和测试通过。
+Windows、macOS 和 Linux CI 只执行 Release 构建、打包校验和产物上传，不编译或运行测试。构建产物上传后即可下载；正式 GitHub Release 在所有平台构建成功且版本 tag 匹配后发布。
 
 ### Windows SSH 与图片上传
 
@@ -101,7 +101,7 @@ Windows 的 **Tools → Open SSH Browser** 会从当前聚焦 pane 检测前台 
 open_links_in_browser = true
 ```
 
-Chromium 的 `host-resolver-rules` 同样会作用于代理入口的 IP 地址，因此阻止本地 DNS 时必须保留 `EXCLUDE 127.0.0.1`，使本地 SOCKS 监听端口仍可连接。Windows CI 会启动真实 WebView2，通过已认证 SSH 的 SOCKS 代理加载测试页面并读取 DOM，覆盖远端域名和 `localhost`。
+Chromium 的 `host-resolver-rules` 同样会作用于代理入口的 IP 地址，因此阻止本地 DNS 时必须保留 `EXCLUDE 127.0.0.1`，使本地 SOCKS 监听端口仍可连接。
 
 Windows 的 GPUI DirectComposition 合成层放在原生子窗口下方，让 WebView2 子窗口能显示在终端界面之上。这项修正在 `vendor/gpui` 中维护（基于 GPUI 0.2.2）；上游的 `topmost = true` 会让不透明 GPUI 背景覆盖浏览器，造成请求成功、DOM 已加载但仍看到空白。Windows CI 同时打开真实 GPUI 窗口与 WebView2，并检查屏幕像素，验证浏览器内容没有被覆盖。
 
@@ -115,9 +115,9 @@ VNC 标签与浏览器共用右侧标签栏和已认证 SSH transport；每个 V
 
 内置 [noVNC v1.7.0](https://github.com/novnc/noVNC/tree/v1.7.0) 原始资源位于 `assets/novnc/`，构建时嵌入程序，无需 CDN、Node.js 或远端 websockify。许可证与来源见 [LICENSE.txt](assets/novnc/LICENSE.txt) 和 [UPSTREAM.txt](assets/novnc/UPSTREAM.txt)。本机 Rust 桥接仅监听 `127.0.0.1` 随机端口，以随机会话令牌和 WebSocket Origin 检查限制访问；VNC WebView 禁用代理并限制在内置页面导航，页面的 CSP 限制资源和网络请求。桥接通过现有 SOCKS5 将目标域名交给 SSH 服务器解析，不回退本机直连。SSH 保护到 SSH 服务器的链路，SSH 服务器到另一台 VNC 主机之间的加密取决于 VNC 服务配置。
 
-`cargo test --locked --test vnc --test socks` 验证真实 SSH 上的双向 WebSocket/RFB 字节流、远端域名、访问限制与关闭后的连接回收。Windows CI 另运行 `ui::browser::tests::webview_loads_vnc_desktop_through_ssh`，用真实 WebView2/noVNC 与 RFB 测试服务验证桌面像素绘制；Windows 的焦点、输入法、实际服务器认证和高 DPI 仍需实机兼容性验证。
+Windows 的焦点、输入法、实际服务器认证和高 DPI 仍需实机兼容性验证。
 
-本机开发只运行当前平台的 `cargo test --locked`；Windows 控制台、命名管道、窗口缩放和登录后连续传图的集成测试由 Windows CI runner 执行，不在 macOS 上安装 Windows 工具链或交叉编译。
+源码构建使用当前平台的 Release 模式；不在 macOS 上安装 Windows 工具链或交叉编译。
 
 
 Linux 不引入 GPUI、Vulkan 或新版 glibc 要求。上述兼容路径和验证脚本从原版保留，本次分流改动仍需 Linux CI 实际构建与运行确认。
@@ -168,8 +168,6 @@ SSH 远端程序可通过 OSC 52 的 `c` 目标把文本复制到主机剪贴板
 
 暂存文件位于程序目录下的 `.yiterm-update-*`，保证替换不跨文件系统。普通替换失败时尝试恢复旧文件；Windows 文件占用导致的失败会在最多 30 秒内重试，请先关闭其他 YiTerm 实例。成功后清理暂存目录；失败时保留 `error.txt` 和恢复文件，后续启动会在 About 显示安装错误。若回滚本身失败，更新进程保留备份且不自动启动可能不完整的程序，需根据错误路径恢复文件或重新解压完整发布包。多文件替换不能保证断电或强制结束更新进程时自动恢复。
 
-macOS 本机验证更新逻辑、回滚和真实更新进程交接；Windows 文件占用、多文件回滚及进程退出等待由 Windows CI runner 验证，Linux 更新测试由 Linux CI 执行。
-
 ## 日志
 
 统一使用 `tracing`，默认应用级别为 `info`、依赖库为 `warn`，仅输出到日志文件；Windows 启动时不再附带控制台窗口。主程序和内置 SSH wrapper 共用每天一个日志文件，PID 写在每行开头；顶部 **Tools → Open Log File** 会直接打开当天的文件。
@@ -192,7 +190,7 @@ YITERM_LOG='warn,yiterm=debug' cargo run
 
 文件名为 `yiterm.<UTC日期>.log`，包含 PID、UTC 时间、级别、线程、模块和事件字段。主程序使用 `tracing-appender` 统一写文件、按天轮转和清理历史文件；Windows SSH wrapper 通过带随机令牌认证的本机回环 IPC 转发日志，不打开日志文件。后台有界队列写入，正常退出时刷盘；队列满时丢弃日志，并在退出时报告数量。异常强制终止可能丢失尚未刷盘的日志。
 
-按 UTC 天轮转，最多保留 `max_files` 个日期文件。旧版本的 `yiterm-...` 文件保留原位，新日志使用 `yiterm.` 前缀。此设置不限制单个文件大小。目录无法创建或文件无法打开时在状态栏提示；SSH wrapper 无法连接日志转发服务时会在终端显示错误。Windows 和 macOS CI 会实际运行日志及多进程转发集成测试。
+按 UTC 天轮转，最多保留 `max_files` 个日期文件。旧版本的 `yiterm-...` 文件保留原位，新日志使用 `yiterm.` 前缀。此设置不限制单个文件大小。目录无法创建或文件无法打开时在状态栏提示；SSH wrapper 无法连接日志转发服务时会在终端显示错误。
 
 不记录终端输出、用户输入、剪贴板正文和图片内容。Windows 内置 SSH wrapper 与主程序共用日志文件；SSH 配置解析失败时会记录具体失败项，便于排查 OpenSSH 配置。PTY、图片上传和粘贴也记录调用侧诊断信息。
 
@@ -254,9 +252,9 @@ Windows CI 额外保存 `profiling-windows-<commit>` artifact，内含同次优�
 
 版本号同步更新 `Cargo.toml` 和 `Cargo.lock`，提交后创建对应的 `v<版本号>` tag，并用 `git push --atomic origin main v<版本号>` 一起推送。
 
-只有分支推送触发 CI，tag 推送不单独触发。一次 main 流水线完成 macOS、Windows、Linux 构建与测试；全部通过后，如果当前提交有对应版本 tag，就直接使用本次构建产物发布 GitHub Release。构建的打包步骤输出当前提交的版本 tag，发布 job 检查 macOS / Windows 和 Linux 打包步骤输出的版本 tag 一致后运行；没有对应 tag 时跳过整个发布 job。若 tag 在 main 流水线结束后才推送，可在 main 上手动运行该工作流完成发布。
+只有分支推送触发 CI，tag 推送不单独触发。一次 main 流水线完成 macOS、Windows、Linux 构建；全部构建成功后，如果当前提交有对应版本 tag，就直接使用本次构建产物发布 GitHub Release。构建的打包步骤输出当前提交的版本 tag，发布 job 检查 macOS / Windows 和 Linux 打包步骤输出的版本 tag 一致后运行；没有对应 tag 时跳过整个发布 job。若 tag 在 main 流水线结束后才推送，可在 main 上手动运行该工作流完成发布。
 
-CI 固定使用 Rust `1.99.1`，避免浮动 `stable` 自动升级导致依赖缓存失效。升级工具链时同步修改 `.github/workflows/ci.yml` 中的 `toolchain`、Linux `RUST_TOOLCHAIN` 和 Linux 缓存键；升级后的首次构建需要重建缓存。缓存前移除 runner 预装的其他 Rust 工具链，避免缓存键受 runner 镜像更新影响。release 调试符号配置在工作流全局设置，缓存、编译和测试使用同一配置。
+CI 固定使用 Rust `1.99.1`，避免浮动 `stable` 自动升级导致依赖缓存失效。升级工具链时同步修改 `.github/workflows/ci.yml` 中的 `toolchain`、Linux `RUST_TOOLCHAIN` 和 Linux 缓存键；升级后的首次构建需要重建缓存。缓存前移除 runner 预装的其他 Rust 工具链，避免缓存键受 runner 镜像更新影响。release 调试符号配置在工作流全局设置，缓存和编译使用同一配置。
 
 ## 平台兼容层与实现结构
 
@@ -271,7 +269,7 @@ CI 固定使用 Rust `1.99.1`，避免浮动 `stable` 自动升级导致依赖�
 - `src/backend.rs`：平台颜色、鼠标按钮类型与 PTY 重绘通知的适配边界。
 - `src/main.rs`：共用的 PTY 会话、终端协议、标签与分栏树、SSH、链接解析和异步图片粘贴。
 - `src/ui.rs`：Windows / macOS 的 GPUI 界面与输入处理。
-- `src/ui_egui.rs`：Linux 原有界面、字符渲染、输入法、快捷键、鼠标与字体回退，以及原有回归测试。
+- `src/ui_egui.rs`：Linux 原有界面、字符渲染、输入法、快捷键、鼠标与字体回退。
 - `src/theme.rs` 和 `src/settings.rs`：共用主题配色和配置格式。
 - `src/profiling.rs` / `src/profiling_egui.rs`：两个后端各自的性能统计，日志不记录终端内容。
 
@@ -279,7 +277,7 @@ Cargo 按目标平台声明依赖：Linux 不编译 GPUI；Windows / macOS 不�
 
 界面沿用迁移前的布局与文案：Settings / Pane / Tools / About 菜单、编号标签与 +、分栏标题左侧的 ×、底部 Paste 与状态栏，以及原有设置和 About 弹窗。GPUI 的 `EntityInputHandler` 接收文字与输入法预编辑 / 提交；Linux 保留 egui 的原有输入处理。
 
-本机只运行 macOS 构建与测试，不安装 Windows 工具链或交叉编译 Windows / Linux。Windows 和 Linux 的实际构建与运行验证分别交给对应 CI runner；依赖分流检查不能替代这些平台的构建与运行测试。
+本机只运行 macOS Release 构建，不安装 Windows 工具链或交叉编译 Windows / Linux。Windows 和 Linux 的实际构建分别交给对应 CI runner。
 
 ## 字体和字号
 

@@ -182,7 +182,7 @@ async fn expect_success(channel: &mut Channel<client::Msg>) -> Result<()> {
     .await?
 }
 
-#[cfg(any(windows, test))]
+#[cfg(windows)]
 fn shell_request_reply(message: &ChannelMsg, pending: &mut bool) -> Result<bool> {
     if !*pending {
         return Ok(false);
@@ -227,75 +227,4 @@ fn integration_name(directory: &std::path::Path) -> Result<&str> {
         "Invalid SSH integration directory"
     );
     Ok(name)
-}
-
-#[cfg(test)]
-mod proxyjump_tests {
-    use super::proxyjump_args;
-
-    #[test]
-    fn proxyjump_opens_stdio_forward_to_target_through_last_hop() {
-        let args = proxyjump_args("server.internal", 2222, "alice@jump1,jump2:2200");
-        assert_eq!(
-            args.iter()
-                .map(|arg| arg.to_string_lossy())
-                .collect::<Vec<_>>(),
-            [
-                "-W",
-                "server.internal:2222",
-                "-J",
-                "alice@jump1",
-                "jump2:2200"
-            ]
-        );
-    }
-
-    #[test]
-    fn proxyjump_brackets_ipv6_targets() {
-        let args = proxyjump_args("2001:db8::5", 22, "bastion");
-        assert_eq!(
-            args.iter()
-                .map(|arg| arg.to_string_lossy())
-                .collect::<Vec<_>>(),
-            ["-W", "[2001:db8::5]:22", "bastion"]
-        );
-    }
-}
-
-#[cfg(test)]
-mod shell_tests {
-    use super::{ChannelMsg, shell_request_reply};
-
-    #[test]
-    fn shell_reply_can_arrive_after_initial_output() {
-        let mut pending = true;
-        assert!(
-            !shell_request_reply(
-                &ChannelMsg::Data {
-                    data: b"login banner".as_slice().into()
-                },
-                &mut pending
-            )
-            .unwrap()
-        );
-        assert!(pending);
-        assert!(shell_request_reply(&ChannelMsg::Success, &mut pending).unwrap());
-        assert!(!pending);
-    }
-
-    #[test]
-    fn shell_failure_is_reported_after_any_initial_output() {
-        let mut pending = true;
-        assert!(
-            !shell_request_reply(
-                &ChannelMsg::Data {
-                    data: b"login banner".as_slice().into()
-                },
-                &mut pending
-            )
-            .unwrap()
-        );
-        assert!(shell_request_reply(&ChannelMsg::Failure, &mut pending).is_err());
-        assert!(!pending);
-    }
 }

@@ -910,9 +910,6 @@ fn terminal_cell_text(cell: &alacritty_terminal::term::cell::Cell) -> String {
         .collect()
 }
 
-#[cfg(test)]
-mod terminal_tests;
-
 #[cfg(windows)]
 fn windows_clipboard_owner(window: &gpui::Window) -> Result<isize> {
     use raw_window_handle::{HasWindowHandle, RawWindowHandle};

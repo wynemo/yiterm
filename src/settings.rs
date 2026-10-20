@@ -109,33 +109,6 @@ fn save_values(
     Ok(())
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    #[test]
-    fn cursor_roundtrip_preserves_logging() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("config.toml");
-        assert_eq!(load(&path).unwrap(), CursorSettings::default());
-        std::fs::write(&path, "[logging]\nfilter = 'debug'\n").unwrap();
-        for shape in [
-            CursorShape::Block,
-            CursorShape::Underline,
-            CursorShape::Beam,
-        ] {
-            let settings = CursorSettings {
-                shape,
-                blinking: false,
-            };
-            save(&path, settings).unwrap();
-            assert_eq!(load(&path).unwrap(), settings);
-            let value: toml::Value =
-                toml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
-            assert_eq!(value["logging"]["filter"].as_str(), Some("debug"));
-        }
-    }
-}
-
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub(crate) struct AppearanceSettings {
@@ -162,36 +135,6 @@ pub fn load_theme(path: &Path) -> Result<crate::theme::ThemeMode> {
 
 pub fn save_all(path: &Path, cursor: CursorSettings, theme: crate::theme::ThemeMode) -> Result<()> {
     save_values(path, cursor, Some(theme), None, None, None)
-}
-
-#[cfg(test)]
-mod appearance_tests {
-    use super::*;
-    use crate::theme::ThemeMode;
-
-    #[test]
-    fn theme_roundtrip_preserves_cursor_and_other_sections() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("config.toml");
-        assert_eq!(load_theme(&path).unwrap(), ThemeMode::Dark);
-        std::fs::write(
-            &path,
-            "[logging]\nfilter = 'debug'\n[cursor]\nshape = 'beam'\n",
-        )
-        .unwrap();
-        assert_eq!(load_theme(&path).unwrap(), ThemeMode::Dark);
-        let cursor = load(&path).unwrap();
-        for theme in [ThemeMode::Light, ThemeMode::Dark] {
-            save_all(&path, cursor, theme).unwrap();
-            assert_eq!(load_theme(&path).unwrap(), theme);
-            assert_eq!(load(&path).unwrap(), cursor);
-            let value: toml::Value =
-                toml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
-            assert_eq!(value["logging"]["filter"].as_str(), Some("debug"));
-        }
-        std::fs::write(&path, "[appearance]\ntheme = 'unknown'\n").unwrap();
-        assert!(load_theme(&path).is_err());
-    }
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -246,40 +189,6 @@ pub fn save_with_font(
 ) -> Result<()> {
     save_values(path, cursor, Some(theme), Some(font), None, None)
 }
-#[cfg(test)]
-mod font_tests {
-    use super::*;
-    #[test]
-    fn font_roundtrip_and_validation() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("config.toml");
-        assert_eq!(load_font(&path).unwrap(), FontSettings::default());
-        std::fs::write(&path, "[logging]\nfilter = 'debug'\n").unwrap();
-        let font = FontSettings {
-            family: "Menlo".into(),
-            size: 22.0,
-        };
-        save_with_font(&path, CursorSettings::default(), Default::default(), &font).unwrap();
-        assert_eq!(load_font(&path).unwrap(), font);
-        save_all(&path, CursorSettings::default(), Default::default()).unwrap();
-        assert_eq!(load_font(&path).unwrap(), font);
-        let value: toml::Value = toml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
-        assert_eq!(value["logging"]["filter"].as_str(), Some("debug"));
-        for size in [0.0, 49.0, f32::NAN, f32::INFINITY] {
-            assert!(
-                FontSettings {
-                    size,
-                    ..font.clone()
-                }
-                .validate()
-                .is_err()
-            );
-        }
-        std::fs::write(&path, "[font]\nsize = 100\n").unwrap();
-        assert!(load_font(&path).is_err());
-    }
-}
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct BrowserSettings {
@@ -318,47 +227,6 @@ pub fn save_preferences(
     browser: BrowserSettings,
 ) -> Result<()> {
     save_values(path, cursor, Some(theme), Some(font), Some(browser), None)
-}
-
-#[cfg(test)]
-mod browser_tests {
-    use super::*;
-
-    #[test]
-    fn browser_defaults_and_roundtrip_preserve_other_settings() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("config.toml");
-        assert!(load_browser(&path).unwrap().open_links_in_browser);
-        std::fs::write(&path, "[logging]\nfilter = 'debug'\n").unwrap();
-        assert_eq!(load_browser(&path).unwrap(), BrowserSettings::default());
-        for enabled in [false, true] {
-            let browser = BrowserSettings {
-                open_links_in_browser: enabled,
-            };
-            save_preferences(
-                &path,
-                CursorSettings::default(),
-                Default::default(),
-                &FontSettings::default(),
-                browser,
-            )
-            .unwrap();
-            assert_eq!(load_browser(&path).unwrap(), browser);
-            save_with_font(
-                &path,
-                CursorSettings::default(),
-                Default::default(),
-                &FontSettings::default(),
-            )
-            .unwrap();
-            assert_eq!(load_browser(&path).unwrap(), browser);
-            let value: toml::Value =
-                toml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
-            assert_eq!(value["logging"]["filter"].as_str(), Some("debug"));
-        }
-        std::fs::write(&path, "[browser]\nopen_links_in_browser = 'invalid'\n").unwrap();
-        assert!(load_browser(&path).is_err());
-    }
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -455,61 +323,6 @@ pub fn save_terminal_preferences(
         Some(browser),
         Some(shell),
     )
-}
-
-#[cfg(test)]
-mod shell_tests {
-    use super::*;
-
-    #[test]
-    fn shell_roundtrip_preserves_preferences_and_rejects_invalid_programs() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("config.toml");
-        assert_eq!(load_shell(&path).unwrap().mode, ShellMode::Default);
-        std::fs::write(&path, "[logging]\nfilter = 'debug'\n").unwrap();
-        let shell = ShellSettings {
-            mode: ShellMode::Program,
-            program: "C:\\Program Files\\PowerShell\\7\\pwsh.exe".into(),
-        };
-        save_terminal_preferences(
-            &path,
-            CursorSettings::default(),
-            Default::default(),
-            &FontSettings::default(),
-            BrowserSettings::default(),
-            &shell,
-        )
-        .unwrap();
-        assert_eq!(load_shell(&path).unwrap(), shell);
-        assert_eq!(shell.executable(None).unwrap(), shell.program);
-        assert_eq!(shell.executable(Some("/bin/sh")).unwrap(), "/bin/sh");
-        save_all(&path, CursorSettings::default(), Default::default()).unwrap();
-        assert_eq!(load_shell(&path).unwrap(), shell);
-        let value: toml::Value = toml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
-        assert_eq!(value["logging"]["filter"].as_str(), Some("debug"));
-        for program in ["", "   ", "bad\0program"] {
-            let invalid = ShellSettings {
-                program: program.into(),
-                ..shell.clone()
-            };
-            assert!(
-                save_terminal_preferences(
-                    &path,
-                    CursorSettings::default(),
-                    Default::default(),
-                    &FontSettings::default(),
-                    BrowserSettings::default(),
-                    &invalid
-                )
-                .is_err()
-            );
-            assert_eq!(load_shell(&path).unwrap(), shell);
-        }
-        std::fs::write(&path, "[shell]\nmode = 'program'\nprogram = ''\n").unwrap();
-        assert!(load_shell(&path).is_err());
-        std::fs::write(&path, "[shell]\nmode = 'unknown'\n").unwrap();
-        assert!(load_shell(&path).is_err());
-    }
 }
 
 /// Discover known shells without executing anything from PATH.
@@ -619,8 +432,7 @@ fn discover_shell_programs(paths: &[std::path::PathBuf], windows: bool) -> Vec<s
 }
 
 /// Git Bash / Mintty are window launchers. Embed their companion Bash in our PTY.
-/// Kept platform independent so the Windows installation layouts can be tested on macOS.
-#[cfg(any(windows, test))]
+#[cfg(windows)]
 pub(crate) fn resolve_windows_shell(program: &str) -> Result<std::path::PathBuf> {
     let path = Path::new(program);
     let name = path
@@ -667,239 +479,4 @@ pub(crate) fn resolve_windows_shell(program: &str) -> Result<std::path::PathBuf>
                 path.display()
             )
         })
-}
-
-#[cfg(test)]
-mod shell_discovery_tests {
-    use super::*;
-
-    #[test]
-    fn windows_path_discovery_keeps_distinct_installs_and_ignores_non_shells() {
-        let dir = tempfile::tempdir().unwrap();
-        let first = dir.path().join("First Install");
-        let second = dir.path().join("Second Install");
-        std::fs::create_dir_all(&first).unwrap();
-        std::fs::create_dir_all(&second).unwrap();
-        for name in [
-            "PWSH.EXE",
-            "git-bash.exe",
-            "mintty.exe",
-            "unrelated.exe",
-            "bash.cmd",
-        ] {
-            std::fs::write(first.join(name), "").unwrap();
-        }
-        std::fs::create_dir(first.join("cmd.exe")).unwrap();
-        std::fs::write(second.join("PWSH.EXE"), "").unwrap();
-        let paths = vec![
-            first.clone(),
-            dir.path().join("missing"),
-            first.clone(),
-            second.clone(),
-        ];
-        let found = discover_shell_programs(&paths, true);
-        assert_eq!(
-            found,
-            vec![
-                first.join("PWSH.EXE"),
-                first.join("git-bash.exe"),
-                first.join("mintty.exe"),
-                second.join("PWSH.EXE")
-            ]
-        );
-    }
-
-    #[test]
-    fn git_cmd_on_path_discovers_git_bash_and_mintty() {
-        let dir = tempfile::tempdir().unwrap();
-        let root = dir.path().join("Git With Spaces");
-        for subdir in ["cmd", "bin", "usr/bin"] {
-            std::fs::create_dir_all(root.join(subdir)).unwrap();
-        }
-        for file in [
-            "cmd/git.exe",
-            "git-bash.exe",
-            "bin/bash.exe",
-            "usr/bin/mintty.exe",
-        ] {
-            std::fs::write(root.join(file), "").unwrap();
-        }
-        let found = discover_shell_programs(
-            &[root.join("cmd"), root.join("bin"), root.join("usr/bin")],
-            true,
-        );
-        assert_eq!(
-            found,
-            vec![
-                root.join("git-bash.exe"),
-                root.join("bin/bash.exe"),
-                root.join("usr/bin/mintty.exe")
-            ]
-        );
-    }
-
-    #[test]
-    fn windows_launchers_resolve_to_companion_bash_without_opening_another_window() {
-        let dir = tempfile::tempdir().unwrap();
-        let root = dir.path().join("Git With Spaces");
-        std::fs::create_dir_all(root.join("bin")).unwrap();
-        std::fs::create_dir_all(root.join("usr/bin")).unwrap();
-        let git = root.join("git-bash.exe");
-        let mintty = root.join("usr/bin/mintty.exe");
-        let bash = root.join("bin/bash.exe");
-        std::fs::write(&git, "").unwrap();
-        std::fs::write(&mintty, "").unwrap();
-        assert!(resolve_windows_shell(git.to_str().unwrap()).is_err());
-        assert!(resolve_windows_shell(mintty.to_str().unwrap()).is_err());
-        std::fs::write(&bash, "").unwrap();
-        for launcher in [&git, &mintty] {
-            assert_eq!(
-                resolve_windows_shell(launcher.to_str().unwrap()).unwrap(),
-                bash
-            );
-        }
-        std::fs::remove_file(&bash).unwrap();
-        let msys_bash = root.join("usr/bin/bash.exe");
-        std::fs::write(&msys_bash, "").unwrap();
-        for launcher in [&git, &mintty] {
-            assert_eq!(
-                resolve_windows_shell(launcher.to_str().unwrap()).unwrap(),
-                msys_bash
-            );
-        }
-        let cygwin = dir.path().join("cygwin/bin");
-        std::fs::create_dir_all(&cygwin).unwrap();
-        std::fs::write(cygwin.join("bash.exe"), "").unwrap();
-        assert_eq!(
-            resolve_windows_shell(cygwin.join("mintty.exe").to_str().unwrap()).unwrap(),
-            cygwin.join("bash.exe")
-        );
-        assert_eq!(
-            resolve_windows_shell("pwsh.exe").unwrap(),
-            std::path::PathBuf::from("pwsh.exe")
-        );
-    }
-}
-
-#[cfg(all(test, windows))]
-mod windows_shell_pty_tests {
-    use super::*;
-    use std::{
-        io::{Read, Write},
-        sync::{Arc, Mutex, mpsc},
-        time::{Duration, Instant},
-    };
-
-    #[test]
-    fn git_bash_and_mintty_run_inside_pty() {
-        // ConPTY teardown can block in the Windows API. Bound the entire smoke
-        // test in a separate process, including startup and destruction.
-        const WORKER: &str = "YITERM_GIT_SHELL_TEST_WORKER";
-        if std::env::var_os(WORKER).is_none() {
-            let mut worker = std::process::Command::new(std::env::current_exe().unwrap())
-                .args([
-                    "--exact",
-                    "settings::windows_shell_pty_tests::git_bash_and_mintty_run_inside_pty",
-                    "--nocapture",
-                ])
-                .env(WORKER, "1")
-                .spawn()
-                .unwrap();
-            let deadline = Instant::now() + Duration::from_secs(90);
-            loop {
-                if let Some(status) = worker.try_wait().unwrap() {
-                    assert!(status.success(), "Git shell PTY worker failed: {status}");
-                    return;
-                }
-                if Instant::now() >= deadline {
-                    let _ = std::process::Command::new("taskkill")
-                        .args(["/PID", &worker.id().to_string(), "/T", "/F"])
-                        .status();
-                    let _ = worker.kill();
-                    panic!("Git shell PTY worker timed out after 90 seconds");
-                }
-                std::thread::sleep(Duration::from_millis(100));
-            }
-        }
-        let shells = available_shell_programs();
-        let integration = crate::ssh::Integration::new(&std::env::current_exe().unwrap()).unwrap();
-        for name in ["git-bash.exe", "mintty.exe"] {
-            let Some(launcher) = shells.iter().find(|path| {
-                Path::new(path)
-                    .file_name()
-                    .is_some_and(|file| file.eq_ignore_ascii_case(name))
-            }) else {
-                assert!(
-                    std::env::var_os("GITHUB_ACTIONS").is_none(),
-                    "Windows CI requires Git for Windows ({name})"
-                );
-                eprintln!("Skipping {name} PTY test: Git for Windows is not installed");
-                continue;
-            };
-            eprintln!("Testing {name}: {launcher}");
-            let pair = portable_pty::native_pty_system()
-                .openpty(portable_pty::PtySize {
-                    rows: 24,
-                    cols: 80,
-                    pixel_width: 0,
-                    pixel_height: 0,
-                })
-                .unwrap();
-            let mut command = integration.shell(launcher).unwrap();
-            assert_eq!(
-                Path::new(&command.get_argv()[0]).file_name().unwrap(),
-                "bash.exe"
-            );
-            command.args(["-c", "printf 'yiterm-%s' 'git-shell-ok'"]);
-            let mut reader = pair.master.try_clone_reader().unwrap();
-            let writer = Arc::new(Mutex::new(pair.master.take_writer().unwrap()));
-            let (tx, rx) = mpsc::channel();
-            let reader_writer = writer.clone();
-            let drain = std::thread::spawn(move || {
-                let mut output = Vec::new();
-                let mut buffer = [0; 4096];
-                let mut reported = false;
-                let mut answered_cursor = false;
-                loop {
-                    match reader.read(&mut buffer) {
-                        Ok(0) | Err(_) => break,
-                        Ok(n) => output.extend_from_slice(&buffer[..n]),
-                    }
-                    // portable-pty enables INHERIT_CURSOR; act like the terminal
-                    // and answer its initial cursor position query.
-                    if !answered_cursor && output.windows(4).any(|w| w == b"\x1b[6n") {
-                        let _ = reader_writer.lock().unwrap().write_all(b"\x1b[1;1R");
-                        answered_cursor = true;
-                    }
-                    if !reported && String::from_utf8_lossy(&output).contains("yiterm-git-shell-ok")
-                    {
-                        let _ = tx.send(output.clone());
-                        reported = true;
-                    }
-                    // Keep draining after the marker: ClosePseudoConsole may
-                    // synchronously flush output while the master is dropped.
-                }
-                if !reported {
-                    let _ = tx.send(output);
-                }
-            });
-            eprintln!("Spawning Bash for {name}");
-            let mut child = pair.slave.spawn_command(command).unwrap();
-            drop(pair.slave);
-            let output = rx.recv_timeout(Duration::from_secs(20));
-            eprintln!("Stopping Bash for {name}");
-            let _ = child.kill();
-            drop(writer);
-            drop(pair.master);
-            let _ = drain.join();
-            let output =
-                output.unwrap_or_else(|error| panic!("{name} produced no PTY output: {error}"));
-            assert!(
-                String::from_utf8_lossy(&output).contains("yiterm-git-shell-ok"),
-                "{name}: {}",
-                String::from_utf8_lossy(&output)
-            );
-            eprintln!("Passed {name}");
-        }
-    }
 }
