@@ -381,8 +381,27 @@ fn color(color: Color, foreground: bool, theme: ThemeMode) -> Rgba {
     }
 }
 
-// Resolve reverse video before adapting ANSI white to the light theme. Explicit
-// dark backgrounds (e.g. PSReadLine history search) must keep their white text.
+fn color_luminance(color: Rgba) -> f32 {
+    #[cfg(target_os = "linux")]
+    let channels = [color.r(), color.g(), color.b()].map(|value| f32::from(value) / 255.);
+    #[cfg(not(target_os = "linux"))]
+    let channels = [color.r, color.g, color.b];
+    let [r, g, b] = channels.map(|value| {
+        if value <= 0.04045 {
+            value / 12.92
+        } else {
+            ((value + 0.055) / 1.055).powf(2.4)
+        }
+    });
+    0.2126 * r + 0.7152 * g + 0.0722 * b
+}
+
+fn color_contrast(a: f32, b: f32) -> f32 {
+    (a.max(b) + 0.05) / (a.min(b) + 0.05)
+}
+
+// Resolve reverse video first, then keep neutral foregrounds readable against
+// the actual background (including PSReadLine's explicit black search region).
 fn terminal_colors(cell: &Cell, theme: ThemeMode) -> (Rgba, Rgba) {
     let mut fg = color(cell.fg, true, theme);
     let mut bg = color(cell.bg, false, theme);
@@ -400,6 +419,27 @@ fn terminal_colors(cell: &Cell, theme: ThemeMode) -> (Rgba, Rgba) {
         )
     {
         fg = theme.foreground();
+    }
+    if theme == ThemeMode::Light
+        && bg != theme.background()
+        && matches!(
+            foreground,
+            Color::Named(NamedColor::Foreground | NamedColor::White | NamedColor::BrightWhite)
+                | Color::Indexed(7 | 15)
+        )
+    {
+        let background_luminance = color_luminance(bg);
+        if color_contrast(color_luminance(fg), background_luminance) < 4.5 {
+            let dark = theme.foreground();
+            let white = rgb(0xFFFFFF);
+            fg = if color_contrast(color_luminance(dark), background_luminance)
+                > color_contrast(1., background_luminance)
+            {
+                dark
+            } else {
+                white
+            };
+        }
     }
     (fg, bg)
 }
