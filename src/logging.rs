@@ -68,6 +68,8 @@ struct Config {
     _font: crate::settings::FontSettings,
     #[serde(rename = "browser")]
     _browser: crate::settings::BrowserSettings,
+    #[serde(rename = "shell")]
+    _shell: crate::settings::ShellSettings,
 }
 
 pub struct Logging {

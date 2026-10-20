@@ -15,7 +15,7 @@ use gpui::{
 use gpui_component::{
     IndexPath, Root, Selectable, Sizable,
     button::{Button, ButtonVariants},
-    input::{InputEvent, InputState, NumberInput, NumberInputEvent, StepAction},
+    input::{Input, InputEvent, InputState, NumberInput, NumberInputEvent, StepAction},
     select::{SearchableVec, Select, SelectEvent, SelectState},
     switch::Switch,
 };
@@ -163,6 +163,8 @@ pub(super) struct TerminalUi {
     context_menu: bool,
     font_select: gpui::Entity<SelectState<SearchableVec<String>>>,
     font_size: gpui::Entity<InputState>,
+    shell_select: gpui::Entity<SelectState<SearchableVec<String>>>,
+    shell_program: gpui::Entity<InputState>,
     _settings_subscriptions: Vec<gpui::Subscription>,
     menu: Option<Menu>,
     context_anchor: UiPoint<Pixels>,
@@ -225,6 +227,19 @@ impl TerminalUi {
         let font_size = cx.new(|cx| {
             InputState::new(window, cx).default_value(app.font_settings.size.to_string())
         });
+        let (shell_choices, selected_shell) = shell_choices(&app.shell_settings);
+        let shell_select = cx.new(|cx| {
+            SelectState::new(
+                SearchableVec::new(shell_choices),
+                Some(IndexPath::default().row(selected_shell)),
+                window,
+                cx,
+            )
+            .searchable(true)
+        });
+        let shell_program = cx.new(|cx| {
+            InputState::new(window, cx).default_value(app.shell_settings.program.clone())
+        });
         let settings_subscriptions = vec![
             cx.subscribe_in(&font_select, window, Self::on_font_selected),
             cx.subscribe_in(&font_size, window, |this, input, event, window, cx| {
@@ -274,6 +289,44 @@ impl TerminalUi {
                     cx.notify();
                 },
             ),
+            cx.subscribe_in(
+                &shell_select,
+                window,
+                |this, _, event: &SelectEvent<SearchableVec<String>>, window, cx| {
+                    if let SelectEvent::Confirm(Some(value)) = event {
+                        match value.as_str() {
+                            "Default" => {
+                                this.app.shell_settings.mode = settings::ShellMode::Default
+                            }
+                            "Program" => {
+                                this.app.shell_settings.mode = settings::ShellMode::Program
+                            }
+                            _ => {
+                                this.app.shell_settings.mode = settings::ShellMode::Program;
+                                this.app.shell_settings.program = value.clone();
+                                this.shell_program.update(cx, |input, cx| {
+                                    input.set_value(value.clone(), window, cx)
+                                });
+                            }
+                        }
+                        this.apply_settings();
+                        cx.notify();
+                    }
+                },
+            ),
+            cx.subscribe_in(&shell_program, window, |this, input, event, window, cx| {
+                if matches!(event, InputEvent::Blur | InputEvent::PressEnter { .. }) {
+                    let program = input.read(cx).value().to_string();
+                    if program.trim().is_empty() {
+                        this.app.error = Some("Shell program cannot be empty".into());
+                    } else if program != this.app.shell_settings.program {
+                        this.app.shell_settings.program = program;
+                        this.refresh_shell_choices(window, cx);
+                        this.apply_settings();
+                    }
+                    cx.notify();
+                }
+            }),
         ];
         Self {
             app,
@@ -289,6 +342,8 @@ impl TerminalUi {
             context_menu: false,
             font_select,
             font_size,
+            shell_select,
+            shell_program,
             _settings_subscriptions: settings_subscriptions,
             menu: None,
             context_anchor: point(px(0.), px(0.)),
@@ -377,12 +432,13 @@ impl TerminalUi {
             .map(Ok)
             .unwrap_or_else(logging::config_path)
             .and_then(|path| {
-                settings::save_preferences(
+                settings::save_terminal_preferences(
                     &path,
                     self.app.cursor_settings,
                     self.app.theme,
                     &self.app.font_settings,
                     self.app.browser_settings,
+                    &self.app.shell_settings,
                 )
             });
         if let Err(error) = result {
@@ -402,11 +458,66 @@ impl TerminalUi {
             cx.notify();
         }
     }
+    fn refresh_shell_choices(&mut self, window: &mut Window, cx: &mut ViewContext<Self>) {
+        let (choices, selected) = shell_choices(&self.app.shell_settings);
+        self.shell_select.update(cx, |select, cx| {
+            select.set_items(SearchableVec::new(choices), window, cx);
+            select.set_selected_index(Some(IndexPath::default().row(selected)), window, cx);
+        });
+    }
+
+    fn browse_shell(&mut self, window: &mut Window, cx: &mut ViewContext<Self>) {
+        let paths = cx.prompt_for_paths(gpui::PathPromptOptions {
+            files: true,
+            directories: false,
+            multiple: false,
+            prompt: Some("Select Shell".into()),
+        });
+        cx.spawn_in(window, async move |this, cx| {
+            let result = paths.await;
+            let _ = this.update_in(cx, |this, window, cx| {
+                match result {
+                    Ok(Ok(Some(paths))) => {
+                        if let Some(path) = paths.first() {
+                            this.app.shell_settings = settings::ShellSettings {
+                                mode: settings::ShellMode::Program,
+                                program: path.to_string_lossy().into_owned(),
+                            };
+                            this.shell_program.update(cx, |input, cx| {
+                                input.set_value(
+                                    this.app.shell_settings.program.clone(),
+                                    window,
+                                    cx,
+                                );
+                            });
+                            this.refresh_shell_choices(window, cx);
+                            this.apply_settings();
+                        }
+                    }
+                    Ok(Ok(None)) => {}
+                    Ok(Err(error)) => {
+                        this.app.error = Some(format!("Cannot select shell: {error:#}"))
+                    }
+                    Err(error) => this.app.error = Some(format!("Cannot select shell: {error}")),
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
     fn reset_settings(&mut self, window: &mut Window, cx: &mut ViewContext<Self>) {
         self.app.cursor_settings = CursorSettings::default();
         self.app.theme = ThemeMode::default();
         self.app.font_settings = settings::FontSettings::default();
         self.app.browser_settings = settings::BrowserSettings::default();
+        self.app.shell_settings = settings::ShellSettings::default();
+        self.shell_select.update(cx, |select, cx| {
+            select.set_selected_index(Some(IndexPath::default().row(0)), window, cx)
+        });
+        self.shell_program.update(cx, |input, cx| {
+            input.set_value(self.app.shell_settings.program.clone(), window, cx)
+        });
         apply_component_theme(self.app.theme, Some(window), cx);
         let names = available_font_families(cx, &self.app.font_settings.family);
         let selected = names
@@ -1454,11 +1565,13 @@ impl Render for TerminalUi {
             .h(px(23.))
             .gap(px(4.))
             .px(px(4.))
-            .child(self.menu_button("settings", "Settings", cx, |this, _, _| {
-                this.app.settings_open = true;
-
-                this.menu = None;
-            }))
+            .child(
+                self.menu_button("settings", "Settings", cx, |this, window, cx| {
+                    this.app.settings_open = true;
+                    this.refresh_shell_choices(window, cx);
+                    this.menu = None;
+                }),
+            )
             .child(self.menu_button("pane-menu", "Pane", cx, |this, _, _| {
                 this.menu = if this.menu == Some(Menu::Pane) {
                     None
@@ -2121,6 +2234,54 @@ impl TerminalUi {
                     .line_height(px(28.))
                     .child("Settings"),
             )
+            .child(div().mt(px(20.)).opacity(0.6).child("TERMINAL"))
+            .child(
+                row()
+                    .child(description(
+                        "Shell",
+                        "Shell for new terminals. --shell takes priority.",
+                    ))
+                    .child(
+                        div()
+                            .w(px(320.))
+                            .flex()
+                            .gap(px(6.))
+                            .child(
+                                div().flex_1().min_w_0().child(
+                                    Select::new(&self.shell_select)
+                                        .small()
+                                        .search_placeholder("Search shells…")
+                                        .w_full(),
+                                ),
+                            )
+                            .child(
+                                Button::new("shell-browse")
+                                    .label("Browse…")
+                                    .small()
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        this.browse_shell(window, cx)
+                                    })),
+                            ),
+                    ),
+            )
+            .when(
+                self.app.shell_settings.mode == settings::ShellMode::Program,
+                |element| {
+                    element.child(divider()).child(
+                        row()
+                            .child(description(
+                                "Program",
+                                "Executable name or path, without arguments.",
+                            ))
+                            .child(
+                                div()
+                                    .w(px(260.))
+                                    .child(Input::new(&self.shell_program).small()),
+                            ),
+                    )
+                },
+            )
+            .child(divider())
             .child(div().mt(px(20.)).opacity(0.6).child("APPEARANCE"))
             .child(
                 row()
@@ -2825,4 +2986,21 @@ mod tests {
         cell.push_zerowidth('\u{fe0f}');
         assert_eq!(terminal_cell_text(&cell), "❤️");
     }
+}
+
+fn shell_choices(shell: &settings::ShellSettings) -> (Vec<String>, usize) {
+    let mut choices = vec!["Default".to_owned(), "Program".to_owned()];
+    choices.extend(settings::available_shell_programs());
+    let selected = if shell.mode == settings::ShellMode::Default {
+        0
+    } else {
+        choices
+            .iter()
+            .position(|p| p == &shell.program)
+            .unwrap_or_else(|| {
+                choices.push(shell.program.clone());
+                choices.len() - 1
+            })
+    };
+    (choices, selected)
 }

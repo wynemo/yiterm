@@ -233,6 +233,7 @@ fn background_sessions_process_output_and_survive_another_tab_closing() {
         cursor_settings: CursorSettings::default(),
         font_settings: settings::FontSettings::default(),
         browser_settings: settings::BrowserSettings::default(),
+        shell_settings: settings::ShellSettings::default(),
     };
     // Set different titles through each real PTY; the background session
     // must parse output too, without changing the foreground session title.
@@ -268,6 +269,19 @@ fn background_sessions_process_output_and_survive_another_tab_closing() {
     app.new_tab();
     assert_eq!(app.tabs.len(), 2);
     assert_eq!(app.active, 1);
+    // Settings changes affect subsequent sessions, while the existing panes survive.
+    app.args.shell = None;
+    app.shell_settings = settings::ShellSettings {
+        mode: settings::ShellMode::Program,
+        program: "/yiterm-nonexistent-shell".into(),
+    };
+    app.new_tab();
+    assert_eq!(app.tabs.len(), 2);
+    assert!(app.error.is_some());
+    app.shell_settings.program = "/bin/sh".into();
+    let session = app.new_session().unwrap();
+    assert!(session.child.process_id().is_some());
+    drop(session);
     app.args.shell = Some("/yiterm-nonexistent-shell".into());
     app.new_tab();
     assert_eq!(app.tabs.len(), 2);
@@ -437,4 +451,48 @@ fn osc52_copy_request_reaches_the_host_clipboard() {
         session.status,
         "Host clipboard write failed: clipboard unavailable"
     );
+}
+
+#[test]
+#[cfg(unix)]
+fn configured_shell_runs_and_cli_overrides_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = dir.path().join("config.toml");
+    // A path with spaces must remain a single executable argument.
+    let program = dir.path().join("test shell");
+    std::fs::write(
+        &program,
+        "#!/bin/sh\nprintf '\\033]0;configured-shell\\007'\nexec /bin/sh\n",
+    )
+    .unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let shell = settings::ShellSettings {
+        mode: settings::ShellMode::Program,
+        program: program.to_string_lossy().into_owned(),
+    };
+    settings::save_terminal_preferences(
+        &config,
+        CursorSettings::default(),
+        Default::default(),
+        &settings::FontSettings::default(),
+        settings::BrowserSettings::default(),
+        &shell,
+    )
+    .unwrap();
+    let mut args = Args {
+        ssh: None,
+        config: Some(config),
+        log_filter: None,
+        shell: None,
+    };
+    let mut session = TerminalSession::new(&args, None).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while session.title != "configured-shell" {
+        session.poll();
+        assert!(Instant::now() < deadline, "configured shell did not run");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    args.shell = Some("/yiterm-nonexistent-shell".into());
+    assert!(TerminalSession::new(&args, None).is_err());
 }

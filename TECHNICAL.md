@@ -29,6 +29,20 @@ cargo run --release -- --shell /bin/zsh
 cargo run --release -- --ssh my-server
 ```
 
+在 **Settings → Shell** 中选择 **Default**（默认）或 **Program**。Default 在 Windows 使用 `powershell.exe`，macOS/Linux 使用 `$SHELL`（未设置时使用 `/bin/sh`）。选择 Program 后，在 **Program** 输入可执行文件名或完整路径，例如 `pwsh.exe`、`cmd.exe`、`/bin/zsh`；路径包含空格时无需加引号，不接收整条命令或额外参数。macOS/Windows 输入后按 Enter 或离开输入框提交，Linux 编辑时自动保存。程序名不能为空；不存在或无法执行时，新建终端会显示启动错误。
+
+macOS/Windows 的 Shell 下拉列表还会列出当前进程 PATH 中发现的常见 Shell，显示完整路径以区分多个安装，包括 PowerShell、CMD、Bash、Git Bash、Mintty、WSL、Nushell 等；支持搜索，每次打开 Settings 时刷新。Windows 上，若 PATH 仅包含 Git 的 `cmd` 目录，还会检查同一安装目录下的 Git Bash、Bash 和 Mintty。未列出的程序可以手动输入，或点击 **Browse…** 打开系统文件对话框选择单个程序文件；取消不会改变设置。
+
+Windows 选择 `git-bash.exe` 或 `mintty.exe` 时，会查找同一安装目录下的 `bash.exe`，在 YiTerm 内启动 Bash；找不到时显示错误并提示直接选择 `bash.exe`。它们自己的终端窗口、主题和启动参数不用于 YiTerm。
+
+设置自动保存到当前配置文件（支持 `--config`），用于下次启动及之后新建的本地 tab / pane，已有会话继续运行。`--shell` 优先于此设置，`--ssh` 仍直接连接远端。配置示例：
+
+```toml
+[shell]
+mode = "program" # default / program
+program = "pwsh.exe"
+```
+
 Windows 默认启动 `powershell.exe`；macOS 默认使用 `$SHELL`。`--shell` 接收可执行文件路径，不接收整条命令。可以在窗口内直接输入 `ssh user@host`，进入远端后照常粘贴图片；也可使用 `--ssh` 直接启动远端会话。SSH 目标使用 `~/.ssh/config` 中的别名或 `user@host`；端口、密钥等写入 SSH config。远端需要 POSIX shell、可写的 `/tmp` 和 SFTP 支持。
 
 ### Linux x64 / CentOS 7.8
@@ -117,7 +131,7 @@ SSH 远端程序可通过 OSC 52 的 `c` 目标把文本复制到主机剪贴板
 
 ## 多标签页
 
-顶部标签栏点击 **+** 新建 tab，点击标签切换，点击 **×** 关闭。每个 tab 有独立的 shell / SSH 会话、终端输出和粘贴状态，后台 tab 持续运行。新 tab 复用启动时的 `--shell` 或 `--ssh` 参数；关闭最后一个 tab 时退出窗口。
+顶部标签栏点击 **+** 新建 tab，点击标签切换，点击 **×** 关闭。每个 tab 有独立的 shell / SSH 会话、终端输出和粘贴状态，后台 tab 持续运行。新 tab 使用当前 Shell 设置；启动时指定的 `--shell` 或 `--ssh` 参数优先；关闭最后一个 tab 时退出窗口。
 
 | 操作 | macOS | Windows / Linux |
 | --- | --- | --- |
@@ -128,7 +142,7 @@ SSH 远端程序可通过 OSC 52 的 `c` 目标把文本复制到主机剪贴板
 
 ## 分栏
 
-使用顶部 **Pane → Split Right** 把当前 pane 拆成左右两栏，**Split Down** 拆成上下两栏，可继续拆分任意 pane。新 pane 使用启动时的 shell / SSH 参数，并拥有独立会话。点击 pane 切换输入焦点，蓝色边框标记当前 pane；粘贴按钮和图片上传作用于当前 pane。
+使用顶部 **Pane → Split Right** 把当前 pane 拆成左右两栏，**Split Down** 拆成上下两栏，可继续拆分任意 pane。新 pane 使用当前 Shell 设置；启动时指定的 `--shell` 或 `--ssh` 参数优先，并拥有独立会话。点击 pane 切换输入焦点，蓝色边框标记当前 pane；粘贴按钮和图片上传作用于当前 pane。
 
 拖动分隔线调整大小。点击 pane 标题旁的 **×** 或选择 **Pane → Close Pane** 关闭当前 pane，剩余区域自动合并。shell 退出也只关闭对应 pane；关闭最后一个 pane 时关闭该 tab。tab 的 **×** 和关闭 tab 快捷键会关闭整个 tab 的所有 pane。
 
@@ -273,4 +287,4 @@ family = "Lilex"
 size = 16.0
 ```
 
-在 Settings 底部点击 **Reset Defaults**，立即恢复默认主题（Dark）、终端字体（Lilex，16px）及光标（闪烁方块），并恢复 Windows 终端链接默认在内置浏览器打开，随后自动保存。其他配置项（例如日志）保持不变。
+在 Settings 底部点击 **Reset Defaults**，立即恢复默认主题（Dark）、终端字体（Lilex，16px）及光标（闪烁方块），恢复 Shell 为 Default，并恢复 Windows 终端链接默认在内置浏览器打开，随后自动保存。其他配置项（例如日志）保持不变。

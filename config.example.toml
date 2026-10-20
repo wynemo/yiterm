@@ -24,3 +24,11 @@ size = 16.0
 # Windows: open Ctrl-clicked terminal links in the built-in SSH browser.
 [browser]
 open_links_in_browser = true
+
+# Shell for new local terminals. default / program
+[shell]
+mode = "default"
+# Executable name or path only; used when mode = "program".
+# Windows examples: powershell.exe, pwsh.exe, cmd.exe
+# macOS/Linux examples: /bin/zsh, /bin/bash
+# program = "powershell.exe"

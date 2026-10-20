@@ -876,17 +876,30 @@ impl eframe::App for TerminalApp {
             }
         }
         if self.settings_open {
-            let before = (self.cursor_settings, self.theme, self.font_settings.clone());
+            let before = (
+                self.cursor_settings,
+                self.theme,
+                self.font_settings.clone(),
+                self.shell_settings.clone(),
+            );
             let modal = show_settings(
                 ctx,
                 &mut self.cursor_settings,
                 &mut self.theme,
                 &mut self.font_settings,
+                &mut self.shell_settings,
             );
             if modal.inner || modal.should_close() {
                 self.settings_open = false;
             }
-            if before != (self.cursor_settings, self.theme, self.font_settings.clone()) {
+            if before
+                != (
+                    self.cursor_settings,
+                    self.theme,
+                    self.font_settings.clone(),
+                    self.shell_settings.clone(),
+                )
+            {
                 if before.2.family != self.font_settings.family {
                     configure_fonts_for(ctx, &self.font_settings.family);
                 }
@@ -898,11 +911,13 @@ impl eframe::App for TerminalApp {
                     .map(Ok)
                     .unwrap_or_else(logging::config_path)
                     .and_then(|path| {
-                        settings::save_with_font(
+                        settings::save_terminal_preferences(
                             &path,
                             self.cursor_settings,
                             self.theme,
                             &self.font_settings,
+                            self.browser_settings,
+                            &self.shell_settings,
                         )
                     });
                 if let Err(error) = result {
@@ -1020,6 +1035,7 @@ fn show_settings(
     settings: &mut CursorSettings,
     theme: &mut ThemeMode,
     font: &mut settings::FontSettings,
+    shell: &mut settings::ShellSettings,
 ) -> egui::ModalResponse<bool> {
     let families = system_font_families(ctx);
     egui::Modal::new(egui::Id::new("settings"))
@@ -1045,6 +1061,48 @@ fn show_settings(
                 .show(ui, |ui| {
                     ui.label(egui::RichText::new("Settings").size(20.0));
                     ui.add_space(20.0);
+                    ui.weak("TERMINAL");
+                    settings_row(
+                        ui,
+                        "Shell",
+                        "Shell for new terminals. --shell takes priority.",
+                        148.0,
+                        |ui| {
+                            egui::ComboBox::from_id_salt("shell-mode")
+                                .selected_text(if shell.mode == settings::ShellMode::Default {
+                                    "Default"
+                                } else {
+                                    "Program"
+                                })
+                                .show_ui(ui, |ui| {
+                                    ui.selectable_value(
+                                        &mut shell.mode,
+                                        settings::ShellMode::Default,
+                                        "Default",
+                                    );
+                                    ui.selectable_value(
+                                        &mut shell.mode,
+                                        settings::ShellMode::Program,
+                                        "Program",
+                                    );
+                                });
+                        },
+                    );
+                    if shell.mode == settings::ShellMode::Program {
+                        settings_row(
+                            ui,
+                            "Program",
+                            "Executable name or path, without arguments.",
+                            260.0,
+                            |ui| {
+                                ui.text_edit_singleline(&mut shell.program);
+                            },
+                        );
+                        if shell.program.trim().is_empty() {
+                            ui.colored_label(egui::Color32::RED, "Shell program cannot be empty");
+                        }
+                    }
+                    ui.separator();
                     ui.weak("APPEARANCE");
                     settings_row(
                         ui,
@@ -1217,6 +1275,7 @@ fn show_settings(
                         *settings = CursorSettings::default();
                         *theme = ThemeMode::default();
                         *font = settings::FontSettings::default();
+                        *shell = settings::ShellSettings::default();
                         ctx.data_mut(|data| data.remove::<String>(egui::Id::new("font-search")));
                     }
                 });
@@ -1788,7 +1847,13 @@ mod tests {
                     ..Default::default()
                 },
                 |ctx| {
-                    show_settings(ctx, &mut cursor, &mut theme, &mut font);
+                    show_settings(
+                        ctx,
+                        &mut cursor,
+                        &mut theme,
+                        &mut font,
+                        &mut settings::ShellSettings::default(),
+                    );
                 },
             );
             if frame == 2 {
@@ -1839,7 +1904,13 @@ mod tests {
                     ..Default::default()
                 },
                 |ctx| {
-                    show_settings(ctx, &mut cursor, &mut theme, &mut font);
+                    show_settings(
+                        ctx,
+                        &mut cursor,
+                        &mut theme,
+                        &mut font,
+                        &mut settings::ShellSettings::default(),
+                    );
                 },
             )
         };
@@ -1949,9 +2020,15 @@ mod tests {
                     ..Default::default()
                 },
                 |ctx| {
-                    dialog = show_settings(ctx, &mut cursor, &mut theme, &mut font)
-                        .response
-                        .rect;
+                    dialog = show_settings(
+                        ctx,
+                        &mut cursor,
+                        &mut theme,
+                        &mut font,
+                        &mut settings::ShellSettings::default(),
+                    )
+                    .response
+                    .rect;
                 },
             );
             if frame == 0 {
@@ -1994,6 +2071,7 @@ mod tests {
                             &mut settings,
                             &mut theme,
                             &mut settings::FontSettings::default(),
+                            &mut settings::ShellSettings::default(),
                         )
                         .response
                         .rect;
@@ -3023,6 +3101,7 @@ mod tests {
             cursor_settings: CursorSettings::default(),
             font_settings: settings::FontSettings::default(),
             browser_settings: settings::BrowserSettings::default(),
+            shell_settings: settings::ShellSettings::default(),
         };
         // Set different titles through each real PTY; the background session
         // must parse output too, without changing the foreground session title.

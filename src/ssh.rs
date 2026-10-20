@@ -96,6 +96,12 @@ impl Integration {
         )?)
     }
     pub fn shell(&self, shell: &str) -> Result<portable_pty::CommandBuilder> {
+        #[cfg(windows)]
+        let resolved = crate::settings::resolve_windows_shell(shell)?;
+        #[cfg(windows)]
+        let shell = resolved
+            .to_str()
+            .context("Shell path is not valid Unicode")?;
         let mut command = portable_pty::CommandBuilder::new(shell);
         let bin = self
             .directory
@@ -105,6 +111,13 @@ impl Integration {
             .into_owned();
         let quoted = crate::paste::quote_posix(&bin);
         let home = std::env::var_os("HOME")
+            .or_else(|| {
+                if cfg!(windows) {
+                    std::env::var_os("USERPROFILE")
+                } else {
+                    None
+                }
+            })
             .map(PathBuf::from)
             .unwrap_or_default();
         let name = Path::new(shell)
@@ -119,10 +132,15 @@ impl Integration {
             }
             "bash" => {
                 let rc = self.directory.path().join("bashrc");
+                let bash_bin = if cfg!(windows) {
+                    format!("\"$(cygpath -u {quoted})\"")
+                } else {
+                    quoted.clone()
+                };
                 std::fs::write(
                     &rc,
                     format!(
-                        "[ ! -f {0} ] || . {0}\nexport PATH={quoted}:\"$PATH\"\n",
+                        "[ ! -f {0} ] || . {0}\nexport PATH={bash_bin}:\"$PATH\"\n",
                         crate::paste::quote_posix(&home.join(".bashrc").to_string_lossy())
                     ),
                 )?;

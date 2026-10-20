@@ -149,13 +149,16 @@ impl TerminalSession {
         let mut command = if let Some(host) = &args.ssh {
             integration.direct(host)?
         } else {
-            let shell = args.shell.clone().unwrap_or_else(|| {
-                if cfg!(windows) {
-                    "powershell.exe".into()
-                } else {
-                    std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".into())
-                }
-            });
+            let shell = if let Some(shell) = &args.shell {
+                shell.clone()
+            } else {
+                let path = args
+                    .config
+                    .clone()
+                    .map(Ok)
+                    .unwrap_or_else(logging::config_path)?;
+                settings::load_shell(&path)?.executable(None)?
+            };
             integration.shell(&shell)?
         };
         command.env("TERM", "xterm-256color");
@@ -633,6 +636,7 @@ struct TerminalApp {
     cursor_settings: CursorSettings,
     font_settings: settings::FontSettings,
     browser_settings: settings::BrowserSettings,
+    shell_settings: settings::ShellSettings,
 }
 
 impl TerminalApp {
@@ -664,11 +668,20 @@ impl TerminalApp {
             cursor_settings,
             font_settings: settings::load_font(&path)?,
             browser_settings: settings::load_browser(&path)?,
+            shell_settings: settings::load_shell(&path)?,
         })
     }
 
+    fn new_session(&self) -> Result<TerminalSession> {
+        let mut args = self.args.clone();
+        if args.ssh.is_none() {
+            args.shell = Some(self.shell_settings.executable(args.shell.as_deref())?);
+        }
+        TerminalSession::new(&args, self.warning.as_deref())
+    }
+
     fn new_tab(&mut self) {
-        match TerminalSession::new(&self.args, self.warning.as_deref()) {
+        match self.new_session() {
             Ok(session) => {
                 self.tabs.push(TerminalTab::new(session));
                 self.select(self.tabs.len() - 1);
@@ -682,7 +695,7 @@ impl TerminalApp {
     }
 
     fn split_pane(&mut self, direction: SplitDirection) {
-        match TerminalSession::new(&self.args, self.warning.as_deref()) {
+        match self.new_session() {
             Ok(session) => {
                 self.tabs[self.active].split(session, direction);
                 self.error = None;
