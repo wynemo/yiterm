@@ -79,11 +79,18 @@ fn check_console(integration: &yiterm::ssh::Integration, shell: &str) {
         .unwrap();
     // --system is understood only by our helper, so this also proves PATH
     // selected it. Output and exit status must return through the same PTY.
-    let mut command = CommandBuilder::new(shell);
+    let bash = shell.ends_with("bash.exe");
+    let mut command = if bash {
+        integration.shell(shell).unwrap()
+    } else {
+        CommandBuilder::new(shell)
+    };
     if shell == "cmd.exe" {
         command.args(["/d", "/c", "ssh --system -V"]);
-    } else if shell.ends_with("bash.exe") {
-        command.args(["--noprofile", "--norc", "-c", "ssh --system -V"]);
+    } else if bash {
+        // Use the product's Bash bootstrap: MSYS startup can put its own SSH
+        // ahead of an inherited Windows PATH before our rcfile restores it.
+        command.args(["-c", "ssh --system -V"]);
     } else {
         command.args([
             "-NoProfile",

@@ -19,7 +19,7 @@ gh auth login
 python scripts/download_latest.py
 ```
 
-首次运行前执行 `gh auth login`，脚本通过 `gh api` 复用登录状态，也支持 gh 的 `GH_TOKEN` / `GITHUB_TOKEN` 环境变量。脚本默认选择默认分支最新成功、未过期的 push 构建，校验 SHA-256 后把 `yiterm.exe`、`bin/ssh.exe`、`conpty.dll`、`OpenConsole.exe` 写入当前目录（覆盖同名文件）。可用 `--branch main` 指定分支，或用 `--output 路径` 指定目录。
+首次运行前执行 `gh auth login`，脚本通过 `gh api` 复用登录状态，也支持 gh 的 `GH_TOKEN` / `GITHUB_TOKEN` 环境变量。脚本默认选择默认分支最新有可用 Windows 产物、未过期的 push 构建（不等待独立测试 job 完成），校验 SHA-256 后把 `yiterm.exe`、`bin/ssh.exe`、`conpty.dll`、`OpenConsole.exe` 写入当前目录（覆盖同名文件）。可用 `--branch main` 指定分支，或用 `--output 路径` 指定目录。
 
 安装 Rust stable；macOS 还需 Xcode Command Line Tools，Windows 需 MSVC C++ 构建工具。
 
@@ -71,6 +71,10 @@ cargo build --locked --release --target x86_64-unknown-linux-gnu --no-default-fe
 Linux 使用本地补丁 `vendor/eframe`：优先创建默认 OpenGL 3.3 core 上下文；失败时先尝试 OpenGL 2.1 compatibility，再尝试上游 GLES 回退。旧版 Mesa / 远程桌面因此可使用 egui_glow 的 GLSL 1.20 渲染路径，兼容不支持 3.3 core 的驱动。`vendor/glutin` 使用 `glXQueryExtensionsString` 查询当前连接与屏幕实际可用的 GLX 扩展，避免把客户端库支持的扩展误认为 X Server 也支持，从而在设置垂直同步时触发异步 `GLXBadContextTag`。窗口测试要求窗口实际可见且已初始化 OpenGL 渲染器。
 
 该方案保留系统 glibc，不替换它，也不随包携带显卡驱动。CI 容器共享 runner 的 Linux 内核，Xvfb 使用软件渲染；它不能替代 CentOS 7.8 的旧内核、真实显卡、输入法、剪贴板和桌面交互实机验证。Linux 构建与运行检查只在 Linux CI / Linux 设备执行，macOS 本机不运行 Linux 构建。
+
+### CI 构建与测试
+
+Windows 和 macOS 的构建 job 只负责 Release 构建、打包校验和上传产物，测试在独立 job 中运行；构建产物上传后即可下载，无需等待测试通过。Linux 同样分开构建上传与测试。测试失败会标记 CI 失败，但不撤回已上传的构建包；正式 GitHub Release 仍要求所有平台构建和测试通过。
 
 ### Windows SSH 与图片上传
 

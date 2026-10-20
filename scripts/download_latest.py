@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Download the latest successful Windows build into the current directory.
+"""Download the latest available Windows build into the current directory.
 
 Requires GitHub CLI (gh). Run gh auth login before using this script.
 """
@@ -51,7 +51,7 @@ class GitHub:
 
 def latest_artifact(api, branch):
     runs = api.pages("/actions/workflows/ci.yml/runs", "workflow_runs", {
-        "branch": branch, "status": "success", "event": "push",
+        "branch": branch, "event": "push",
     })
     for run in runs:
         artifacts = api.pages(f"/actions/runs/{run['id']}/artifacts", "artifacts")
@@ -60,7 +60,7 @@ def latest_artifact(api, branch):
                       and a["name"].endswith("-windows-x64")]
         if candidates:
             return run, max(candidates, key=lambda a: a["id"])
-    raise ValueError(f"分支 {branch} 没有成功且未过期的 Windows x64 构建产物")
+    raise ValueError(f"分支 {branch} 没有可用且未过期的 Windows x64 构建产物")
 
 
 def unpack(data):
