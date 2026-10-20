@@ -545,6 +545,15 @@ impl TerminalUi {
         cx.stop_propagation();
     }
     fn key(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut ViewContext<Self>) {
+        #[cfg(windows)]
+        if self.app.tabs[self.app.active]
+            .browser
+            .as_ref()
+            .is_some_and(|browser| browser.read(cx).maximized())
+        {
+            // The hidden terminal must not receive browser or VNC keystrokes.
+            return;
+        }
         let key = event.keystroke.key.as_str();
         let m = event.keystroke.modifiers;
         if self.blocked() {
@@ -1671,7 +1680,17 @@ impl Render for TerminalUi {
         }
         let entity = cx.entity();
         let painting = entity.clone();
-        let blocked = self.blocked();
+        #[cfg(windows)]
+        let browser = self.app.tabs[self.app.active].browser.clone();
+        #[cfg(windows)]
+        let browser_maximized = browser
+            .as_ref()
+            .is_some_and(|browser| browser.read(cx).maximized())
+            && !self.app.settings_open
+            && !self.app.about_open;
+        #[cfg(not(windows))]
+        let browser_maximized = false;
+        let blocked = self.blocked() || browser_maximized;
         let terminal = div()
             .id("terminal-area")
             .flex_1()
@@ -1740,8 +1759,6 @@ impl Render for TerminalUi {
 
         let content = div().flex().flex_1().min_h_0();
         #[cfg(windows)]
-        let browser = self.app.tabs[self.app.active].browser.clone();
-        #[cfg(windows)]
         let show_browser = !self.app.settings_open && !self.app.about_open;
         #[cfg(windows)]
         if !show_browser && let Some(browser) = &browser {
@@ -1750,19 +1767,29 @@ impl Render for TerminalUi {
         #[cfg(windows)]
         let content = if show_browser && let Some(browser) = browser {
             use gpui_component::resizable::{h_resizable, resizable_panel};
-            content.child(
-                h_resizable(("terminal-browser-split", self.app.tabs[self.app.active].id))
-                    .child(
-                        resizable_panel()
-                            .size_range(px(180.)..Pixels::MAX)
-                            .child(terminal),
-                    )
-                    .child(
-                        resizable_panel()
-                            .size_range(px(320.)..Pixels::MAX)
-                            .child(browser),
-                    ),
-            )
+            if browser_maximized {
+                self.panes.clear();
+                self.dividers.clear();
+                self.dragging = None;
+                self.hover = None;
+                content.child(browser)
+            } else {
+                let split_state = browser.read(cx).split_state.clone();
+                content.child(
+                    h_resizable(("terminal-browser-split", self.app.tabs[self.app.active].id))
+                        .with_state(&split_state)
+                        .child(
+                            resizable_panel()
+                                .size_range(px(180.)..Pixels::MAX)
+                                .child(terminal),
+                        )
+                        .child(
+                            resizable_panel()
+                                .size_range(px(320.)..Pixels::MAX)
+                                .child(browser),
+                        ),
+                )
+            }
         } else {
             content.child(terminal)
         };
@@ -1796,7 +1823,7 @@ impl Render for TerminalUi {
             .track_focus(&self.focus)
             .on_key_down(cx.listener(Self::key))
             // Override Root's Tab focus navigation only while the terminal is active.
-            .when(!self.blocked(), |root| {
+            .when(!blocked, |root| {
                 root.key_context("Terminal")
                     .on_action(cx.listener(|this, _: &Complete, _, cx| {
                         this.complete(false, cx);
@@ -1805,9 +1832,9 @@ impl Render for TerminalUi {
                         this.complete(true, cx);
                     }))
             })
-            .child(top)
+            .when(!browser_maximized, |root| root.child(top))
             .child(content)
-            .child(footer);
+            .when(!browser_maximized, |root| root.child(footer));
         if let Some(menu) = self.menu {
             let mut items = div()
                 .id("popup-menu")
@@ -2097,6 +2124,7 @@ impl TerminalUi {
                             cx.notify();
                         }).detach();
                         tab.browser = Some(browser.clone());
+                        cx.observe(&browser, |_, _, cx| cx.notify()).detach();
                         if this.app.tabs[this.app.active].id != tab_id {
                             browser.update(cx, |browser, cx| browser.set_visible(false, cx));
                         }

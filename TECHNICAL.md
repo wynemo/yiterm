@@ -105,6 +105,8 @@ Chromium 的 `host-resolver-rules` 同样会作用于代理入口的 IP 地址�
 
 Windows 的 GPUI DirectComposition 合成层放在原生子窗口下方，让 WebView2 子窗口能显示在终端界面之上。这项修正在 `vendor/gpui` 中维护（基于 GPUI 0.2.2）；上游的 `topmost = true` 会让不透明 GPUI 背景覆盖浏览器，造成请求成功、DOM 已加载但仍看到空白。Windows CI 同时打开真实 GPUI 窗口与 WebView2，并检查屏幕像素，验证浏览器内容没有被覆盖。
 
+浏览器和 VNC 共用的顶部标签栏提供 **Maximize / Restore**：点击 **Maximize** 后，面板占满应用窗口内容区，隐藏终端、主菜单、终端标签栏和底部状态栏；面板自身的标签栏与工具栏继续显示，可切换页面或点击 **Restore** 恢复原来的左右分栏宽度。切换大小不会重新连接 SSH、VNC 或重新加载网页；最大化时键盘输入不会发送到隐藏的终端。点击 **Close** 或关闭最后一个页面也会恢复终端界面。
+
 ### Windows 内置 VNC
 
 在已登录的内置 Windows SSH 会话中选择 **Tools → Open SSH VNC**，右侧会增加一个 **SSH VNC** 标签。填写 Host 和 Port 后点击 **Connect / Reconnect**；默认 `localhost:5901`，这里的 `localhost` 指 SSH 服务器。可连接 SSH 服务器可访问的其他 VNC 主机。目标主机须已有运行中的 VNC 服务，SSH 服务须允许 TCP 转发；YiTerm 不负责启动远端桌面服务。

@@ -58,6 +58,8 @@ pub(crate) struct BrowserUi {
     active: usize,
     next_id: u64,
     visible: bool,
+    maximized: bool,
+    pub(super) split_state: gpui::Entity<gpui_component::resizable::ResizableState>,
 }
 
 impl gpui::EventEmitter<CloseBrowser> for BrowserUi {}
@@ -83,6 +85,8 @@ impl BrowserUi {
             active: 0,
             next_id: 0,
             visible: false,
+            maximized: false,
+            split_state: cx.new(|_| gpui_component::resizable::ResizableState::default()),
         };
         this.open_tab(initial_url, window, cx);
         this
@@ -90,6 +94,10 @@ impl BrowserUi {
 
     pub(super) fn ssh_pid(&self) -> u32 {
         self.ssh_pid
+    }
+
+    pub(super) fn maximized(&self) -> bool {
+        self.maximized
     }
 
     pub(super) fn open_tab(
@@ -234,6 +242,19 @@ impl Render for BrowserUi {
                             .label("+")
                             .on_click(cx.listener(|this, _, window, cx| {
                                 this.open_tab("about:blank".into(), window, cx)
+                            })),
+                    )
+                    .child(
+                        Button::new("browser-maximize")
+                            .small()
+                            .label(if self.maximized {
+                                "Restore"
+                            } else {
+                                "Maximize"
+                            })
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.maximized = !this.maximized;
+                                cx.notify();
                             })),
                     )
                     .child(
