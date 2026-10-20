@@ -9,6 +9,9 @@ x11 = ["eframe/x11"]
 wayland = ["eframe/wayland"]
 
 [dependencies]
+axum = { version = "0.8", features = ["ws"] }
+futures-util = { version = "0.3", features = ["sink"] }
+include_dir = "0.7"
 alacritty_terminal = "0.26"
 anyhow = "1"
 arboard = "3"
@@ -67,3 +70,6 @@ glutin = { path = "vendor/glutin" }
 
 [target.'cfg(windows)'.build-dependencies]
 embed-resource = "3.0.12"
+
+[dev-dependencies]
+tokio-tungstenite = "0.29"

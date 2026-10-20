@@ -46,7 +46,7 @@ pub(super) struct CloseBrowser;
 struct OpenBrowserTab(String);
 impl gpui::EventEmitter<OpenBrowserTab> for BrowserPage {}
 
-/// A terminal tab owns one browser panel; its pages share the SSH proxy/profile.
+/// A terminal tab owns a side panel. Pages share SSH; VNC uses isolated profiles.
 pub(crate) struct BrowserUi {
     tunnel: Rc<yiterm::native_ssh::SocksTunnel>,
     ssh_pid: u32,
@@ -165,7 +165,11 @@ impl Render for BrowserUi {
             .iter()
             .enumerate()
             .map(|(index, (id, page))| {
-                let address = page.read(cx).address.read(cx).value().to_string();
+                let address = if page.read(cx)._vnc.is_some() {
+                    "SSH VNC".to_owned()
+                } else {
+                    page.read(cx).address.read(cx).value().to_string()
+                };
                 div()
                     .flex()
                     .flex_shrink_0()
@@ -248,6 +252,7 @@ impl Render for BrowserUi {
 struct BrowserPage {
     _tunnel: Rc<yiterm::native_ssh::SocksTunnel>,
     _ssh_pid: u32,
+    _vnc: Option<Rc<yiterm::vnc::VncBridge>>,
     webview: Option<WebViewState>,
     visible: bool,
     _user_data: Rc<Option<tempfile::TempDir>>,
@@ -265,40 +270,67 @@ impl BrowserPage {
         window: &mut Window,
         cx: &mut ViewContext<Self>,
     ) -> Self {
+        let is_vnc = initial_url == "yiterm:vnc";
+        let bridge_result = is_vnc.then(|| yiterm::vnc::VncBridge::start(tunnel.port()));
+        let (vnc, bridge_error) = match bridge_result {
+            Some(Ok(bridge)) => (Some(Rc::new(bridge)), None),
+            Some(Err(error)) => (None, Some(error)),
+            None => (None, None),
+        };
+        let initial_url = vnc
+            .as_ref()
+            .map(|bridge| bridge.url.clone())
+            .unwrap_or(initial_url);
+        // Local VNC pages must never share the SSH browser's proxy/profile.
+        let user_data = if is_vnc {
+            Rc::new(
+                tempfile::Builder::new()
+                    .prefix("yiterm-vnc-")
+                    .tempdir()
+                    .ok(),
+            )
+        } else {
+            user_data
+        };
         let address = cx.new(|cx| InputState::new(window, cx).default_value(initial_url.clone()));
         let (sender, receiver) = async_channel::bounded::<anyhow::Result<WebViewState>>(1);
         let (navigation_sender, navigation_receiver) = async_channel::unbounded();
         let (popup_sender, popup_receiver) = async_channel::unbounded();
         let status = Some("Starting WebView2…".to_owned());
         let parent = Self::parent_hwnd(window);
-        match (parent, user_data.as_ref().as_ref()) {
-            (Ok(parent), Some(user_data)) => {
-                if let Err(error) = Self::start_webview(
-                    parent,
-                    tunnel.port(),
-                    &initial_url,
-                    user_data.path(),
-                    sender.clone(),
-                    navigation_sender.clone(),
-                ) {
+        if let Some(error) = bridge_error {
+            let _ = sender.try_send(Err(error));
+        } else {
+            match (parent, user_data.as_ref().as_ref()) {
+                (Ok(parent), Some(user_data)) => {
+                    if let Err(error) = Self::start_webview(
+                        parent,
+                        if is_vnc { 0 } else { tunnel.port() },
+                        &initial_url,
+                        user_data.path(),
+                        sender.clone(),
+                        navigation_sender.clone(),
+                    ) {
+                        let _ = sender.try_send(Err(error));
+                    }
+                }
+                (Err(error), _) => {
                     let _ = sender.try_send(Err(error));
                 }
-            }
-            (Err(error), _) => {
-                let _ = sender.try_send(Err(error));
-            }
-            (_, None) => {
-                let _ = sender.try_send(Err(anyhow::anyhow!(
-                    "Cannot create a temporary WebView2 profile directory"
-                )));
+                (_, None) => {
+                    let _ = sender.try_send(Err(anyhow::anyhow!(
+                        "Cannot create a temporary WebView2 profile directory"
+                    )));
+                }
             }
         }
         // Retain the proxy/profile until an in-flight native initialization has
         // delivered (and closed) its controller, even if the page is closed early.
-        let initializing_resources = (tunnel.clone(), user_data.clone());
+        let initializing_resources = (tunnel.clone(), user_data.clone(), vnc.clone());
         let mut this = Self {
             _tunnel: tunnel,
             _ssh_pid: ssh_pid,
+            _vnc: vnc,
             webview: None,
             visible: false,
             _user_data: user_data,
@@ -328,7 +360,7 @@ impl BrowserPage {
                                 let mut uri = PWSTR::null();
                                 unsafe { args.Uri(&mut uri)?; }
                                 let uri = webview2_com::take_pwstr(uri);
-                                if uri == "about:blank" || normalize_url(&uri).is_ok() {
+                                if !is_vnc && (uri == "about:blank" || normalize_url(&uri).is_ok()) {
                                     let _ = popup_sender.try_send(uri);
                                 }
                             }
@@ -423,6 +455,11 @@ impl BrowserPage {
         let arguments = format!(
             "--proxy-server=socks5://127.0.0.1:{proxy_port} --proxy-bypass-list=<-loopback> --host-resolver-rules=\"MAP * ~NOTFOUND, EXCLUDE 127.0.0.1\" --disable-dns-prefetch --disable-quic --force-webrtc-ip-handling-policy=disable_non_proxied_udp"
         );
+        let arguments = if proxy_port == 0 {
+            "--no-proxy-server".to_owned()
+        } else {
+            arguments
+        };
         unsafe { options.set_additional_browser_arguments(arguments) };
         let options: ICoreWebView2EnvironmentOptions = options.into();
         let callback_sender = sender.clone();
@@ -457,6 +494,7 @@ impl BrowserPage {
                             controller,
                             &controller_initial_url,
                             controller_navigation_sender,
+                            proxy_port == 0,
                         );
                         let _ = controller_sender.try_send(state);
                         Ok(())
@@ -485,13 +523,15 @@ impl BrowserPage {
         controller: ICoreWebView2Controller,
         initial_url: &str,
         navigation_sender: async_channel::Sender<Option<String>>,
+        local_only: bool,
     ) -> anyhow::Result<WebViewState> {
         unsafe {
             controller.SetBounds(RECT::default())?;
             controller.SetIsVisible(false)?;
         }
         let webview = unsafe { controller.CoreWebView2()? };
-        let navigation = NavigationStartingEventHandler::create(Box::new(|_, args| {
+        let local_vnc = local_only.then(|| url::Url::parse(initial_url).expect("local VNC URL"));
+        let navigation = NavigationStartingEventHandler::create(Box::new(move |_, args| {
             if let Some(args) = args {
                 let mut uri = PWSTR::null();
                 unsafe { args.Uri(&mut uri)? };
@@ -499,6 +539,12 @@ impl BrowserPage {
                 let allowed = uri.eq_ignore_ascii_case("about:blank")
                     || uri.starts_with("https://")
                     || uri.starts_with("http://");
+                let allowed = allowed
+                    && local_vnc.as_ref().is_none_or(|local| {
+                        url::Url::parse(&uri).is_ok_and(|url| {
+                            url.origin() == local.origin() && url.path() == local.path()
+                        })
+                    });
                 if !allowed {
                     let mut cancel = BOOL(1);
                     unsafe { args.Cancel(&mut cancel)? };
@@ -628,48 +674,57 @@ impl Render for BrowserPage {
             .flex_col()
             .bg(rgb(0xF3F4F6))
             .text_color(rgb(0x202124))
-            .child(
-                div()
-                    .h(px(TOOLBAR_HEIGHT))
-                    .flex()
-                    .items_center()
-                    .gap(px(6.))
-                    .px(px(8.))
-                    .bg(rgb(0xE8EAED))
-                    .child(
-                        Button::new("browser-back")
-                            .label("Back")
-                            .small()
-                            .on_click(cx.listener(|this, _, _, _| this.go_back())),
-                    )
-                    .child(
-                        Button::new("browser-forward")
-                            .label("Forward")
-                            .small()
-                            .on_click(cx.listener(|this, _, _, _| this.go_forward())),
-                    )
-                    .child(
-                        Button::new("browser-reload")
-                            .label("Reload")
-                            .small()
-                            .on_click(cx.listener(|this, _, _, _| this.reload())),
-                    )
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .child(Input::new(&self.address).small()),
-                    )
-                    .child(
-                        Button::new("browser-go")
-                            .label("Go")
-                            .small()
-                            .on_click(cx.listener(|this, _, window, cx| {
+            .when(self._vnc.is_none(), |element| {
+                element.child(
+                    div()
+                        .h(px(TOOLBAR_HEIGHT))
+                        .flex()
+                        .items_center()
+                        .gap(px(6.))
+                        .px(px(8.))
+                        .bg(rgb(0xE8EAED))
+                        .child(
+                            Button::new("browser-back")
+                                .label("Back")
+                                .small()
+                                .on_click(cx.listener(|this, _, _, _| this.go_back())),
+                        )
+                        .child(
+                            Button::new("browser-forward")
+                                .label("Forward")
+                                .small()
+                                .on_click(cx.listener(|this, _, _, _| this.go_forward())),
+                        )
+                        .child(
+                            Button::new("browser-reload")
+                                .label("Reload")
+                                .small()
+                                .on_click(cx.listener(|this, _, _, _| this.reload())),
+                        )
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .child(Input::new(&self.address).small()),
+                        )
+                        .child(Button::new("browser-go").label("Go").small().on_click(
+                            cx.listener(|this, _, window, cx| {
                                 let value = this.address.read(cx).value().to_string();
                                 this.navigate(&value, window, cx);
-                            })),
-                    ),
-            )
+                            }),
+                        )),
+                )
+            })
+            .when(self._vnc.is_some(), |element| {
+                element.child(
+                    div()
+                        .h(px(TOOLBAR_HEIGHT))
+                        .flex()
+                        .items_center()
+                        .px(px(8.))
+                        .child("SSH VNC"),
+                )
+            })
             .child(
                 div()
                     .flex()
@@ -738,6 +793,10 @@ fn normalize_url(value: &str) -> anyhow::Result<String> {
 #[cfg(test)]
 #[path = "../../tests/common/native_server.rs"]
 mod native_server;
+
+#[cfg(test)]
+#[path = "../../tests/common/vnc_server.rs"]
+mod vnc_server;
 
 #[cfg(test)]
 mod tests {
@@ -920,6 +979,98 @@ mod tests {
             green(browser),
             "WebView2 is covered by GPUI: background={background:#08x}, browser={browser:#08x}"
         );
+    }
+
+    fn script(state: &WebViewState, source: &str) -> String {
+        let (sender, receiver) = async_channel::bounded(1);
+        let handler =
+            webview2_com::ExecuteScriptCompletedHandler::create(Box::new(move |result, value| {
+                let _ = sender.try_send(result.map(|()| value));
+                Ok(())
+            }));
+        let source: Vec<u16> = source.encode_utf16().chain(Some(0)).collect();
+        unsafe {
+            state
+                .webview
+                .ExecuteScript(PCWSTR(source.as_ptr()), &handler)
+                .unwrap();
+        }
+        pump_until(&receiver).unwrap()
+    }
+
+    #[test]
+    fn webview_loads_vnc_desktop_through_ssh() {
+        unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED).ok().unwrap() };
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let (_fixture, proxy_port, worker) = runtime.block_on(async {
+            let fixture = native_server::Fixture::new().await;
+            let target = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            *fixture.state.forward_target.lock().unwrap() = Some(target.local_addr().unwrap());
+            tokio::spawn(async move {
+                while let Ok((socket, _)) = target.accept().await {
+                    tokio::spawn(vnc_server::serve(socket));
+                }
+            });
+            let handle = Arc::new(
+                yiterm::native_ssh::connect(fixture.config.clone(), Arc::new(Password))
+                    .await
+                    .unwrap(),
+            );
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let port = listener.local_addr().unwrap().port();
+            let worker = tokio::spawn(yiterm::native_ssh::socks::serve(listener, handle));
+            (fixture, port, worker)
+        });
+        let bridge = yiterm::vnc::VncBridge::start(proxy_port).unwrap();
+        let profile = tempfile::tempdir().unwrap();
+        let (sender, receiver) = async_channel::bounded(1);
+        let (navigation_sender, navigation_receiver) = async_channel::unbounded();
+        BrowserPage::start_webview(
+            HWND_MESSAGE,
+            0,
+            &bridge.url,
+            profile.path(),
+            sender,
+            navigation_sender,
+        )
+        .unwrap();
+        let state = pump_until(&receiver).unwrap();
+        assert_eq!(pump_until(&navigation_receiver), None);
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while script(&state, "typeof document.getElementById('form').onsubmit") != "\"function\"" {
+            assert!(Instant::now() < deadline, "noVNC module did not load");
+            std::thread::sleep(Duration::from_millis(30));
+        }
+        script(
+            &state,
+            "document.getElementById('host').value='remote-only.invalid'; document.getElementById('form').requestSubmit()",
+        );
+        loop {
+            let pixel = script(
+                &state,
+                "(()=>{const c=document.querySelector('#screen canvas');return c && c.width===2 ? Array.from(c.getContext('2d').getImageData(0,0,1,1).data) : null})()",
+            );
+            if pixel == "[255,0,0,255]" {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "noVNC framebuffer missing: {pixel}; status={}",
+                script(&state, "document.getElementById('status').textContent")
+            );
+            std::thread::sleep(Duration::from_millis(30));
+        }
+        assert_eq!(
+            script(&state, "document.getElementById('status').textContent"),
+            "\"Connected\""
+        );
+        script(&state, "document.getElementById('disconnect').click()");
+        drop(state);
+        drop(bridge);
+        worker.abort();
+        unsafe {
+            CoUninitialize();
+        }
     }
 
     #[test]

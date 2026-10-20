@@ -1754,6 +1754,15 @@ impl Render for TerminalUi {
                             this.open_ssh_browser("about:blank".into(), window, cx);
                         },
                     ));
+                    items = items.child(self.menu_button(
+                        "open-ssh-vnc",
+                        "Open SSH VNC",
+                        cx,
+                        |this, window, cx| {
+                            this.menu = None;
+                            this.open_ssh_browser("yiterm:vnc".into(), window, cx);
+                        },
+                    ));
                 }
             }
             root = root.child(

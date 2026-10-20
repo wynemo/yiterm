@@ -68,7 +68,7 @@ jobs:
         run: cargo build --locked --release --target ${{ matrix.target }}
 
       - name: Test SOCKS forwarding over authenticated SSH
-        run: cargo test --locked --release --target ${{ matrix.target }} --test socks
+        run: cargo test --locked --release --target ${{ matrix.target }} --test socks --test vnc
 
       - name: Install WebView2 Runtime for browser integration test
         if: runner.os == 'Windows'
@@ -82,7 +82,7 @@ jobs:
           $process = Start-Process $installer -ArgumentList '/silent', '/install' -Wait -PassThru
           if ($process.ExitCode -ne 0) { throw "WebView2 installer failed: $($process.ExitCode)" }
 
-      - name: Test WebView2 page loading through SSH SOCKS
+      - name: Test WebView2 browser and VNC through SSH SOCKS
         if: runner.os == 'Windows'
         timeout-minutes: 5
         run: cargo test --locked --release --target ${{ matrix.target }} --bin yiterm ui::browser::tests::webview_loads_ -- --nocapture

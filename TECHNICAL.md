@@ -80,6 +80,18 @@ Chromium 的 `host-resolver-rules` 同样会作用于代理入口的 IP 地址�
 
 Windows 的 GPUI DirectComposition 合成层放在原生子窗口下方，让 WebView2 子窗口能显示在终端界面之上。这项修正在 `vendor/gpui` 中维护（基于 GPUI 0.2.2）；上游的 `topmost = true` 会让不透明 GPUI 背景覆盖浏览器，造成请求成功、DOM 已加载但仍看到空白。Windows CI 同时打开真实 GPUI 窗口与 WebView2，并检查屏幕像素，验证浏览器内容没有被覆盖。
 
+### Windows 内置 VNC
+
+在已登录的内置 Windows SSH 会话中选择 **Tools → Open SSH VNC**，右侧会增加一个 **SSH VNC** 标签。填写 Host 和 Port 后点击 **Connect / Reconnect**；默认 `localhost:5901`，这里的 `localhost` 指 SSH 服务器。可连接 SSH 服务器可访问的其他 VNC 主机。目标主机须已有运行中的 VNC 服务，SSH 服务须允许 TCP 转发；YiTerm 不负责启动远端桌面服务。
+
+VNC 标签与浏览器共用右侧标签栏和已认证 SSH transport；每个 VNC 标签拥有独立连接、本机桥接端口和 WebView2 临时配置目录。通过菜单可增加多个 VNC 标签，切换终端 tab 时连接保留，关闭 VNC 标签会关闭桥接及活动连接。SSH 断开后显示断连状态；重新登录 SSH 后应从菜单新建 VNC 标签。系统 OpenSSH / `ssh --system` 会话无法共享连接。需要 Microsoft Edge WebView2 Runtime。
+
+支持键鼠操作、**Fit** 缩放、**View only** 只读模式、**Ctrl+Alt+Del**、手动断开和重连。**Send clipboard text** 弹出文本框，将输入的文本发送到远端剪贴板；远端剪贴板更新时弹出可复制的文本框。剪贴板为文本传输，不自动读取或改写系统剪贴板。VNC 凭据在需要时通过认证框输入，密码字段隐藏内容，不保存到 YiTerm 配置或日志。具体认证和剪贴板能力取决于服务器与 noVNC 的兼容情况；不提供音频或文件传输。
+
+内置 [noVNC v1.7.0](https://github.com/novnc/noVNC/tree/v1.7.0) 原始资源位于 `assets/novnc/`，构建时嵌入程序，无需 CDN、Node.js 或远端 websockify。许可证与来源见 [LICENSE.txt](assets/novnc/LICENSE.txt) 和 [UPSTREAM.txt](assets/novnc/UPSTREAM.txt)。本机 Rust 桥接仅监听 `127.0.0.1` 随机端口，以随机会话令牌和 WebSocket Origin 检查限制访问；VNC WebView 禁用代理并限制在内置页面导航，页面的 CSP 限制资源和网络请求。桥接通过现有 SOCKS5 将目标域名交给 SSH 服务器解析，不回退本机直连。SSH 保护到 SSH 服务器的链路，SSH 服务器到另一台 VNC 主机之间的加密取决于 VNC 服务配置。
+
+`cargo test --locked --test vnc --test socks` 验证真实 SSH 上的双向 WebSocket/RFB 字节流、远端域名、访问限制与关闭后的连接回收。Windows CI 另运行 `ui::browser::tests::webview_loads_vnc_desktop_through_ssh`，用真实 WebView2/noVNC 与 RFB 测试服务验证桌面像素绘制；Windows 的焦点、输入法、实际服务器认证和高 DPI 仍需实机兼容性验证。
+
 本机开发只运行当前平台的 `cargo test --locked`；Windows 控制台、命名管道、窗口缩放和登录后连续传图的集成测试由 Windows CI runner 执行，不在 macOS 上安装 Windows 工具链或交叉编译。
 
 

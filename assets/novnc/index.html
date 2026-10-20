@@ -1,0 +1,95 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<title>SSH VNC</title>
+<style>
+body { margin: 0; background: #202124; color: #eee; font: 14px system-ui; }
+form, .tools { display: flex; gap: 8px; padding: 10px; flex-wrap: wrap; }
+input, button { padding: 5px; }
+#screen { height: calc(100vh - 160px); min-height: 100px; }
+#status { padding: 0 10px; }
+dialog form { flex-direction: column; }
+</style>
+<form id="form">
+  <label>Host <input id="host" value="localhost" required maxlength="255"></label>
+  <label>Port <input id="port" type="number" value="5901" min="1" max="65535" required></label>
+  <button>Connect / Reconnect</button>
+</form>
+<div class="tools">
+  <button id="disconnect">Disconnect</button>
+  <label><input id="scale" type="checkbox" checked>Fit</label>
+  <label><input id="readonly" type="checkbox">View only</label>
+  <button id="cad">Ctrl+Alt+Del</button>
+  <button id="paste">Send clipboard text</button>
+</div>
+<p id="status" role="status">Loading VNC client…</p>
+<div id="screen"></div>
+<dialog id="credentials"><form id="login"><strong>VNC authentication</strong><div id="fields"></div><button>Connect</button><button id="cancel" type="button">Cancel</button></form></dialog>
+<script type="module">
+import RFB from './core/rfb.js';
+let rfb;
+const el = id => document.getElementById(id);
+const status = text => el('status').textContent = text;
+const clearCredentials = () => { el('credentials').close(); el('fields').replaceChildren(); };
+status('Connect to a VNC server through the current SSH session.');
+el('form').onsubmit = event => {
+    event.preventDefault();
+    clearCredentials();
+    rfb?.disconnect();
+    el('screen').replaceChildren();
+    const url = new URL('./ws', location.href);
+    url.protocol = 'ws:';
+    url.search = new URLSearchParams({host: el('host').value, port: el('port').value});
+    status('Connecting…');
+    let client;
+    try { client = new RFB(el('screen'), url.href); }
+    catch { status('Cannot initialize VNC client'); return; }
+    rfb = client;
+    client.scaleViewport = el('scale').checked;
+    client.viewOnly = el('readonly').checked;
+    client.addEventListener('connect', () => { if (rfb === client) status('Connected'); });
+    client.addEventListener('disconnect', event => {
+        if (rfb !== client) return;
+        clearCredentials();
+        status(event.detail.clean ? 'Disconnected' : 'Connection failed or SSH disconnected. Check target, authentication and SSH forwarding.');
+    });
+    client.addEventListener('securityfailure', () => {
+        if (rfb === client) status('VNC authentication failed');
+    });
+    client.addEventListener('credentialsrequired', event => {
+        if (rfb !== client) return;
+        clearCredentials();
+        const fields = event.detail.types.map(type => {
+            const label = document.createElement('label');
+            label.textContent = type + ' ';
+            const input = document.createElement('input');
+            input.type = type === 'password' ? 'password' : 'text';
+            input.autocomplete = 'off';
+            label.append(input);
+            el('fields').append(label);
+            return [type, input];
+        });
+        el('login').onsubmit = event => {
+            event.preventDefault();
+            client.sendCredentials(Object.fromEntries(fields.map(([type, input]) => [type, input.value])));
+            clearCredentials();
+        };
+        el('credentials').showModal();
+        fields[0]?.[1].focus();
+    });
+    client.addEventListener('clipboard', event => {
+        if (rfb === client) prompt('Remote clipboard (copy text):', event.detail.text);
+    });
+};
+el('cancel').onclick = () => { clearCredentials(); rfb?.disconnect(); };
+el('credentials').oncancel = () => { clearCredentials(); rfb?.disconnect(); };
+el('disconnect').onclick = () => rfb?.disconnect();
+el('scale').onchange = () => { if (rfb) rfb.scaleViewport = el('scale').checked; };
+el('readonly').onchange = () => { if (rfb) rfb.viewOnly = el('readonly').checked; };
+el('cad').onclick = () => rfb?.sendCtrlAltDel();
+el('paste').onclick = () => {
+    const text = prompt('Text to send to remote clipboard');
+    if (text !== null) rfb?.clipboardPasteFrom(text);
+};
+</script>
+</html>

@@ -1,0 +1,5 @@
+noVNC v1.7.0
+Source: https://github.com/novnc/noVNC/tree/v1.7.0
+core/ and vendor/ are unmodified upstream sources.
+index.html is YiTerm's integration page.
+License notices: LICENSE.txt, AUTHORS, docs/LICENSE*, vendor/pako/LICENSE.
