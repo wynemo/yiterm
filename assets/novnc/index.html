@@ -45,6 +45,8 @@ el('form').onsubmit = event => {
     try { client = new RFB(el('screen'), url.href); }
     catch { status('Cannot initialize VNC client'); return; }
     rfb = client;
+    // Some servers omit cursor images or send a transparent cursor.
+    client.showDotCursor = true;
     client.scaleViewport = el('scale').checked;
     client.viewOnly = el('readonly').checked;
     client.addEventListener('connect', () => { if (rfb === client) status('Connected'); });

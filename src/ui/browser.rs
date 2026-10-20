@@ -1064,6 +1064,15 @@ mod tests {
             script(&state, "document.getElementById('status').textContent"),
             "\"Connected\""
         );
+        // The fixture sends no cursor shape. A visible local fallback is required.
+        assert_eq!(
+            script(
+                &state,
+                "getComputedStyle(document.querySelector('#screen canvas')).cursor.startsWith('url(')"
+            ),
+            "true",
+            "VNC must show a fallback cursor when the server supplies none"
+        );
         script(&state, "document.getElementById('disconnect').click()");
         drop(state);
         drop(bridge);
