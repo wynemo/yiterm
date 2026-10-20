@@ -538,7 +538,10 @@ fn discover_shell_programs(paths: &[std::path::PathBuf], windows: bool) -> Vec<s
                 return;
             }
         }
-        let key = path.to_string_lossy().into_owned();
+        let key = std::fs::canonicalize(&path)
+            .unwrap_or_else(|_| path.clone())
+            .to_string_lossy()
+            .into_owned();
         let key = if windows { key.to_lowercase() } else { key };
         if seen.insert(key) {
             found.push(path);
@@ -548,7 +551,10 @@ fn discover_shell_programs(paths: &[std::path::PathBuf], windows: bool) -> Vec<s
         let Ok(directory) = std::path::absolute(directory) else {
             continue;
         };
-        let key = directory.to_string_lossy().into_owned();
+        let key = std::fs::canonicalize(&directory)
+            .unwrap_or_else(|_| directory.clone())
+            .to_string_lossy()
+            .into_owned();
         if !directories.insert(if windows { key.to_lowercase() } else { key }) {
             continue;
         }
