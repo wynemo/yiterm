@@ -355,10 +355,8 @@ impl TerminalSession {
             }
             let bg = if selection.is_some_and(|range| range.contains(indexed.point)) {
                 theme.selection()
-            } else if indexed.cell.flags.contains(Flags::INVERSE) {
-                color(indexed.cell.fg, true, theme)
             } else {
-                color(indexed.cell.bg, false, theme)
+                terminal_colors(indexed.cell, theme).1
             };
             // The central panel already paints the default background. Avoid
             // thousands of redundant quads, and merge adjacent colored cells.
@@ -390,10 +388,8 @@ impl TerminalSession {
                 rect.min + Vec2::new(indexed.point.column.0 as f32 * cell.x, row as f32 * cell.y);
             let fg = if selection.is_some_and(|range| range.contains(indexed.point)) {
                 theme.selection_foreground()
-            } else if indexed.cell.flags.contains(Flags::INVERSE) {
-                color(indexed.cell.bg, false, theme)
             } else {
-                color(indexed.cell.fg, true, theme)
+                terminal_colors(indexed.cell, theme).0
             };
             if !indexed.cell.flags.intersects(
                 Flags::HIDDEN | Flags::WIDE_CHAR_SPACER | Flags::LEADING_WIDE_CHAR_SPACER,

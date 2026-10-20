@@ -1270,10 +1270,8 @@ fn paint_terminal(
         let selected = selection.is_some_and(|s| s.contains(indexed.point));
         let bg = if selected {
             theme.selection()
-        } else if indexed.cell.flags.contains(Flags::INVERSE) {
-            color(indexed.cell.fg, true, theme)
         } else {
-            color(indexed.cell.bg, false, theme)
+            terminal_colors(indexed.cell, theme).1
         };
         if bg != theme.background() {
             window.paint_quad(fill(
@@ -1296,10 +1294,8 @@ fn paint_terminal(
         let selected = selection.is_some_and(|s| s.contains(indexed.point));
         let fg = if selected {
             theme.selection_foreground()
-        } else if flags.contains(Flags::INVERSE) {
-            color(indexed.cell.bg, false, theme)
         } else {
-            color(indexed.cell.fg, true, theme)
+            terminal_colors(indexed.cell, theme).0
         };
         let bounds = cell_rect(
             rect.origin,
