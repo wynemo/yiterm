@@ -176,7 +176,7 @@ SSH 远端程序可通过 OSC 52 的 `c` 目标把文本复制到主机剪贴板
 
 使用顶部 **Pane → Split Right** 把当前 pane 拆成左右两栏，**Split Down** 拆成上下两栏，可继续拆分任意 pane。新 pane 使用当前 Shell 设置；启动时指定的 `--shell` 或 `--ssh` 参数优先，并拥有独立会话。点击 pane 切换输入焦点，蓝色边框标记当前 pane；粘贴按钮和图片上传作用于当前 pane。
 
-拖动分隔线调整大小。点击 pane 标题旁的 **×** 或选择 **Pane → Close Pane** 关闭当前 pane，剩余区域自动合并。shell 退出也只关闭对应 pane；关闭最后一个 pane 时关闭该 tab。tab 的 **×** 和关闭 tab 快捷键会关闭整个 tab 的所有 pane。
+拖动分隔线调整大小。终端内容区不显示额外的目录标题和关闭按钮，目录或会话标题显示在顶部 tab 中。选择 **Pane → Close Pane** 关闭当前 pane，剩余区域自动合并。shell 退出也只关闭对应 pane；关闭最后一个 pane 时关闭该 tab。tab 的 **×** 和关闭 tab 快捷键会关闭整个 tab 的所有 pane。
 
 ## About
 
@@ -321,7 +321,7 @@ CI 固定使用 Rust `1.99.1`，避免浮动 `stable` 自动升级导致依赖�
 
 Cargo 按目标平台声明依赖：Linux 不编译 GPUI；Windows / macOS 不编译 eframe、egui-winit 或 glutin。Linux 使用 `vendor/eframe`、`vendor/egui-winit` 和 `vendor/glutin` 的原有补丁；所有平台共用 `vendor/alacritty_terminal` 的 Unicode 修复。发布包按平台携带相应界面后端许可证。
 
-界面沿用迁移前的布局与文案：Settings / Pane / Tools / About 菜单、编号标签与 +、分栏标题左侧的 ×、底部 Paste 与状态栏，以及原有设置和 About 弹窗。GPUI 的 `EntityInputHandler` 接收文字与输入法预编辑 / 提交；Linux 保留 egui 的原有输入处理。
+界面保留 Settings / Pane / Tools / About 菜单、编号标签与 +、底部 Paste 与状态栏，以及原有设置和 About 弹窗。终端内容区直接显示终端网格，不再显示分栏标题和关闭按钮。GPUI 的 `EntityInputHandler` 接收文字与输入法预编辑 / 提交；Linux 保留 egui 的原有输入处理。
 
 本机只运行 macOS Release 构建，不安装 Windows 工具链或交叉编译 Windows / Linux。Windows 和 Linux 的实际构建分别交给对应 CI runner。
 

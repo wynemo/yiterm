@@ -654,7 +654,6 @@ impl TerminalTab {
             "split",
             &mut rectangles,
         );
-        let mut close = None;
         // Resolve focus before delivering this frame's keyboard and clipboard events.
         for &(index, rect) in &rectangles {
             if !egui::Popup::is_any_open(ctx)
@@ -665,27 +664,9 @@ impl TerminalTab {
             {
                 self.select(index);
             }
-            let header = Rect::from_min_size(rect.min, Vec2::new(rect.width(), 24.0));
-            let mut header_ui = ui.new_child(
-                egui::UiBuilder::new()
-                    .id_salt(("pane", index))
-                    .max_rect(header),
-            );
-            header_ui.set_clip_rect(header.intersect(ui.clip_rect()));
-            header_ui.horizontal(|ui| {
-                if ui.small_button("×").on_hover_text("Close pane").clicked() {
-                    close = Some(index);
-                }
-                ui.add(egui::Label::new(&self.panes[index].title).truncate())
-                    .on_hover_text(&self.panes[index].title);
-            });
         }
         for (index, rect) in rectangles {
-            let terminal_rect = Rect::from_min_max(
-                egui::pos2(rect.left(), (rect.top() + 24.0).min(rect.bottom())),
-                rect.max,
-            )
-            .shrink(2.0);
+            let terminal_rect = rect.shrink(2.0);
             let mut pane_ui = ui.new_child(
                 egui::UiBuilder::new()
                     .id_salt(("terminal", index))
@@ -706,9 +687,6 @@ impl TerminalTab {
                 ),
                 egui::StrokeKind::Inside,
             );
-        }
-        if let Some(index) = close {
-            self.close_pane(index);
         }
     }
 }
@@ -1047,13 +1025,6 @@ impl eframe::App for TerminalApp {
             .show(ctx, |ui| {
                 self.tabs[self.active].show(ctx, ui);
             });
-        // A pane can be closed from its header during rendering.
-        if self.tabs[self.active].panes.is_empty() {
-            self.close_tab(self.active);
-            if self.tabs.is_empty() {
-                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
-            }
-        }
         // PTY output wakes the UI directly. Keep a low-frequency fallback for
         // child exit, asynchronous paste results and Windows clipboard IPC.
         ctx.request_repaint_after(Duration::from_millis(250));

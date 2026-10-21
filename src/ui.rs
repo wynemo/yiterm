@@ -22,7 +22,6 @@ use gpui_component::{
 use std::{borrow::Cow, ops::Range};
 
 type Rect = Bounds<Pixels>;
-const HEADER: f32 = 24.;
 const DIVIDER: f32 = 5.;
 
 gpui::actions!(terminal, [Complete, CompletePrevious]);
@@ -61,10 +60,10 @@ impl PaneLayout {
                 index: *index,
                 outer: rect,
                 terminal: Bounds::new(
-                    rect.origin + point(px(2.), px(HEADER + 2.)),
+                    rect.origin + point(px(2.), px(2.)),
                     size(
                         (rect.size.width - px(4.)).max(px(1.)),
-                        (rect.size.height - px(HEADER + 4.)).max(px(1.)),
+                        (rect.size.height - px(4.)).max(px(1.)),
                     ),
                 ),
             }),
@@ -694,14 +693,6 @@ impl TerminalUi {
         };
         self.focus.focus(window);
         self.app.tabs[self.app.active].select(geo.index);
-        if event.button == MouseButton::Left
-            && event.position.y < geo.outer.top() + px(HEADER)
-            && event.position.x < geo.outer.left() + px(18.)
-        {
-            self.close_pane();
-            cx.notify();
-            return;
-        }
         if !geo.terminal.contains(&event.position) {
             cx.notify();
             return;
@@ -956,36 +947,6 @@ impl TerminalUi {
         for geo in &self.panes {
             let focused = geo.index == tab.active;
             window.paint_quad(fill(geo.outer, theme.background()));
-            let header = Bounds::new(geo.outer.origin, size(geo.outer.size.width, px(HEADER)));
-            window.with_content_mask(Some(ContentMask { bounds: header }), |window| {
-                window.paint_quad(fill(
-                    Bounds::new(
-                        geo.outer.origin + point(px(1.), px(2.)),
-                        size(px(14.), px(16.)),
-                    ),
-                    if theme == ThemeMode::Dark {
-                        rgb(0x333333)
-                    } else {
-                        rgb(0xE8E8E8)
-                    },
-                ));
-                paint_ui_text(
-                    "×",
-                    geo.outer.origin + point(px(3.), px(1.)),
-                    px(20.),
-                    theme.foreground(),
-                    window,
-                    cx,
-                );
-                paint_ui_text(
-                    &tab.panes[geo.index].title,
-                    geo.outer.origin + point(px(20.), px(1.)),
-                    px(20.),
-                    theme.foreground(),
-                    window,
-                    cx,
-                );
-            });
             let pane = &mut tab.panes[geo.index];
             pane.cursor_settings = self.app.cursor_settings;
             pane.font_settings = self.app.font_settings.clone();
@@ -1063,28 +1024,6 @@ fn text_run(text: &str, color: Rgba) -> TextRun {
         background_color: None,
         underline: None,
         strikethrough: None,
-    }
-}
-fn paint_ui_text(
-    text: &str,
-    origin: UiPoint<Pixels>,
-    height: Pixels,
-    color: Rgba,
-    window: &mut Window,
-    cx: &mut App,
-) {
-    let run = TextRun {
-        font: gpui::Font {
-            weight: gpui::FontWeight::NORMAL,
-            ..gpui::font("IBM Plex Sans")
-        },
-        ..text_run(text, color)
-    };
-    let line = window
-        .text_system()
-        .shape_line(text.to_owned().into(), px(13.), &[run], None);
-    if let Err(error) = line.paint(origin, height, window, cx) {
-        tracing::warn!(%error,"UI text painting failed");
     }
 }
 fn paint_text(
