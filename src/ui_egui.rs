@@ -52,6 +52,13 @@ impl TerminalSession {
     }
 
     fn show(&mut self, ctx: &egui::Context, ui: &mut egui::Ui, focused: bool) {
+        // The active pane keeps its visual selection behind dialogs, but must
+        // yield both keyboard events and IME output to the focused text editor.
+        // In particular, don't overwrite TextEdit's IME cursor later in the frame.
+        let focused = focused
+            && !ctx.wants_keyboard_input()
+            && !egui::Popup::is_any_open(ctx)
+            && ctx.memory(|memory| memory.top_modal_layer().is_none());
         let theme = ThemeMode::from_context(ctx);
         // Keep the cursor visible while typing and restart its blink on focus.
         if focused
@@ -147,10 +154,7 @@ impl TerminalSession {
         // Deliver input before shaping and submitting the existing screen. The
         // PTY can process/echo the key while we prepare this frame.
         let offset = self.term.grid().display_offset();
-        let events = if focused
-            && !egui::Popup::is_any_open(ctx)
-            && ctx.memory(|memory| memory.top_modal_layer().is_none())
-        {
+        let events = if focused {
             ctx.input(|i| i.events.clone())
         } else {
             Vec::new()
@@ -924,6 +928,17 @@ impl eframe::App for TerminalApp {
                 &mut self.shell_settings,
             );
             if modal.inner || modal.should_close() {
+                // Done/outside clicks can move focus after TextEdit was rendered.
+                // Commit its draft here as well, before removing the dialog.
+                if self.shell_settings.mode == settings::ShellMode::Program
+                    && let Some(draft) = ctx.data_mut(|data| {
+                        data.get_temp::<String>(egui::Id::new("shell-program-draft"))
+                    })
+                    && !draft.trim().is_empty()
+                    && !draft.contains('\0')
+                {
+                    self.shell_settings.program = draft;
+                }
                 self.settings_open = false;
             }
             if before
@@ -1177,6 +1192,7 @@ fn show_shell_settings(ui: &mut egui::Ui, shell: &mut settings::ShellSettings) {
                         ctx.data_mut(|data| data.get_temp::<String>(search_id).unwrap_or_default());
                     ui.add(
                         egui::TextEdit::singleline(&mut search)
+                            .id(egui::Id::new("shell-search-input"))
                             .hint_text("Search shells…")
                             .desired_width(f32::INFINITY),
                     );
@@ -1293,17 +1309,19 @@ fn show_shell_settings(ui: &mut egui::Ui, shell: &mut settings::ShellSettings) {
             data.get_temp::<String>(draft_id)
                 .unwrap_or_else(|| shell.program.clone())
         });
+        let mut finished_editing = false;
         settings_row(
             ui,
             "Program",
             "Executable name or path, without arguments.",
             300.0,
             |ui| {
-                ui.add(
+                let response = ui.add(
                     egui::TextEdit::singleline(&mut draft)
-                        .id_salt("shell-program")
+                        .id(egui::Id::new("shell-program-input"))
                         .desired_width(290.0),
                 );
+                finished_editing = response.lost_focus();
             },
         );
         // Keep invalid intermediate input visible without overwriting the last
@@ -1312,7 +1330,7 @@ fn show_shell_settings(ui: &mut egui::Ui, shell: &mut settings::ShellSettings) {
             ui.colored_label(Color32::RED, "Shell program cannot be empty");
         } else if draft.contains('\0') {
             ui.colored_label(Color32::RED, "Shell program contains a null character");
-        } else {
+        } else if finished_editing {
             shell.program = draft.clone();
         }
         ctx.data_mut(|data| data.insert_temp(draft_id, draft));
@@ -1421,6 +1439,7 @@ fn show_settings(
                                     let search_changed = ui
                                         .add(
                                             egui::TextEdit::singleline(&mut search)
+                                                .id(egui::Id::new("font-search-input"))
                                                 .hint_text("Search fonts…")
                                                 .desired_width(200.0),
                                         )
