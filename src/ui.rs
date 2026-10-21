@@ -769,17 +769,10 @@ impl TerminalUi {
             };
             pane.term.selection = Some(Selection::new(kind, pos, side));
         } else if event.button == MouseButton::Right {
-            if cfg!(windows)
-                && pane
-                    .term
-                    .selection_to_string()
-                    .is_some_and(|s| !s.is_empty())
-            {
-                pane.copy_selection();
-            } else {
-                self.context_menu = true;
-                self.context_anchor = event.position;
-            }
+            pane.mouse_button = None;
+            pane.selecting = false;
+            self.context_menu = true;
+            self.context_anchor = event.position;
         }
         cx.notify();
     }
@@ -1923,13 +1916,28 @@ impl Render for TerminalUi {
             );
         }
         if self.context_menu {
+            let pane = self.app.tabs[self.app.active].focused();
+            let can_copy = pane
+                .term
+                .selection_to_string()
+                .is_some_and(|s| !s.is_empty());
+            let can_paste = !pane.paste_busy;
+            let viewport = window.viewport_size();
+            let anchor = point(
+                self.context_anchor
+                    .x
+                    .min((viewport.width - px(120.)).max(px(0.))),
+                self.context_anchor
+                    .y
+                    .min((viewport.height - px(50.)).max(px(0.))),
+            );
             let items = div()
                 .id("context-menu")
                 .occlude()
                 .absolute()
-                .left(self.context_anchor.x)
-                .top(self.context_anchor.y)
-                .min_w(px(100.))
+                .left(anchor.x)
+                .top(anchor.y)
+                .w(px(120.))
                 .p(px(4.))
                 .flex()
                 .flex_col()
@@ -1939,26 +1947,47 @@ impl Render for TerminalUi {
                 .rounded(px(4.))
                 .shadow_md()
                 .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                .child(self.menu_button("menu-copy", "Copy", cx, |this, _, _| {
-                    this.session().copy_selection();
-                    this.context_menu = false;
-                }))
-                .child(self.menu_button("menu-paste", "Paste", cx, |this, _, _| {
-                    this.session().paste();
-                    this.context_menu = false;
-                }));
+                .on_mouse_down(MouseButton::Right, |_, _, cx| cx.stop_propagation())
+                .on_mouse_down(MouseButton::Middle, |_, _, cx| cx.stop_propagation())
+                .child(self.menu_button_enabled(
+                    "menu-copy",
+                    "Copy",
+                    can_copy,
+                    cx,
+                    |this, window, _| {
+                        this.session().copy_selection();
+                        this.context_menu = false;
+                        this.focus.focus(window);
+                    },
+                ))
+                .child(self.menu_button_enabled(
+                    "menu-paste",
+                    "Paste",
+                    can_paste,
+                    cx,
+                    |this, window, _| {
+                        this.session().paste();
+                        this.context_menu = false;
+                        this.focus.focus(window);
+                    },
+                ));
+            let dismiss = |this: &mut Self,
+                           _: &MouseDownEvent,
+                           window: &mut Window,
+                           cx: &mut ViewContext<Self>| {
+                this.context_menu = false;
+                this.focus.focus(window);
+                cx.stop_propagation();
+                cx.notify();
+            };
             root = root.child(
                 div()
                     .absolute()
                     .inset_0()
                     .occlude()
-                    .on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(|this, _, _, cx| {
-                            this.context_menu = false;
-                            cx.notify();
-                        }),
-                    )
+                    .on_mouse_down(MouseButton::Left, cx.listener(dismiss))
+                    .on_mouse_down(MouseButton::Right, cx.listener(dismiss))
+                    .on_mouse_down(MouseButton::Middle, cx.listener(dismiss))
                     .child(items),
             );
         }
@@ -2162,6 +2191,16 @@ impl TerminalUi {
         cx: &ViewContext<Self>,
         action: impl Fn(&mut Self, &mut Window, &mut ViewContext<Self>) + 'static,
     ) -> impl IntoElement {
+        self.menu_button_enabled(id, label, true, cx, action)
+    }
+    fn menu_button_enabled(
+        &self,
+        id: &'static str,
+        label: &'static str,
+        enabled: bool,
+        cx: &ViewContext<Self>,
+        action: impl Fn(&mut Self, &mut Window, &mut ViewContext<Self>) + 'static,
+    ) -> impl IntoElement {
         div()
             .id(id)
             .px(px(4.))
@@ -2169,12 +2208,16 @@ impl TerminalUi {
             .flex()
             .items_center()
             .rounded(px(2.))
-            .cursor_pointer()
-            .hover(|d| d.bg(self.app.theme.border()))
+            .when(enabled, |d| {
+                d.cursor_pointer().hover(|d| d.bg(self.app.theme.border()))
+            })
+            .when(!enabled, |d| d.opacity(0.4))
             .child(label)
             .on_click(cx.listener(move |this, _, window, cx| {
-                action(this, window, cx);
-                cx.notify();
+                if enabled {
+                    action(this, window, cx);
+                    cx.notify();
+                }
             }))
     }
     fn settings_panel(&self, cx: &ViewContext<Self>) -> gpui::AnyElement {

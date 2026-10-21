@@ -23,22 +23,6 @@ impl TerminalSession {
             ctx.request_repaint();
         }
     }
-    fn copy_on_right_click(&mut self, response: &egui::Response, windows: bool) -> bool {
-        if !windows || self.term.mode().intersects(TermMode::MOUSE_MODE) {
-            return false;
-        }
-        let Some(_) = self
-            .term
-            .selection_to_string()
-            .filter(|text| !text.is_empty())
-        else {
-            return false;
-        };
-        if response.secondary_clicked() {
-            self.copy_selection_egui(&response.ctx);
-        }
-        true
-    }
 }
 impl TerminalSession {
     fn flush_clipboard(&mut self) {
@@ -52,12 +36,56 @@ impl TerminalSession {
     }
 
     fn show(&mut self, ctx: &egui::Context, ui: &mut egui::Ui, focused: bool) {
+        let rect = ui.available_rect_before_wrap();
+        // Remember popups before showing the menu: its closing click/Esc must
+        // not become terminal input after the popup has disappeared.
+        let popup_was_open = egui::Popup::is_any_open(ctx);
+        let report_mouse = self.term.mode().intersects(TermMode::MOUSE_MODE)
+            && !ctx.input(|i| i.modifiers.shift)
+            && self.term.grid().display_offset() == 0;
+        let response = ui.interact(rect, ui.id().with("context-menu"), egui::Sense::click());
+        let popup = if report_mouse {
+            // Keep an existing Shift+right-click menu open after Shift is
+            // released, without treating application mouse clicks as triggers.
+            egui::Popup::menu(&response)
+                .open_memory(None)
+                .at_pointer_fixed()
+        } else {
+            egui::Popup::context_menu(&response)
+        };
+        let menu_shown = popup
+            .width(120.0)
+            .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
+            .show(|ui| {
+                self.selecting = false;
+                self.mouse_button = None;
+                let can_copy = self
+                    .term
+                    .selection_to_string()
+                    .is_some_and(|s| !s.is_empty());
+                if ui
+                    .add_enabled(can_copy, egui::Button::new("Copy"))
+                    .clicked()
+                {
+                    self.copy_selection_egui(ctx);
+                    ui.close();
+                }
+                if ui
+                    .add_enabled(!self.paste_busy, egui::Button::new("Paste"))
+                    .clicked()
+                {
+                    self.paste();
+                    ui.close();
+                }
+            })
+            .is_some();
+        let popup_blocks_input = popup_was_open || menu_shown || egui::Popup::is_any_open(ctx);
         // The active pane keeps its visual selection behind dialogs, but must
         // yield both keyboard events and IME output to the focused text editor.
         // In particular, don't overwrite TextEdit's IME cursor later in the frame.
         let focused = focused
             && !ctx.wants_keyboard_input()
-            && !egui::Popup::is_any_open(ctx)
+            && !popup_blocks_input
             && ctx.memory(|memory| memory.top_modal_layer().is_none());
         let theme = ThemeMode::from_context(ctx);
         // Keep the cursor visible while typing and restart its blink on focus.
@@ -77,7 +105,6 @@ impl TerminalSession {
         {
             self.cursor_blink_started = Instant::now();
         }
-        let rect = ui.available_rect_before_wrap();
         let font = FontId::monospace(self.font_settings.size);
         let cell = Vec2::new(
             ui.fonts_mut(|f| f.glyph_width(&font, 'M')),
@@ -101,7 +128,7 @@ impl TerminalSession {
             self.size = size;
         }
         let hovered = ui.rect_contains_pointer(rect);
-        let scroll = if hovered {
+        let scroll = if hovered && !popup_blocks_input {
             ctx.input(|i| i.smooth_scroll_delta.y)
         } else {
             0.0
@@ -611,18 +638,14 @@ impl TerminalTab {
         let mut close = None;
         // Resolve focus before delivering this frame's keyboard and clipboard events.
         for &(index, rect) in &rectangles {
-            if ctx
-                .input(|input| input.pointer.primary_pressed() || input.pointer.secondary_pressed())
+            if !egui::Popup::is_any_open(ctx)
+                && ctx.input(|input| {
+                    input.pointer.primary_pressed() || input.pointer.secondary_pressed()
+                })
                 && ui.rect_contains_pointer(rect)
             {
                 self.select(index);
             }
-            let response = ui.interact(
-                rect,
-                ui.id().with(("pane-menu", index)),
-                egui::Sense::click(),
-            );
-            self.panes[index].copy_on_right_click(&response, cfg!(windows));
             let header = Rect::from_min_size(rect.min, Vec2::new(rect.width(), 24.0));
             let mut header_ui = ui.new_child(
                 egui::UiBuilder::new()
