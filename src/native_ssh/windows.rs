@@ -491,16 +491,26 @@ impl Console {
             };
             check(SetConsoleCP(65001))?;
             check(SetConsoleOutputCP(65001))?;
-            check(SetConsoleMode(
-                input,
-                (input_mode
-                    & !(ENABLE_ECHO_INPUT
-                        | ENABLE_LINE_INPUT
-                        | ENABLE_PROCESSED_INPUT
-                        | ENABLE_QUICK_EDIT_MODE
-                        | ENABLE_VIRTUAL_TERMINAL_INPUT))
-                    | ENABLE_EXTENDED_FLAGS,
-            ))?;
+            // Do not inherit Win32 mouse input from the parent shell. ConPTY
+            // treats ENABLE_MOUSE_INPUT with Quick Edit disabled as a request
+            // for CSI ?1003;1006h, even when the remote shell never asked for
+            // mouse tracking. Remote VT mouse modes still pass through output.
+            let raw_input_mode = (input_mode
+                & !(ENABLE_ECHO_INPUT
+                    | ENABLE_LINE_INPUT
+                    | ENABLE_PROCESSED_INPUT
+                    | ENABLE_QUICK_EDIT_MODE
+                    | ENABLE_MOUSE_INPUT
+                    | ENABLE_VIRTUAL_TERMINAL_INPUT))
+                | ENABLE_EXTENDED_FLAGS;
+            check(SetConsoleMode(input, raw_input_mode))?;
+            tracing::info!(
+                saved_input_mode = input_mode,
+                input_mode = raw_input_mode,
+                mouse_input = false,
+                vt_input = false,
+                "SSH console input configured for authentication"
+            );
             check(SetConsoleMode(
                 output,
                 output_mode
@@ -527,7 +537,15 @@ impl Console {
         // function keys) into VT sequences for the remote terminal.
         let mut mode = 0;
         check(unsafe { GetConsoleMode(self.input, &mut mode) })?;
-        check(unsafe { SetConsoleMode(self.input, mode | ENABLE_VIRTUAL_TERMINAL_INPUT) })
+        let terminal_mode = (mode & !ENABLE_MOUSE_INPUT) | ENABLE_VIRTUAL_TERMINAL_INPUT;
+        check(unsafe { SetConsoleMode(self.input, terminal_mode) })?;
+        tracing::info!(
+            input_mode = terminal_mode,
+            mouse_input = false,
+            vt_input = true,
+            "SSH console input configured for terminal forwarding"
+        );
+        Ok(())
     }
 }
 impl Drop for Console {

@@ -149,6 +149,8 @@ Linux 不引入 GPUI、Vulkan 或新版 glibc 要求。上述兼容路径和验�
 
 应用启用终端鼠标上报时，普通右键按下和松开转发给应用（例如 Herdr 的右键菜单）；按住 **Shift + 右键** 打开 YiTerm 的 Copy / Paste 菜单。
 
+Windows 内置 SSH 在进入认证和终端转发时清除继承的 Win32 `ENABLE_MOUSE_INPUT`，避免关闭 Quick Edit 后由 ConPTY 自动发出 `1003/1006` 指令，使普通 SSH shell 意外接管选字和右键。远端程序主动发送的 VT 鼠标模式指令仍正常处理；SSH 退出时恢复父 shell 的原始控制台模式。默认 INFO 日志中的 `SSH console input configured ...` 记录输入模式及 `mouse_input=false`，无需开启 DEBUG 即可确认这一初始化步骤。
+
 终端程序开启鼠标模式时，普通鼠标操作发送给程序；按住 **Shift** 拖动可选择文字。选择也支持滚动历史中的内容。
 
 SSH 远端程序可通过 OSC 52 的 `c` 目标把文本复制到主机剪贴板，单次最多 1 MiB；YiTerm 不支持远端读取主机剪贴板。Windows 内置 SSH wrapper 在输出进入 ConPTY 前截获 OSC 52，通过当前用户 ACL 保护的命名管道交给主终端进程；剪贴板写入使用 YiTerm 主窗口作为 Win32 owner，并读回校验。日志记录管道就绪、收到的请求和写入结果，不记录剪贴板正文。
