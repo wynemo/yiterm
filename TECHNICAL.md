@@ -12,16 +12,14 @@ Rust 原生终端，Windows / macOS 使用 GPUI 0.2.2，Linux 保留原有 egui 
 
 图标以汉字“驿”为主体，使用深靛色圆角底、浅色字形和薄荷绿终端光标。资源位于 `assets/icons/`：`source.png` 为原始设计图，`yiterm.png` 为 1024×1024 透明背景图，`yiterm.ico` 包含 Windows 常用的 16、32、48、64、128、256 像素尺寸，`yiterm.icns` 包含 macOS 的标准及 Retina 尺寸。Windows 构建通过 `build.rs` 将 ICO 嵌入可执行文件的图标资源 ID 1，GPUI 使用同一资源作为窗口和任务栏图标。Linux 将 PNG 内嵌为窗口图标（Wayland 桌面是否显示取决于合成器）。macOS 发布包额外包含 `YiTerm.app`，其 `Info.plist` 引用 ICNS，Finder 和 Dock 使用该图标；打包时进行 ad-hoc 签名并验证，未进行 Apple 公证。解压后可双击应用或将其拖入“应用程序”。保留包根目录的 `yiterm` 供命令行及现有自动更新流程使用；`.app` 内运行时暂不支持自动更新，需要下载新版替换应用。
 
-下载 GitHub Actions 最新可用的 Windows x64 或 Linux x64 构建（Python 3.9+ 和 GitHub CLI `gh`）：
+下载 GitHub Actions 最新可用的 Windows x64 和 Linux x64 构建（Python 3.9+ 和 GitHub CLI `gh`）：
 
 ```sh
 gh auth login
 python scripts/download_latest.py
-# Linux x64
-python3 scripts/download_latest.py --platform linux-x64
 ```
 
-首次运行前执行 `gh auth login`，脚本通过 `gh api` 复用登录状态，也支持 gh 的 `GH_TOKEN` / `GITHUB_TOKEN` 环境变量。脚本默认选择默认分支最新有可用 Windows 产物、未过期的 push 构建，校验 SHA-256 后把 `yiterm.exe`、`bin/ssh.exe`、`conpty.dll`、`OpenConsole.exe` 写入当前目录（覆盖同名文件）。使用 `--platform linux-x64` 则选择最新有可用 Linux 产物的 push 构建，校验后从 `.tar.gz` 包读取 `yiterm`，写入输出目录并设置可执行权限（`0755`）。不指定 `--platform` 时保持下载 Windows x64。可用 `--branch main` 指定分支，或用 `--output 路径` 指定目录。
+首次运行前执行 `gh auth login`，脚本通过 `gh api` 复用登录状态，也支持 gh 的 `GH_TOKEN` / `GITHUB_TOKEN` 环境变量。脚本默认同时下载 Windows x64 和 Linux x64，分别选择默认分支最新有对应平台产物、未过期的 push 构建。校验 SHA-256 后，把 Windows 的 `yiterm.exe`、`bin/ssh.exe`、`conpty.dll`、`OpenConsole.exe` 和 Linux 的 `yiterm` 写入当前目录（覆盖同名文件），并为 Linux 程序设置可执行权限（`0755`）。所有请求的平台下载、校验完成后才开始替换现有文件。可用 `--branch main` 指定分支，或用 `--output 路径` 指定目录。
 
 安装 Rust stable；macOS 还需 Xcode Command Line Tools，Windows 需 MSVC C++ 构建工具。
 

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Download the latest available Windows or Linux build into the current directory.
+"""Download the latest available Windows and Linux builds into the current directory.
 
 Requires GitHub CLI (gh). Run gh auth login before using this script.
 """
@@ -103,8 +103,6 @@ def unpack(data, platform):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--repo", default="wynemo/yiterm", help="GitHub owner/repo")
-    parser.add_argument("--platform", choices=PLATFORMS, default="windows-x64",
-                        help="下载平台，默认 windows-x64；Linux 使用 linux-x64")
     parser.add_argument("--branch", help="默认使用仓库默认分支")
     parser.add_argument("--output", type=Path, default=Path.cwd(), help="输出目录，默认当前目录")
     args = parser.parse_args()
@@ -114,24 +112,27 @@ def main():
         parser.error("请先安装 GitHub CLI (gh)，然后运行 gh auth login。")
     api = GitHub(args.repo)
     branch = args.branch or api.json("")["default_branch"]
-    run, artifact = latest_artifact(api, branch, args.platform)
-    print(f"下载 {artifact['name']}\n构建：{run['html_url']}", flush=True)
-    data = api.get(f"/actions/artifacts/{artifact['id']}/zip")
-    digest = artifact.get("digest")
-    if digest and digest.startswith("sha256:"):
-        if hashlib.sha256(data).hexdigest() != digest.split(":", 1)[1]:
-            raise ValueError("Actions 产物 SHA-256 校验失败")
-    files = unpack(data, args.platform)
     args.output.mkdir(parents=True, exist_ok=True)
-    # Validate all files before replacing existing binaries.
+    # Stage and validate every requested platform before replacing existing files.
     with tempfile.TemporaryDirectory(prefix=".yiterm-download-", dir=args.output) as staging:
-        for name, content in files.items():
-            Path(staging, name).parent.mkdir(parents=True, exist_ok=True)
-            staged = Path(staging, name)
-            staged.write_bytes(content)
-            if args.platform == "linux-x64":
-                staged.chmod(0o755)
-        for name in files:
+        filenames = []
+        for platform in PLATFORMS:
+            run, artifact = latest_artifact(api, branch, platform)
+            print(f"下载 {artifact['name']}\n构建：{run['html_url']}", flush=True)
+            data = api.get(f"/actions/artifacts/{artifact['id']}/zip")
+            digest = artifact.get("digest")
+            if digest and digest.startswith("sha256:"):
+                if hashlib.sha256(data).hexdigest() != digest.split(":", 1)[1]:
+                    raise ValueError("Actions 产物 SHA-256 校验失败")
+            files = unpack(data, platform)
+            for name, content in files.items():
+                staged = Path(staging, name)
+                staged.parent.mkdir(parents=True, exist_ok=True)
+                staged.write_bytes(content)
+                if platform == "linux-x64":
+                    staged.chmod(0o755)
+                filenames.append(name)
+        for name in filenames:
             destination = args.output / name
             destination.parent.mkdir(parents=True, exist_ok=True)
             os.replace(Path(staging, name), destination)
