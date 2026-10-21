@@ -216,6 +216,26 @@ YITERM_LOG='warn,yiterm=debug' cargo run
 
 不记录终端输出、用户输入、剪贴板正文和图片内容。Windows 内置 SSH wrapper 与主程序共用日志文件；SSH 配置解析失败时会记录具体失败项，便于排查 OpenSSH 配置。PTY、图片上传和粘贴也记录调用侧诊断信息。
 
+### SSH 后无法选字或打开右键菜单
+
+先按住 **Shift** 拖动选字，再按住 **Shift** 点右键。如果可用，说明普通操作被终端鼠标上报接管。排查时在 Windows PowerShell 中启动发布包内的程序：
+
+```powershell
+.\yiterm.exe --log-filter 'warn,yiterm=info,yiterm::mouse=debug'
+```
+
+也可将配置文件中的 `logging.filter` 临时设为 `warn,yiterm=info,yiterm::mouse=debug`，重启生效。macOS / Linux 可使用 `./yiterm --log-filter 'warn,yiterm=info,yiterm::mouse=debug'`。需要鼠标协议发送细节时，将最后的 `debug` 改为 `trace`。
+
+在同一日志配置下，用两个新 pane 分别登录正常主机和有问题的主机，各执行一次普通拖动、普通右键和 Shift + 右键，再通过 **Tools → Open Log File** 查看日志：
+
+- `Terminal session started`：`session_id` 区分 pane，`child_pid` 对应本地 shell 进程。
+- `Mouse mode request`：`source=pty_output` 表示 YiTerm 收到的 PTY 指令；`mode=1000/1002/1003 enabled=true` 开启点击、拖动或所有移动上报，`enabled=false` 关闭对应模式。1006 等编码模式本身不会开启鼠标上报。
+- `Terminal mode changed`：记录解析前后的模式以及最终 `mouse_reporting` 状态，可检查开启后是否恢复。
+- `Terminal mouse down`：记录 Shift、选区是否存在、滚动位置及处理路径；`forward_to_application` 表示交给终端程序，`open_context_menu` 表示打开本地菜单。Linux 的右键菜单在松开按钮时触发，对应 `context_menu_on_release` 和 `Terminal context menu requested`。
+- Windows 内置 SSH 的 `Mouse mode request before ConPTY`：`source=ssh_remote_output` 记录远端原始输出中的模式指令，可按 wrapper 的 PID 和时间，与主程序 PTY 侧的日志对照。使用外部 SSH 客户端时没有这一层日志。
+
+从登录前开始记录，确认鼠标模式是在连接前已经存在，还是在远端登录、启动 tmux 或运行某个程序后开启；退出该程序后检查是否关闭。SSH 字节流不包含远端进程身份，日志不能直接指认某个 shell 或插件，需要在远端逐项禁用启动配置、插件或 tmux 后重连对照。排查结束后恢复原日志级别。
+
 ## 光标设置
 
 点击顶部菜单栏第一个入口 **Settings** 打开设置界面。**Cursor Style** 提供实心方块、下划线和竖线三种样式，**Cursor Blinking** 控制是否闪烁。默认使用闪烁的实心方块，方块覆盖的字符以反色显示。修改立即应用到所有标签页和分栏，也适用于后续新建的会话。点击 **Done**、窗口外部或按 **Esc** 关闭。

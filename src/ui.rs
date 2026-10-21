@@ -745,6 +745,17 @@ impl TerminalUi {
         }
         let pane = self.session();
         let button = button_code(event.button);
+        tracing::debug!(target: "yiterm::mouse",
+            session_id = %pane.log_id, button = ?event.button,
+            shift = event.modifiers.shift, mode = ?pane.term.mode(),
+            display_offset = pane.term.grid().display_offset(),
+            has_selection = pane.term.selection.as_ref().is_some_and(|s| !s.is_empty()),
+            action = if report { "forward_to_application" }
+                else if event.button == MouseButton::Right { "open_context_menu" }
+                else if event.button == MouseButton::Left { "start_selection" }
+                else { "ignore" },
+            "Terminal mouse down"
+        );
         pane.mouse_button = button;
         if report {
             if let Some(button) = button

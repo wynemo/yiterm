@@ -44,6 +44,13 @@ impl TerminalSession {
             && !ctx.input(|i| i.modifiers.shift)
             && self.term.grid().display_offset() == 0;
         let response = ui.interact(rect, ui.id().with("context-menu"), egui::Sense::click());
+        if response.secondary_clicked() && !report_mouse {
+            tracing::debug!(target: "yiterm::mouse",
+                session_id = %self.log_id, shift = ctx.input(|i| i.modifiers.shift),
+                mode = ?self.term.mode(), display_offset = self.term.grid().display_offset(),
+                action = "open_context_menu", "Terminal context menu requested"
+            );
+        }
         let popup = if report_mouse {
             // Keep an existing Shift+right-click menu open after Shift is
             // released, without treating application mouse clicks as triggers.
@@ -256,6 +263,18 @@ impl TerminalSession {
                         }
                     }
                     let tracked = self.mouse_button == Some(button);
+                    if pressed && rect.contains(pos) {
+                        tracing::debug!(target: "yiterm::mouse",
+                            session_id = %self.log_id, ?button, shift = modifiers.shift,
+                            mode = ?self.term.mode(), display_offset = offset,
+                            has_selection = self.term.selection.as_ref().is_some_and(|s| !s.is_empty()),
+                            action = if report_mouse { "forward_to_application" }
+                                else if button == egui::PointerButton::Primary { "start_selection" }
+                                else if button == egui::PointerButton::Secondary { "context_menu_on_release" }
+                                else { "ignore" },
+                            "Terminal mouse down"
+                        );
+                    }
                     if button == egui::PointerButton::Primary {
                         if pressed && !report_mouse && rect.contains(pos) {
                             let (point, side) = selection_point(rect, cell, size, offset, pos);

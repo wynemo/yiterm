@@ -2,6 +2,22 @@
 use alacritty_terminal::term::TermMode;
 use alacritty_terminal::vte::ansi::{Handler, PrivateMode, Processor};
 
+pub fn mode_name(mode: u16) -> &'static str {
+    match mode {
+        1000 => "report_clicks",
+        1002 => "report_drag",
+        1003 => "report_all_motion",
+        1004 => "report_focus",
+        1005 => "utf8_encoding",
+        1006 => "sgr_encoding",
+        1007 => "alternate_scroll",
+        1015 => "urxvt_encoding",
+        1016 => "sgr_pixel_encoding",
+        9001 => "win32_input",
+        _ => "other",
+    }
+}
+
 #[derive(Default)]
 pub struct MouseModes {
     parser: Processor,

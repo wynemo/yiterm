@@ -744,6 +744,8 @@ fn run_inner(real_ssh: &Path, directory: &Path, args: Vec<OsString>) -> Result<i
         let mut input_open = true;
         let mut shell_reply_pending = true;
         let mut osc52_filter = super::osc52::Filter::default();
+        let mut mouse_diagnostics = tracing::enabled!(target: "yiterm::mouse", tracing::Level::DEBUG)
+            .then(crate::mouse::MouseModes::default);
         let result = async {
             loop {
                 tokio::select! {
@@ -762,6 +764,15 @@ fn run_inner(real_ssh: &Path, directory: &Path, args: Vec<OsString>) -> Result<i
                                 }
                                 match message {
                                     russh::ChannelMsg::Data { data } | russh::ChannelMsg::ExtendedData { data, .. } => {
+                                        if let Some(observer) = &mut mouse_diagnostics {
+                                            for (mode, enabled) in observer.observe(&data) {
+                                                tracing::debug!(target: "yiterm::mouse",
+                                                    source = "ssh_remote_output", mode,
+                                                    name = crate::mouse::mode_name(mode), enabled,
+                                                    "Mouse mode request before ConPTY"
+                                                );
+                                            }
+                                        }
                                         let (terminal_bytes, requests) = osc52_filter.advance(&data);
                                         for request in requests {
                                             match forward_osc52_request(&osc52_pipe, &request).await {

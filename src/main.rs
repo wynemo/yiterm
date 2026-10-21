@@ -98,6 +98,7 @@ struct PasteResult {
     image_group: Option<Option<i32>>,
 }
 struct TerminalSession {
+    log_id: uuid::Uuid,
     title: String,
     term: Term<Listener>,
     parser: Processor,
@@ -127,11 +128,13 @@ struct TerminalSession {
 }
 impl TerminalSession {
     fn new(args: &Args, warning: Option<&str>) -> Result<Self> {
+        let log_id = uuid::Uuid::new_v4();
         tracing::trace!(target: "yiterm::mouse",
             "build={} transport=raw_vt",
             option_env!("YITERM_BUILD_REV").unwrap_or("local")
         );
         tracing::info!(
+            session_id = %log_id,
             session_kind = if args.ssh.is_some() { "ssh" } else { "local" },
             "Starting terminal session"
         );
@@ -205,8 +208,9 @@ impl TerminalSession {
         config.default_cursor_style.blinking = true;
         let term = Term::new(config, &size, Listener(tx));
         let (paste_sender, paste_result) = mpsc::channel();
-        tracing::info!(child_pid = ?child.process_id(), "Terminal session started");
+        tracing::info!(session_id = %log_id, child_pid = ?child.process_id(), "Terminal session started");
         Ok(Self {
+            log_id,
             title: args.ssh.clone().unwrap_or_else(|| "Terminal".into()),
             term,
             parser: Processor::new(),
@@ -454,10 +458,19 @@ impl TerminalSession {
             let requests = self.mouse_modes.observe(&bytes);
             self.parser.advance(&mut self.term, &bytes);
             for (mode, enabled) in requests {
-                tracing::trace!(target: "yiterm::mouse", "request mode={mode} enabled={enabled}");
+                tracing::debug!(target: "yiterm::mouse",
+                    session_id = %self.log_id, source = "pty_output",
+                    mode, name = mouse::mode_name(mode), enabled,
+                    "Mouse mode request"
+                );
             }
             if previous_mode != *self.term.mode() {
-                tracing::trace!(target: "yiterm::mouse", "state {:?}", self.term.mode());
+                tracing::debug!(target: "yiterm::mouse",
+                    session_id = %self.log_id, source = "terminal_parser",
+                    previous = ?previous_mode, current = ?self.term.mode(),
+                    mouse_reporting = self.term.mode().intersects(TermMode::MOUSE_MODE),
+                    "Terminal mode changed"
+                );
             }
             self.cursor_blink_started = Instant::now();
             // Continue draining bounded batches even if the producer has stopped.
