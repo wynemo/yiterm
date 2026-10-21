@@ -55,6 +55,20 @@ Linux 打包时从可执行文件分离 DWARF 调试符号，下载包只包含�
 
 Linux 发布包使用 X11 后端，目标为 x86_64、glibc 2.17；需要图形会话和可用的 OpenGL 驱动。解压 `yiterm-<版本>-linux-x64.tar.gz` 后运行 `./yiterm`，默认使用 `$SHELL`。如需指定 shell：`./yiterm --shell /bin/bash`。
 
+#### 从应用菜单或桌面启动
+
+Linux 包附带 `install-desktop.sh` 和 `yiterm.png`。先把整个解压目录放到长期保留的位置，再在该目录运行一次（无需 sudo）：
+
+```sh
+bash ./install-desktop.sh
+```
+
+脚本恢复当前用户的程序执行权限，并把 `yiterm.desktop` 写入 `$XDG_DATA_HOME/applications/`（默认 `~/.local/share/applications/`）。之后在应用菜单搜索 **YiTerm** 并点击启动，无需先打开终端。入口直接引用解压目录中的程序和图标；移动目录后需重新运行脚本，原目录应保持可写以便自动更新。脚本不会复制程序或修改系统 PATH。
+
+如需桌面快捷方式，可将生成的 `yiterm.desktop` 复制到系统的桌面目录，在文件属性中允许执行；部分桌面还需要右键选择“允许启动”或“信任”。桌面快捷方式的支持和信任提示取决于桌面环境。卸载菜单入口时删除上述 `yiterm.desktop` 即可。
+
+直接双击裸 ELF 文件是否运行取决于文件管理器策略；能从终端运行并不保证能直接双击。若提示无执行权限，可在文件属性的权限页允许作为程序执行，或运行 `chmod u+x ./yiterm`。优先使用保留 Unix 权限的官方 `.tar.gz` 包；自行转存为 ZIP 或经过其他文件系统后可能丢失权限。旧版本或 `scripts/download_latest.py` 只取得裸程序时，可手动创建同样的 `.desktop` 入口，或重新下载包含安装脚本的完整发布包。
+
 CentOS 7 的运行依赖（使用系统已有的 yum 仓库或管理员配置的归档镜像）：
 
 ```sh

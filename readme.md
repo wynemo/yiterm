@@ -12,7 +12,7 @@ Download and extract the package for your platform from [Releases](https://githu
 
 - **macOS (Apple Silicon)**: Download `macos-arm64.tar.gz` and open `YiTerm.app` (or run `./yiterm` from the extracted directory).
 - **Windows 10 / 11 (x64)**: Download `windows-x64.zip` and double-click `yiterm.exe`. Keep `conpty.dll` and `OpenConsole.exe` in the same directory.
-- **Linux (x64)**: Download `linux-x64.tar.gz` and run `./yiterm` from the extracted directory in a graphical desktop terminal. Requires glibc 2.17 or later, X11 and a working OpenGL driver. Targets CentOS 7.8 and newer Linux systems. See [Linux requirements (Chinese)](TECHNICAL.md#linux-x64--centos-78) for details.
+- **Linux (x64)**: Download and extract `linux-x64.tar.gz`, then run `bash ./install-desktop.sh` once to add YiTerm to your applications menu, or start it with `./yiterm`. Requires glibc 2.17 or later, X11 and a working OpenGL driver. See [Linux requirements (Chinese)](TECHNICAL.md#linux-x64--centos-78) for details.
 
 ## Features
 

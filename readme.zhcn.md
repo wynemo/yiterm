@@ -12,7 +12,7 @@
 
 - **macOS（Apple Silicon）**：下载 `macos-arm64.tar.gz`，解压后打开 `YiTerm.app`，也可在解压目录中运行 `./yiterm`。
 - **Windows 10 / 11（x64）**：下载 `windows-x64.zip`，双击 `yiterm.exe`。请将 `conpty.dll` 和 `OpenConsole.exe` 保留在同一目录。
-- **Linux（x64）**：下载 `linux-x64.tar.gz`，在图形桌面的终端中进入解压目录，运行 `./yiterm`。最低要求 glibc 2.17，目标支持 CentOS 7.8 及更新的 Linux 系统；需要 X11 和可用的 OpenGL 驱动。详细要求见 [Linux 使用说明](TECHNICAL.md#linux-x64--centos-78)。
+- **Linux（x64）**：下载并解压 `linux-x64.tar.gz`，首次运行 `bash ./install-desktop.sh`，之后从应用菜单点击 YiTerm 启动；也可运行 `./yiterm`。最低要求 glibc 2.17，需要 X11 和可用的 OpenGL 驱动。详细要求见 [Linux 使用说明](TECHNICAL.md#linux-x64--centos-78)。
 
 ## 功能
 

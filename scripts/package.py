@@ -148,6 +148,8 @@ def main() -> None:
     ]
     if args.target == "x86_64-unknown-linux-gnu":
         files.extend([
+            (ROOT / "scripts/install_linux_desktop.sh", f"{name}/install-desktop.sh"),
+            (ROOT / "assets/icons/yiterm.png", f"{name}/yiterm.png"),
             (ROOT / "vendor/glutin/LICENSE", f"{name}/licenses/glutin/LICENSE"),
             (ROOT / "vendor/eframe/LICENSE-MIT", f"{name}/licenses/eframe/LICENSE-MIT"),
             (ROOT / "vendor/eframe/LICENSE-APACHE", f"{name}/licenses/eframe/LICENSE-APACHE"),
@@ -183,7 +185,9 @@ def main() -> None:
             with tarfile.open(archive, "w:gz") as package:
                 for source, destination in files:
                     info = package.gettarinfo(str(source), destination)
-                    info.mode = 0o755 if source == binary or destination.endswith("/Contents/MacOS/yiterm") else 0o644
+                    info.mode = 0o755 if (source == binary or destination.endswith(
+                        ("/Contents/MacOS/yiterm", "/install-desktop.sh")
+                    )) else 0o644
                     with source.open("rb") as content:
                         package.addfile(info, content)
     checksum = hashlib.sha256(archive.read_bytes()).hexdigest()
