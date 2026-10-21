@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Download the latest available Windows build into the current directory.
+"""Download the latest available Windows or Linux build into the current directory.
 
 Requires GitHub CLI (gh). Run gh auth login before using this script.
 """
@@ -13,11 +13,15 @@ from pathlib import Path, PurePosixPath
 import shutil
 import subprocess
 import sys
+import tarfile
 import tempfile
 from urllib.parse import urlencode
 import zipfile
 
-FILES = ("yiterm.exe", "bin/ssh.exe", "conpty.dll", "OpenConsole.exe")
+PLATFORMS = {
+    "windows-x64": ("Windows x64", ".zip", ("yiterm.exe", "bin/ssh.exe", "conpty.dll", "OpenConsole.exe")),
+    "linux-x64": ("Linux x64", ".tar.gz", ("yiterm",)),
+}
 
 
 class GitHub:
@@ -49,7 +53,7 @@ class GitHub:
             page += 1
 
 
-def latest_artifact(api, branch):
+def latest_artifact(api, branch, platform):
     runs = api.pages("/actions/workflows/ci.yml/runs", "workflow_runs", {
         "branch": branch, "event": "push",
     })
@@ -57,37 +61,50 @@ def latest_artifact(api, branch):
         artifacts = api.pages(f"/actions/runs/{run['id']}/artifacts", "artifacts")
         candidates = [a for a in artifacts if not a["expired"]
                       and a["name"].startswith("yiterm-")
-                      and a["name"].endswith("-windows-x64")]
+                      and a["name"].endswith(f"-{platform}")]
         if candidates:
             return run, max(candidates, key=lambda a: a["id"])
-    raise ValueError(f"分支 {branch} 没有可用且未过期的 Windows x64 构建产物")
+    raise ValueError(f"分支 {branch} 没有可用且未过期的 {PLATFORMS[platform][0]} 构建产物")
 
 
-def unpack(data):
-    """Read the nested release ZIP without extracting arbitrary archive paths."""
+def unpack(data, platform):
+    """Read only required regular files from the nested ZIP or tar.gz package."""
+    label, extension, filenames = PLATFORMS[platform]
     with zipfile.ZipFile(io.BytesIO(data)) as artifact:
-        archives = [n for n in artifact.namelist() if n.endswith("-windows-x64.zip")]
+        archives = [n for n in artifact.namelist() if n.endswith(f"-{platform}{extension}")]
         if len(archives) != 1:
-            raise ValueError("Actions 产物中未找到唯一的 Windows 压缩包")
+            raise ValueError(f"Actions 产物中未找到唯一的 {label} 压缩包")
         archive = archives[0]
         package_data = artifact.read(archive)
         expected = artifact.read(archive + ".sha256").decode().split()[0]
         if hashlib.sha256(package_data).hexdigest() != expected:
-            raise ValueError("Windows 压缩包 SHA-256 校验失败")
-    with zipfile.ZipFile(io.BytesIO(package_data)) as package:
-        result = {}
-        for filename in FILES:
-            matches = [n for n in package.namelist()
-                       if PurePosixPath(n).as_posix().endswith("/" + filename) and not n.endswith("/")]
-            if len(matches) != 1:
-                raise ValueError(f"压缩包中未找到唯一的 {filename}")
-            result[filename] = package.read(matches[0])
-        return result
+            raise ValueError(f"{label} 压缩包 SHA-256 校验失败")
+    result = {}
+    if extension == ".zip":
+        with zipfile.ZipFile(io.BytesIO(package_data)) as package:
+            for filename in filenames:
+                matches = [n for n in package.namelist()
+                           if PurePosixPath(n).as_posix().endswith("/" + filename) and not n.endswith("/")]
+                if len(matches) != 1:
+                    raise ValueError(f"压缩包中未找到唯一的 {filename}")
+                result[filename] = package.read(matches[0])
+    else:
+        with tarfile.open(fileobj=io.BytesIO(package_data), mode="r:gz") as package:
+            for filename in filenames:
+                matches = [m for m in package.getmembers()
+                           if m.isfile() and PurePosixPath(m.name).as_posix().endswith("/" + filename)]
+                if len(matches) != 1:
+                    raise ValueError(f"压缩包中未找到唯一的 {filename}")
+                with package.extractfile(matches[0]) as content:
+                    result[filename] = content.read()
+    return result
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--repo", default="wynemo/yiterm", help="GitHub owner/repo")
+    parser.add_argument("--platform", choices=PLATFORMS, default="windows-x64",
+                        help="下载平台，默认 windows-x64；Linux 使用 linux-x64")
     parser.add_argument("--branch", help="默认使用仓库默认分支")
     parser.add_argument("--output", type=Path, default=Path.cwd(), help="输出目录，默认当前目录")
     args = parser.parse_args()
@@ -97,20 +114,23 @@ def main():
         parser.error("请先安装 GitHub CLI (gh)，然后运行 gh auth login。")
     api = GitHub(args.repo)
     branch = args.branch or api.json("")["default_branch"]
-    run, artifact = latest_artifact(api, branch)
+    run, artifact = latest_artifact(api, branch, args.platform)
     print(f"下载 {artifact['name']}\n构建：{run['html_url']}", flush=True)
     data = api.get(f"/actions/artifacts/{artifact['id']}/zip")
     digest = artifact.get("digest")
     if digest and digest.startswith("sha256:"):
         if hashlib.sha256(data).hexdigest() != digest.split(":", 1)[1]:
             raise ValueError("Actions 产物 SHA-256 校验失败")
-    files = unpack(data)
+    files = unpack(data, args.platform)
     args.output.mkdir(parents=True, exist_ok=True)
     # Validate all files before replacing existing binaries.
     with tempfile.TemporaryDirectory(prefix=".yiterm-download-", dir=args.output) as staging:
         for name, content in files.items():
             Path(staging, name).parent.mkdir(parents=True, exist_ok=True)
-            Path(staging, name).write_bytes(content)
+            staged = Path(staging, name)
+            staged.write_bytes(content)
+            if args.platform == "linux-x64":
+                staged.chmod(0o755)
         for name in files:
             destination = args.output / name
             destination.parent.mkdir(parents=True, exist_ok=True)
@@ -121,7 +141,7 @@ def main():
 if __name__ == "__main__":
     try:
         main()
-    except (OSError, ValueError, KeyError, IndexError, zipfile.BadZipFile,
+    except (OSError, ValueError, KeyError, IndexError, zipfile.BadZipFile, tarfile.TarError, EOFError,
             subprocess.TimeoutExpired) as error:
         print(f"下载失败：{error}", file=sys.stderr)
         sys.exit(1)
