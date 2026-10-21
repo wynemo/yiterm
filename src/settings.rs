@@ -428,8 +428,8 @@ fn discover_shell_programs(paths: &[std::path::PathBuf], windows: bool) -> Vec<s
                 // Git's installer commonly adds only Git/cmd to PATH.
                 if let Some(root) = directory.parent() {
                     add(root.join("git-bash.exe"));
-                    add(root.join("bin/bash.exe"));
-                    add(root.join("usr/bin/mintty.exe"));
+                    add(root.join("bin").join("bash.exe"));
+                    add(root.join("usr").join("bin").join("mintty.exe"));
                 }
             }
         }
@@ -474,7 +474,10 @@ pub(crate) fn resolve_windows_shell(program: &str) -> Result<std::path::PathBuf>
     let parent = path.parent().context("Shell launcher has no directory")?;
     let mut candidates = Vec::new();
     if name == "git-bash" {
-        candidates.extend([parent.join("bin/bash.exe"), parent.join("usr/bin/bash.exe")]);
+        candidates.extend([
+            parent.join("bin").join("bash.exe"),
+            parent.join("usr").join("bin").join("bash.exe"),
+        ]);
     } else {
         // Git/MSYS2: <root>/usr/bin/mintty.exe; Cygwin: <root>/bin/mintty.exe.
         if parent
@@ -486,7 +489,7 @@ pub(crate) fn resolve_windows_shell(program: &str) -> Result<std::path::PathBuf>
                 .is_some_and(|s| s.eq_ignore_ascii_case("usr"))
             && let Some(root) = usr.parent()
         {
-            candidates.push(root.join("bin/bash.exe"));
+            candidates.push(root.join("bin").join("bash.exe"));
         }
         candidates.push(parent.join("bash.exe"));
     }
