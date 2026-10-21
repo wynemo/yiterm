@@ -94,6 +94,8 @@ Linux 使用本地补丁 `vendor/eframe`：优先创建默认 OpenGL 3.3 core �
 
 Windows、macOS 和 Linux CI 只执行 Release 构建、打包校验和产物上传，不编译或运行测试。构建产物上传后即可下载；正式 GitHub Release 在所有平台构建成功且版本 tag 匹配后发布。
 
+Windows / macOS CI 保留 Cargo registry、Git 依赖及完整 Release 编译产物，避免缓存清理移除 `vendor/gpui`、`vendor/alacritty_terminal` 等本地依赖后每次重新编译。缓存键包含 runner、目标架构、Cargo 清单与锁文件、全部 vendor 内容、Cargo 配置及工作流（含固定工具链和构建参数），只接受精确匹配。CI 在构建前固定 vendor 文件时间戳，避免 checkout 时间变化使未修改的依赖失效；vendor 内容变化时使用新缓存重新构建。精确命中成功构建保存的缓存后，Cargo 使用离线模式，省去 crates.io 索引更新；未命中时正常联网获取依赖。首次构建或依赖、工作流变化后的构建需要重新填充缓存；实际提速以之后 Windows CI 的构建耗时为准。
+
 ### Windows SSH 与图片上传
 
 Windows 发布包携带独立的控制台程序 `bin/ssh.exe`，所有标签页和分栏共用该文件，各连接运行独立进程。YiTerm 将随包 `bin` 加入其子 shell 的 PATH 最前面，输入 `ssh host` 即调用内置客户端；`--ssh` 直接启动该程序。不修改系统 PATH，不使用 shell 函数、别名或转发脚本。会话临时目录只保存会话数据和必要的 shell 初始化脚本，不复制 exe，也不修改 PE 头；不要单独移动主程序或删除 `bin/ssh.exe`。从源码运行 Windows 版本前执行 `cargo build --locked --release --bins`，Cargo 输出目录中的 `ssh.exe` 可供同目录的主程序使用。

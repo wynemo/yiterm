@@ -23,6 +23,7 @@ jobs:
     runs-on: ${{ matrix.runner }}
     env:
       YITERM_BUILD_REV: ${{ github.sha }}
+      CARGO_INCREMENTAL: "0"
     timeout-minutes: 30
     outputs:
       tag: ${{ steps.package.outputs.tag }}
@@ -48,29 +49,44 @@ jobs:
           toolchain: 1.99.1
           targets: ${{ matrix.target }}
 
-      # rust-cache hashes every installed toolchain, including runner preinstalls.
-      - name: Keep only the pinned Rust toolchain
-        shell: bash
-        run: |
-          active="$(rustup show active-toolchain | cut -d ' ' -f 1)"
-          while read -r toolchain _; do
-            if [[ "$toolchain" != "$active" ]]; then
-              rustup toolchain uninstall "$toolchain"
-            fi
-          done < <(rustup toolchain list)
-
-      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-python@v7
         with:
-          key: ${{ matrix.target }}
+          python-version: '3.13'
+
+      # The exact cache key includes every vendor file. Keep checkout mtimes
+      # stable so Cargo can reuse unchanged path dependencies after restore.
+      - name: Normalize vendored dependency timestamps
+        shell: python
+        run: |
+          import os
+          from pathlib import Path
+
+          timestamp = 946684800  # 2000-01-01 UTC
+          vendor = Path("vendor")
+          for path in vendor.rglob("*"):
+              os.utime(path, (timestamp, timestamp))
+          os.utime(vendor, (timestamp, timestamp))
+
+      # rust-cache removes crates inside the workspace root, including vendor/.
+      # Preserve them and use exact matches only: normalizing mtimes is safe
+      # only when the vendored source matches the cached compilation artifacts.
+      - name: Cache Cargo dependencies and release artifacts
+        id: release-cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target/release
+            target/${{ matrix.target }}/release
+          key: release-v1-${{ matrix.runner }}-${{ matrix.target }}-${{ hashFiles('Cargo.lock', '**/Cargo.toml', 'vendor/**', '.cargo/**', '.github/workflows/ci.yml') }}
 
       - name: Build release
         env:
           YITERM_BUILD_REV: ${{ github.sha }}
+          # A successful build populated all dependencies for this exact key.
+          CARGO_NET_OFFLINE: ${{ steps.release-cache.outputs.cache-hit == 'true' }}
         run: cargo build --locked --release --bins --target ${{ matrix.target }}
-
-      - uses: actions/setup-python@v7
-        with:
-          python-version: '3.13'
 
       - name: Package binary and verify architecture
         id: package
