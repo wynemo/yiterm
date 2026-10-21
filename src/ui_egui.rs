@@ -1064,10 +1064,66 @@ fn settings_row(
     ui.add_space(16.0);
 }
 
-#[derive(Clone)]
+#[derive(Clone, Default)]
 struct ShellFilePicker {
-    path: String,
+    pending: bool,
+    result: Option<std::result::Result<Option<String>, String>>,
     error: Option<String>,
+}
+
+fn pick_shell_file(directory: &std::path::Path) -> Result<Option<String>> {
+    use std::os::unix::fs::PermissionsExt;
+    use std::process::{Command, Stdio};
+
+    let kde = std::env::var("XDG_CURRENT_DESKTOP")
+        .unwrap_or_default()
+        .split(':')
+        .any(|desktop| desktop.eq_ignore_ascii_case("KDE"));
+    let programs = if kde {
+        ["kdialog", "zenity"]
+    } else {
+        ["zenity", "kdialog"]
+    };
+    for program in programs {
+        let mut command = Command::new(program);
+        command.stdin(Stdio::null());
+        if program == "zenity" {
+            command.args(["--file-selection", "--title=Select shell executable"]);
+            command.arg(format!("--filename={}/", directory.display()));
+        } else {
+            command.args(["--title", "Select shell executable", "--getopenfilename"]);
+            command.arg(directory);
+        }
+        let output = match command.output() {
+            Ok(output) => output,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => {
+                return Err(error).with_context(|| format!("Opening {program} file dialog"));
+            }
+        };
+        if output.status.code() == Some(1) {
+            return Ok(None);
+        }
+        anyhow::ensure!(
+            output.status.success(),
+            "Cannot open {program} file dialog: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+        let mut path =
+            String::from_utf8(output.stdout).context("Selected path is not valid UTF-8")?;
+        // Remove only the dialog's line terminator, preserving filename whitespace.
+        if path.ends_with('\n') {
+            path.pop();
+        }
+        anyhow::ensure!(!path.is_empty(), "No file was selected");
+        let metadata = std::fs::metadata(&path).context("Reading selected file")?;
+        anyhow::ensure!(
+            metadata.is_file() && metadata.permissions().mode() & 0o111 != 0,
+            "Select an executable file."
+        );
+        return Ok(Some(path));
+    }
+    anyhow::bail!("Install zenity or kdialog to open the system file chooser.")
 }
 
 fn show_shell_settings(ui: &mut egui::Ui, shell: &mut settings::ShellSettings) {
@@ -1082,6 +1138,20 @@ fn show_shell_settings(ui: &mut egui::Ui, shell: &mut settings::ShellSettings) {
     });
     let draft_id = egui::Id::new("shell-program-draft");
     let picker_id = egui::Id::new("shell-file-picker");
+    if let Some(mut picker) = ctx.data_mut(|data| data.get_temp::<ShellFilePicker>(picker_id)) {
+        if let Some(result) = picker.result.take() {
+            match result {
+                Ok(Some(path)) => {
+                    shell.mode = settings::ShellMode::Program;
+                    shell.program = path;
+                    ctx.data_mut(|data| data.insert_temp(draft_id, shell.program.clone()));
+                }
+                Ok(None) => {}
+                Err(error) => picker.error = Some(error),
+            }
+            ctx.data_mut(|data| data.insert_temp(picker_id, picker.clone()));
+        }
+    }
     settings_row(
         ui,
         "Shell",
@@ -1159,107 +1229,64 @@ fn show_shell_settings(ui: &mut egui::Ui, shell: &mut settings::ShellSettings) {
                             }
                         });
                 });
-            if ui.button("Browse…").clicked() {
-                let path = std::path::Path::new(&shell.program);
-                let directory = path
+            let pending = ctx.data_mut(|data| {
+                data.get_temp::<ShellFilePicker>(picker_id)
+                    .is_some_and(|picker| picker.pending)
+            });
+            if ui
+                .add_enabled(!pending, egui::Button::new("Browse…"))
+                .clicked()
+            {
+                let directory = std::path::Path::new(&shell.program)
                     .parent()
                     .filter(|p| p.is_dir())
-                    .unwrap_or_else(|| std::path::Path::new("/bin"));
+                    .unwrap_or_else(|| std::path::Path::new("/bin"))
+                    .to_path_buf();
                 ctx.data_mut(|data| {
                     data.insert_temp(
                         picker_id,
                         ShellFilePicker {
-                            path: directory.to_string_lossy().into_owned(),
-                            error: None,
+                            pending: true,
+                            ..Default::default()
                         },
                     )
                 });
+                let worker_ctx = ctx.clone();
+                let worker = std::thread::Builder::new()
+                    .name("shell-file-dialog".into())
+                    .spawn(move || {
+                        let result =
+                            pick_shell_file(&directory).map_err(|error| format!("{error:#}"));
+                        worker_ctx.data_mut(|data| {
+                            data.insert_temp(
+                                picker_id,
+                                ShellFilePicker {
+                                    result: Some(result),
+                                    ..Default::default()
+                                },
+                            )
+                        });
+                        worker_ctx.request_repaint();
+                    });
+                if let Err(error) = worker {
+                    ctx.data_mut(|data| {
+                        data.insert_temp(
+                            picker_id,
+                            ShellFilePicker {
+                                error: Some(format!("Cannot open file dialog: {error}")),
+                                ..Default::default()
+                            },
+                        )
+                    });
+                }
             }
         },
     );
-    if let Some(mut picker) = ctx.data_mut(|data| data.get_temp::<ShellFilePicker>(picker_id)) {
-        let mut close = false;
-        ui.group(|ui| {
-            ui.label("Select shell executable");
-            ui.horizontal(|ui| {
-                ui.add(egui::TextEdit::singleline(&mut picker.path).desired_width(360.0));
-                if ui.button("Up").clicked() {
-                    if let Some(parent) = std::path::Path::new(&picker.path).parent() {
-                        picker.path = parent.to_string_lossy().into_owned();
-                        picker.error = None;
-                    }
-                }
-                close = ui.button("Cancel").clicked();
-            });
-            let path = std::path::PathBuf::from(&picker.path);
-            if path.is_dir() {
-                match std::fs::read_dir(&path) {
-                    Ok(entries) => {
-                        let mut entries = entries
-                            .filter_map(Result::ok)
-                            .map(|e| e.path())
-                            .collect::<Vec<_>>();
-                        entries.sort_by_key(|p| (!p.is_dir(), p.file_name().map(|n| n.to_owned())));
-                        egui::ScrollArea::vertical()
-                            .id_salt("shell-files")
-                            .min_scrolled_height(120.0)
-                            .max_height(200.0)
-                            .show(ui, |ui| {
-                                for entry in entries {
-                                    use std::os::unix::fs::PermissionsExt;
-                                    let directory = entry.is_dir();
-                                    let executable = entry.is_file()
-                                        && entry
-                                            .metadata()
-                                            .is_ok_and(|m| m.permissions().mode() & 0o111 != 0);
-                                    if !directory && !executable {
-                                        continue;
-                                    }
-                                    let name =
-                                        entry.file_name().unwrap_or_default().to_string_lossy();
-                                    let label = if directory {
-                                        format!("{name}/")
-                                    } else {
-                                        name.into_owned()
-                                    };
-                                    if ui.selectable_label(false, label).clicked() {
-                                        picker.path = entry.to_string_lossy().into_owned();
-                                        picker.error = None;
-                                    }
-                                }
-                            });
-                    }
-                    Err(error) => {
-                        ui.colored_label(Color32::RED, error.to_string());
-                    }
-                }
-            }
-            if ui.button("Select executable").clicked() {
-                use std::os::unix::fs::PermissionsExt;
-                if path.is_file()
-                    && path
-                        .metadata()
-                        .is_ok_and(|m| m.permissions().mode() & 0o111 != 0)
-                {
-                    shell.mode = settings::ShellMode::Program;
-                    shell.program = picker.path.clone();
-                    ctx.data_mut(|data| data.insert_temp(draft_id, shell.program.clone()));
-                    close = true;
-                } else {
-                    picker.error = Some("Select an executable file.".into());
-                }
-            }
-            if let Some(error) = &picker.error {
-                ui.colored_label(Color32::RED, error);
-            }
-        });
-        ctx.data_mut(|data| {
-            if close {
-                data.remove::<ShellFilePicker>(picker_id);
-            } else {
-                data.insert_temp(picker_id, picker);
-            }
-        });
+    if let Some(error) = ctx.data_mut(|data| {
+        data.get_temp::<ShellFilePicker>(picker_id)
+            .and_then(|picker| picker.error)
+    }) {
+        ui.colored_label(Color32::RED, error);
     }
     if shell.mode == settings::ShellMode::Program {
         let mut draft = ctx.data_mut(|data| {
