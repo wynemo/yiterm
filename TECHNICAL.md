@@ -31,7 +31,9 @@ cargo run --release -- --ssh my-server
 
 在 **Settings → Shell** 中选择 **Default**（默认）或 **Program**。Default 在 Windows 使用 `powershell.exe`，macOS/Linux 使用 `$SHELL`（未设置时使用 `/bin/sh`）。选择 Program 后，在 **Program** 输入可执行文件名或完整路径，例如 `pwsh.exe`、`cmd.exe`、`/bin/zsh`；路径包含空格时无需加引号，不接收整条命令或额外参数。macOS/Windows 输入后按 Enter 或离开输入框提交，Linux 编辑时自动保存。程序名不能为空；不存在或无法执行时，新建终端会显示启动错误。
 
-macOS/Windows 的 Shell 下拉列表还会列出当前进程 PATH 中发现的常见 Shell，显示完整路径以区分多个安装，包括 PowerShell、CMD、Bash、Git Bash、Mintty、WSL、Nushell 等；支持搜索，每次打开 Settings 时刷新。Windows 上，若 PATH 仅包含 Git 的 `cmd` 目录，还会检查同一安装目录下的 Git Bash、Bash 和 Mintty。未列出的程序可以手动输入，或点击 **Browse…** 打开系统文件对话框选择单个程序文件；取消不会改变设置。
+Shell 下拉列表会列出当前进程 PATH 中发现的常见 Shell，显示完整路径以区分多个安装，包括当前平台可用的 PowerShell、CMD、Bash、Zsh、Fish、Git Bash、Mintty、WSL、Nushell 等；支持搜索，每次打开 Settings 时刷新。Windows 上，若 PATH 仅包含 Git 的 `cmd` 目录，还会检查同一安装目录下的 Git Bash、Bash 和 Mintty。未列出的程序可以手动输入，或点击 **Browse…** 选择单个程序文件；取消不会改变设置。macOS/Windows 使用系统文件对话框。Linux 的 Browse 使用内置文件选择器，可编辑目录或完整路径、返回上级目录，再选中可执行文件并点击 **Select executable**；无需安装额外的系统对话框工具。
+
+Linux/macOS 还扫描 `/bin`、`/usr/bin`、`/usr/local/bin`，并读取 `$SHELL` 和 `/etc/shells` 中存在且可执行的程序，避免桌面启动时 PATH 不完整导致漏项。Linux 的 Program 输入支持常规复制、剪切和粘贴；清空输入时显示错误并保留此前有效设置，输入有效内容后自动保存。
 
 Windows 选择 `git-bash.exe` 或 `mintty.exe` 时，会查找同一安装目录下的 `bash.exe`，在 YiTerm 内启动 Bash；找不到时显示错误并提示直接选择 `bash.exe`。它们自己的终端窗口、主题和启动参数不用于 YiTerm。
 

@@ -707,6 +707,38 @@ fn reserve_terminal_keyboard(ctx: &egui::Context) {
 }
 
 impl eframe::App for TerminalApp {
+    fn raw_input_hook(&mut self, ctx: &egui::Context, input: &mut egui::RawInput) {
+        // terminal-input leaves clipboard shortcuts as keys for the PTY. Restore
+        // ordinary text editing while settings or a searchable menu owns input.
+        if !self.settings_open && !ctx.wants_keyboard_input() {
+            return;
+        }
+        for event in &mut input.events {
+            let egui::Event::Key {
+                key,
+                pressed: true,
+                modifiers,
+                ..
+            } = event
+            else {
+                continue;
+            };
+            if !modifiers.command || modifiers.alt {
+                continue;
+            }
+            match key {
+                Key::C => *event = egui::Event::Copy,
+                Key::X => *event = egui::Event::Cut,
+                Key::V => {
+                    if let Ok(text) = arboard::Clipboard::new().and_then(|mut c| c.get_text()) {
+                        *event = egui::Event::Paste(text.replace("\r\n", "\n"));
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.updater.poll();
         if matches!(self.updater.state, yiterm::update::State::Restarting) {
@@ -776,6 +808,15 @@ impl eframe::App for TerminalApp {
             egui::MenuBar::new().ui(ui, |ui| {
                 if ui.button("Settings").clicked() {
                     self.settings_open = true;
+                    ctx.data_mut(|data| {
+                        data.insert_temp(
+                            egui::Id::new("shell-choices"),
+                            settings::available_shell_programs(),
+                        );
+                        data.remove::<String>(egui::Id::new("shell-search"));
+                        data.remove::<String>(egui::Id::new("shell-program-draft"));
+                        data.remove::<ShellFilePicker>(egui::Id::new("shell-file-picker"));
+                    });
                 }
                 ui.menu_button("Pane", |ui| {
                     if ui.button("Split Right").clicked() {
@@ -1023,6 +1064,234 @@ fn settings_row(
     ui.add_space(16.0);
 }
 
+#[derive(Clone)]
+struct ShellFilePicker {
+    path: String,
+    error: Option<String>,
+}
+
+fn show_shell_settings(ui: &mut egui::Ui, shell: &mut settings::ShellSettings) {
+    let ctx = ui.ctx().clone();
+    let choices_id = egui::Id::new("shell-choices");
+    let choices = ctx.data_mut(|data| {
+        data.get_temp::<Vec<String>>(choices_id).unwrap_or_else(|| {
+            let choices = settings::available_shell_programs();
+            data.insert_temp(choices_id, choices.clone());
+            choices
+        })
+    });
+    let draft_id = egui::Id::new("shell-program-draft");
+    let picker_id = egui::Id::new("shell-file-picker");
+    settings_row(
+        ui,
+        "Shell",
+        "Shell for new terminals. --shell takes priority.",
+        300.0,
+        |ui| {
+            let label = if shell.mode == settings::ShellMode::Default {
+                "Default"
+            } else {
+                &shell.program
+            };
+            let button = ui.add_sized(
+                [210.0, 28.0],
+                egui::Button::new(label).right_text("⏷").truncate(),
+            );
+            button.clone().on_hover_text(label);
+            egui::Popup::menu(&button)
+                .width(300.0)
+                .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
+                .show(|ui| {
+                    let search_id = egui::Id::new("shell-search");
+                    let mut search =
+                        ctx.data_mut(|data| data.get_temp::<String>(search_id).unwrap_or_default());
+                    ui.add(
+                        egui::TextEdit::singleline(&mut search)
+                            .hint_text("Search shells…")
+                            .desired_width(f32::INFINITY),
+                    );
+                    let query = search.to_lowercase();
+                    ctx.data_mut(|data| data.insert_temp(search_id, search));
+                    ui.separator();
+                    if ui
+                        .selectable_label(shell.mode == settings::ShellMode::Default, "Default")
+                        .clicked()
+                    {
+                        shell.mode = settings::ShellMode::Default;
+                        ui.close();
+                    }
+                    if ui
+                        .selectable_label(false, "Program (enter path…)")
+                        .clicked()
+                    {
+                        shell.mode = settings::ShellMode::Program;
+                        ctx.data_mut(|data| data.insert_temp(draft_id, shell.program.clone()));
+                        ui.close();
+                    }
+                    egui::ScrollArea::vertical()
+                        .id_salt("shell-list")
+                        .min_scrolled_height(120.0)
+                        .max_height(240.0)
+                        .show(ui, |ui| {
+                            let mut found = false;
+                            for program in
+                                choices.iter().filter(|p| p.to_lowercase().contains(&query))
+                            {
+                                found = true;
+                                if ui
+                                    .selectable_label(
+                                        shell.mode == settings::ShellMode::Program
+                                            && shell.program == *program,
+                                        program,
+                                    )
+                                    .clicked()
+                                {
+                                    shell.mode = settings::ShellMode::Program;
+                                    shell.program = program.clone();
+                                    ctx.data_mut(|data| {
+                                        data.insert_temp(draft_id, program.clone())
+                                    });
+                                    ui.close();
+                                }
+                            }
+                            if !found {
+                                ui.weak("No matching shells. Enter a path or use Browse…");
+                            }
+                        });
+                });
+            if ui.button("Browse…").clicked() {
+                let path = std::path::Path::new(&shell.program);
+                let directory = path
+                    .parent()
+                    .filter(|p| p.is_dir())
+                    .unwrap_or_else(|| std::path::Path::new("/bin"));
+                ctx.data_mut(|data| {
+                    data.insert_temp(
+                        picker_id,
+                        ShellFilePicker {
+                            path: directory.to_string_lossy().into_owned(),
+                            error: None,
+                        },
+                    )
+                });
+            }
+        },
+    );
+    if let Some(mut picker) = ctx.data_mut(|data| data.get_temp::<ShellFilePicker>(picker_id)) {
+        let mut close = false;
+        ui.group(|ui| {
+            ui.label("Select shell executable");
+            ui.horizontal(|ui| {
+                ui.add(egui::TextEdit::singleline(&mut picker.path).desired_width(360.0));
+                if ui.button("Up").clicked() {
+                    if let Some(parent) = std::path::Path::new(&picker.path).parent() {
+                        picker.path = parent.to_string_lossy().into_owned();
+                        picker.error = None;
+                    }
+                }
+                close = ui.button("Cancel").clicked();
+            });
+            let path = std::path::PathBuf::from(&picker.path);
+            if path.is_dir() {
+                match std::fs::read_dir(&path) {
+                    Ok(entries) => {
+                        let mut entries = entries
+                            .filter_map(Result::ok)
+                            .map(|e| e.path())
+                            .collect::<Vec<_>>();
+                        entries.sort_by_key(|p| (!p.is_dir(), p.file_name().map(|n| n.to_owned())));
+                        egui::ScrollArea::vertical()
+                            .id_salt("shell-files")
+                            .min_scrolled_height(120.0)
+                            .max_height(200.0)
+                            .show(ui, |ui| {
+                                for entry in entries {
+                                    use std::os::unix::fs::PermissionsExt;
+                                    let directory = entry.is_dir();
+                                    let executable = entry.is_file()
+                                        && entry
+                                            .metadata()
+                                            .is_ok_and(|m| m.permissions().mode() & 0o111 != 0);
+                                    if !directory && !executable {
+                                        continue;
+                                    }
+                                    let name =
+                                        entry.file_name().unwrap_or_default().to_string_lossy();
+                                    let label = if directory {
+                                        format!("{name}/")
+                                    } else {
+                                        name.into_owned()
+                                    };
+                                    if ui.selectable_label(false, label).clicked() {
+                                        picker.path = entry.to_string_lossy().into_owned();
+                                        picker.error = None;
+                                    }
+                                }
+                            });
+                    }
+                    Err(error) => {
+                        ui.colored_label(Color32::RED, error.to_string());
+                    }
+                }
+            }
+            if ui.button("Select executable").clicked() {
+                use std::os::unix::fs::PermissionsExt;
+                if path.is_file()
+                    && path
+                        .metadata()
+                        .is_ok_and(|m| m.permissions().mode() & 0o111 != 0)
+                {
+                    shell.mode = settings::ShellMode::Program;
+                    shell.program = picker.path.clone();
+                    ctx.data_mut(|data| data.insert_temp(draft_id, shell.program.clone()));
+                    close = true;
+                } else {
+                    picker.error = Some("Select an executable file.".into());
+                }
+            }
+            if let Some(error) = &picker.error {
+                ui.colored_label(Color32::RED, error);
+            }
+        });
+        ctx.data_mut(|data| {
+            if close {
+                data.remove::<ShellFilePicker>(picker_id);
+            } else {
+                data.insert_temp(picker_id, picker);
+            }
+        });
+    }
+    if shell.mode == settings::ShellMode::Program {
+        let mut draft = ctx.data_mut(|data| {
+            data.get_temp::<String>(draft_id)
+                .unwrap_or_else(|| shell.program.clone())
+        });
+        settings_row(
+            ui,
+            "Program",
+            "Executable name or path, without arguments.",
+            300.0,
+            |ui| {
+                ui.add(
+                    egui::TextEdit::singleline(&mut draft)
+                        .id_salt("shell-program")
+                        .desired_width(290.0),
+                );
+            },
+        );
+        // Keep invalid intermediate input visible without overwriting the last
+        // valid setting or sending save failures to the terminal behind the modal.
+        if draft.trim().is_empty() {
+            ui.colored_label(Color32::RED, "Shell program cannot be empty");
+        } else if draft.contains('\0') {
+            ui.colored_label(Color32::RED, "Shell program contains a null character");
+        } else {
+            shell.program = draft.clone();
+        }
+        ctx.data_mut(|data| data.insert_temp(draft_id, draft));
+    }
+}
+
 fn show_settings(
     ctx: &egui::Context,
     settings: &mut CursorSettings,
@@ -1055,46 +1324,7 @@ fn show_settings(
                     ui.label(egui::RichText::new("Settings").size(20.0));
                     ui.add_space(20.0);
                     ui.weak("TERMINAL");
-                    settings_row(
-                        ui,
-                        "Shell",
-                        "Shell for new terminals. --shell takes priority.",
-                        148.0,
-                        |ui| {
-                            egui::ComboBox::from_id_salt("shell-mode")
-                                .selected_text(if shell.mode == settings::ShellMode::Default {
-                                    "Default"
-                                } else {
-                                    "Program"
-                                })
-                                .show_ui(ui, |ui| {
-                                    ui.selectable_value(
-                                        &mut shell.mode,
-                                        settings::ShellMode::Default,
-                                        "Default",
-                                    );
-                                    ui.selectable_value(
-                                        &mut shell.mode,
-                                        settings::ShellMode::Program,
-                                        "Program",
-                                    );
-                                });
-                        },
-                    );
-                    if shell.mode == settings::ShellMode::Program {
-                        settings_row(
-                            ui,
-                            "Program",
-                            "Executable name or path, without arguments.",
-                            260.0,
-                            |ui| {
-                                ui.text_edit_singleline(&mut shell.program);
-                            },
-                        );
-                        if shell.program.trim().is_empty() {
-                            ui.colored_label(egui::Color32::RED, "Shell program cannot be empty");
-                        }
-                    }
+                    show_shell_settings(ui, shell);
                     ui.separator();
                     ui.weak("APPEARANCE");
                     settings_row(
@@ -1269,7 +1499,11 @@ fn show_settings(
                         *theme = ThemeMode::default();
                         *font = settings::FontSettings::default();
                         *shell = settings::ShellSettings::default();
-                        ctx.data_mut(|data| data.remove::<String>(egui::Id::new("font-search")));
+                        ctx.data_mut(|data| {
+                            data.remove::<String>(egui::Id::new("font-search"));
+                            data.remove::<String>(egui::Id::new("shell-program-draft"));
+                            data.remove::<ShellFilePicker>(egui::Id::new("shell-file-picker"));
+                        });
                     }
                 });
             });

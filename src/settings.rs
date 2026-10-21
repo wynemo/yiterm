@@ -329,6 +329,12 @@ pub fn save_terminal_preferences(
 pub fn available_shell_programs() -> Vec<String> {
     let paths =
         std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default()).collect::<Vec<_>>();
+    // Desktop launchers can provide a smaller PATH than a login shell.
+    #[cfg(unix)]
+    let paths = paths
+        .into_iter()
+        .chain(["/bin", "/usr/bin", "/usr/local/bin"].map(std::path::PathBuf::from))
+        .collect::<Vec<_>>();
     discover_shell_programs(&paths, cfg!(windows))
         .into_iter()
         .map(|path| path.to_string_lossy().into_owned())
@@ -424,6 +430,20 @@ fn discover_shell_programs(paths: &[std::path::PathBuf], windows: bool) -> Vec<s
                     add(root.join("git-bash.exe"));
                     add(root.join("bin/bash.exe"));
                     add(root.join("usr/bin/mintty.exe"));
+                }
+            }
+        }
+    }
+    #[cfg(unix)]
+    if !windows {
+        if let Some(shell) = std::env::var_os("SHELL").filter(|s| !s.is_empty()) {
+            add(shell.into());
+        }
+        if let Ok(shells) = std::fs::read_to_string("/etc/shells") {
+            for line in shells.lines() {
+                let shell = line.split('#').next().unwrap_or_default().trim();
+                if std::path::Path::new(shell).is_absolute() {
+                    add(shell.into());
                 }
             }
         }
