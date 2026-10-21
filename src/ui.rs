@@ -576,6 +576,31 @@ impl TerminalUi {
         if !self.session().ime_preedit.is_empty() {
             return;
         }
+        let split = if cfg!(target_os = "macos") {
+            if m.platform && !m.control && !m.alt && key == "d" {
+                Some(if m.shift {
+                    SplitDirection::Down
+                } else {
+                    SplitDirection::Right
+                })
+            } else {
+                None
+            }
+        } else if m.control && m.shift && !m.alt && !m.platform {
+            match key {
+                "o" => Some(SplitDirection::Right),
+                "e" => Some(SplitDirection::Down),
+                _ => None,
+            }
+        } else {
+            None
+        };
+        if let Some(direction) = split {
+            self.app.split_pane(direction);
+            cx.stop_propagation();
+            cx.notify();
+            return;
+        }
         let command = if cfg!(target_os = "macos") {
             m.platform
         } else {
@@ -1797,15 +1822,20 @@ impl Render for TerminalUi {
                 .shadow_md()
                 .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation());
             if menu == Menu::Pane {
+                let (right_label, down_label) = if cfg!(target_os = "macos") {
+                    ("Split Right  ⌘D", "Split Down  ⇧⌘D")
+                } else {
+                    ("Split Right  Ctrl+Shift+O", "Split Down  Ctrl+Shift+E")
+                };
                 items = items
                     .child(
-                        self.menu_button("split-right", "Split Right", cx, |this, _, _| {
+                        self.menu_button("split-right", right_label, cx, |this, _, _| {
                             this.menu = None;
                             this.app.split_pane(SplitDirection::Right);
                         }),
                     )
                     .child(
-                        self.menu_button("split-down", "Split Down", cx, |this, _, _| {
+                        self.menu_button("split-down", down_label, cx, |this, _, _| {
                             this.menu = None;
                             this.app.split_pane(SplitDirection::Down);
                         }),

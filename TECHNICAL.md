@@ -174,6 +174,11 @@ SSH 远端程序可通过 OSC 52 的 `c` 目标把文本复制到主机剪贴板
 
 ## 分栏
 
+| 操作 | macOS | Windows / Linux |
+| --- | --- | --- |
+| 左右分栏 Split Right | Cmd+D | Ctrl+Shift+O |
+| 上下分栏 Split Down | Cmd+Shift+D | Ctrl+Shift+E |
+
 使用顶部 **Pane → Split Right** 把当前 pane 拆成左右两栏，**Split Down** 拆成上下两栏，可继续拆分任意 pane。新 pane 使用当前 Shell 设置；启动时指定的 `--shell` 或 `--ssh` 参数优先，并拥有独立会话。点击 pane 切换输入焦点，蓝色边框标记当前 pane；粘贴按钮和图片上传作用于当前 pane。
 
 拖动分隔线调整大小。终端内容区不显示额外的目录标题和关闭按钮，目录或会话标题显示在顶部 tab 中。选择 **Pane → Close Pane** 关闭当前 pane，剩余区域自动合并。shell 退出也只关闭对应 pane；关闭最后一个 pane 时关闭该 tab。tab 的 **×** 和关闭 tab 快捷键会关闭整个 tab 的所有 pane。

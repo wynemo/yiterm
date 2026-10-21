@@ -811,6 +811,19 @@ impl eframe::App for TerminalApp {
             ime_owns_keyboard(&self.tabs[self.active].focused().ime_preedit, &input.events)
         });
         if !composing && !self.about_open && !self.settings_open {
+            let split = ctx.input_mut(|input| {
+                let modifiers = egui::Modifiers::CTRL | egui::Modifiers::SHIFT;
+                if input.consume_key(modifiers, Key::O) {
+                    Some(SplitDirection::Right)
+                } else if input.consume_key(modifiers, Key::E) {
+                    Some(SplitDirection::Down)
+                } else {
+                    None
+                }
+            });
+            if let Some(direction) = split {
+                self.split_pane(direction);
+            }
             let (new, close, next, previous) = ctx.input_mut(consume_tab_shortcuts);
             if new {
                 self.new_tab();
@@ -843,11 +856,17 @@ impl eframe::App for TerminalApp {
                     });
                 }
                 ui.menu_button("Pane", |ui| {
-                    if ui.button("Split Right").clicked() {
+                    if ui
+                        .add(egui::Button::new("Split Right").shortcut_text("Ctrl+Shift+O"))
+                        .clicked()
+                    {
                         split = Some(SplitDirection::Right);
                         ui.close();
                     }
-                    if ui.button("Split Down").clicked() {
+                    if ui
+                        .add(egui::Button::new("Split Down").shortcut_text("Ctrl+Shift+E"))
+                        .clicked()
+                    {
                         split = Some(SplitDirection::Down);
                         ui.close();
                     }
