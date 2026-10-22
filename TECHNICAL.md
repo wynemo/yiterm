@@ -133,6 +133,8 @@ Windows 的 GPUI DirectComposition 合成层放在原生子窗口下方，让 We
 
 VNC 标签与浏览器共用右侧标签栏和已认证 SSH transport；每个 VNC 标签拥有独立连接、本机桥接端口和 WebView2 临时配置目录。通过菜单可增加多个 VNC 标签，切换终端 tab 时连接保留，关闭 VNC 标签会关闭桥接及活动连接。SSH 断开后显示断连状态；重新登录 SSH 后应从菜单新建 VNC 标签。系统 OpenSSH / `ssh --system` 会话无法共享连接。需要 Microsoft Edge WebView2 Runtime。
 
+VNC 页面右上角的 **Hide controls / Show controls** 可隐藏或显示 Host、Port、连接操作、工具按钮和状态信息。默认显示；收起后只保留右上角的恢复按钮，远端桌面使用腾出的空间。切换不会断开连接或重置输入与选项；**Fit** 开启时桌面随可用区域自动缩放。
+
 远端未提供光标图像或发送透明光标时，显示本地小圆点作为鼠标定位提示；收到可见光标图像后使用远端形状。支持键鼠操作、**Fit** 缩放、**View only** 只读模式、**Ctrl+Alt+Del**、手动断开和重连。**Send clipboard text** 弹出文本框，将输入的文本发送到远端剪贴板；远端剪贴板更新时弹出可复制的文本框。剪贴板为文本传输，不自动读取或改写系统剪贴板。VNC 凭据在需要时通过认证框输入，密码字段隐藏内容，不保存到 YiTerm 配置或日志。具体认证和剪贴板能力取决于服务器与 noVNC 的兼容情况；不提供音频或文件传输。
 
 内置 [noVNC v1.7.0](https://github.com/novnc/noVNC/tree/v1.7.0) 原始资源位于 `assets/novnc/`，构建时嵌入程序，无需 CDN、Node.js 或远端 websockify。许可证与来源见 [LICENSE.txt](assets/novnc/LICENSE.txt) 和 [UPSTREAM.txt](assets/novnc/UPSTREAM.txt)。本机 Rust 桥接仅监听 `127.0.0.1` 随机端口，以随机会话令牌和 WebSocket Origin 检查限制访问；VNC WebView 禁用代理并限制在内置页面导航，页面的 CSP 限制资源和网络请求。桥接通过现有 SOCKS5 将目标域名交给 SSH 服务器解析，不回退本机直连。SSH 保护到 SSH 服务器的链路，SSH 服务器到另一台 VNC 主机之间的加密取决于 VNC 服务配置。

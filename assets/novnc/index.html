@@ -3,13 +3,18 @@
 <meta charset="utf-8">
 <title>SSH VNC</title>
 <style>
-body { margin: 0; background: #202124; color: #eee; font: 14px system-ui; }
+body { margin: 0; height: 100vh; display: flex; flex-direction: column; overflow: hidden; background: #202124; color: #eee; font: 14px system-ui; }
+#controls { flex: 0 1 auto; min-height: 0; overflow: auto; padding-right: 130px; }
+#controls[hidden] { display: none; }
+#toggle-controls { position: fixed; top: 6px; right: 6px; z-index: 1; }
 form, .tools { display: flex; gap: 8px; padding: 10px; flex-wrap: wrap; }
 input, button { padding: 5px; }
-#screen { height: calc(100vh - 160px); min-height: 100px; }
+#screen { flex: 1 0 0; min-height: 0; overflow: hidden; }
 #status { padding: 0 10px; }
 dialog form { flex-direction: column; }
 </style>
+<button id="toggle-controls" type="button" aria-controls="controls" aria-expanded="true">Hide controls</button>
+<div id="controls">
 <form id="form">
   <label>Host <input id="host" value="localhost" required maxlength="255"></label>
   <label>Port <input id="port" type="number" value="5901" min="1" max="65535" required></label>
@@ -23,6 +28,7 @@ dialog form { flex-direction: column; }
   <button id="paste">Send clipboard text</button>
 </div>
 <p id="status" role="status">Loading VNC client…</p>
+</div>
 <div id="screen"></div>
 <dialog id="credentials"><form id="login"><strong>VNC authentication</strong><div id="fields"></div><button>Connect</button><button id="cancel" type="button">Cancel</button></form></dialog>
 <script type="module">
@@ -30,6 +36,13 @@ import RFB from './core/rfb.js';
 let rfb;
 const el = id => document.getElementById(id);
 const status = text => el('status').textContent = text;
+el('toggle-controls').onclick = () => {
+    const hidden = !el('controls').hidden;
+    el('controls').hidden = hidden;
+    el('toggle-controls').textContent = hidden ? 'Show controls' : 'Hide controls';
+    el('toggle-controls').setAttribute('aria-expanded', String(!hidden));
+    if (hidden) rfb?.focus({ preventScroll: true });
+};
 const clearCredentials = () => { el('credentials').close(); el('fields').replaceChildren(); };
 status('Connect to a VNC server through the current SSH session.');
 el('form').onsubmit = event => {
