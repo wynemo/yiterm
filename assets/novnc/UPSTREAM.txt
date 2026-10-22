@@ -2,8 +2,11 @@ noVNC v1.7.0
 Source: https://github.com/novnc/noVNC/tree/v1.7.0
 vendor/ and core/ are upstream sources except for YiTerm's monitor selection
 changes in core/rfb.js, core/display.js and core/encodings.js (desktoplayout
-event, desktopLayout, displayRegion, viewportChangeRegion and AppleDisplayLayout
-encoding 1105). Apple layout wire format reference:
+event, desktopLayout, selectScreen, displayRegion, viewportChangeRegion and
+Apple RFB 003.889 initialization, display messages, selection and input).
+Apple protocol wire format references:
+https://github.com/peetinc/noVNC-ARD/blob/main/ard/ard-patch.js
+https://github.com/peetinc/noVNC-ARD/blob/main/ard/display-info.js
 https://github.com/renegadelink/iShareScreen/blob/main/src/isharescreen/proxy/protocol/rfb.py
 index.html is YiTerm's integration page.
 License notices: LICENSE.txt, AUTHORS, docs/LICENSE*, vendor/pako/LICENSE.

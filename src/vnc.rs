@@ -2,10 +2,10 @@
 use anyhow::{Context, Result, ensure};
 use axum::{
     Router,
-    extract::{Path, Query, State, WebSocketUpgrade, ws::Message},
+    extract::{DefaultBodyLimit, Path, Query, State, WebSocketUpgrade, ws::Message},
     http::{HeaderMap, StatusCode, header},
     response::{IntoResponse, Response},
-    routing::get,
+    routing::{get, post},
 };
 use futures_util::{SinkExt, StreamExt};
 use include_dir::{Dir, include_dir};
@@ -50,6 +50,10 @@ impl VncBridge {
                 runtime.block_on(async move {
                     let app = Router::new()
                         .route("/{token}/ws", get(websocket))
+                        .route(
+                            "/{token}/diagnostic",
+                            post(diagnostic).layer(DefaultBodyLimit::max(1024)),
+                        )
                         .route("/{token}/{*path}", get(asset))
                         .with_state(state);
                     let listener = match tokio::net::TcpListener::from_std(listener) {
@@ -77,6 +81,44 @@ impl Drop for VncBridge {
         }
     }
 }
+#[derive(serde::Deserialize, Debug)]
+#[serde(rename_all = "snake_case")]
+enum DiagnosticEvent {
+    Connection,
+    Layout,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Diagnostic {
+    event: DiagnosticEvent,
+    apple: bool,
+    authentication: u32,
+    display_messages: u32,
+    invalid_layouts: u32,
+    width: u16,
+    height: u16,
+    screens: u8,
+    selected_screen: Option<u32>,
+}
+
+async fn diagnostic(
+    State(state): State<Arc<BridgeState>>,
+    Path(token): Path<String>,
+    axum::Json(info): axum::Json<Diagnostic>,
+) -> StatusCode {
+    if token != state.token {
+        return StatusCode::NOT_FOUND;
+    }
+    // Only protocol metadata, never credentials, input, or framebuffer data.
+    tracing::info!(event = ?info.event, apple = info.apple,
+        display_messages = info.display_messages, invalid_layouts = info.invalid_layouts,
+        authentication = info.authentication, width = info.width, height = info.height,
+        screens = info.screens, selected_screen = ?info.selected_screen,
+        "VNC protocol diagnostic");
+    StatusCode::NO_CONTENT
+}
+
 async fn asset(
     State(state): State<Arc<BridgeState>>,
     Path((token, path)): Path<(String, String)>,

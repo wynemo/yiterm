@@ -135,7 +135,9 @@ VNC 标签与浏览器共用右侧标签栏和已认证 SSH transport；每个 V
 
 VNC 页面右上角的 **Hide controls / Show controls** 可隐藏或显示 Host、Port、连接操作、工具按钮和状态信息。默认显示；收起后只保留右上角的恢复按钮，远端桌面使用腾出的空间。切换不会断开连接或重置输入与选项；**Fit** 开启时桌面随可用区域自动缩放。
 
-**Screen** 提供 **All / Screen 1 / Screen 2 / …** 按钮，连接后根据 VNC 服务端返回的真实屏幕布局自动生成编号，点击即可切屏，当前选中按钮高亮，无需框选。支持标准 ExtendedDesktopSize，以及 macOS Screen Sharing 的 AppleDisplayLayout（编码 1105 / `0x451`、布局版本 5）；Apple 布局按协商的 framebuffer 大小选择逻辑或 Retina 像素坐标，支持不同尺寸和排列。解析依据见 [Apple 布局实现参考](https://github.com/renegadelink/iShareScreen/blob/main/src/isharescreen/proxy/protocol/rfb.py)。不通过 SSH 执行命令获取屏幕信息。服务端未返回可用屏幕列表时会显示提示，不按画面均分生成虚假屏幕。选择仅裁剪本地显示，鼠标坐标随所选屏幕映射，不改变远端显示器配置、不重新连接，也不减少服务端发送的桌面数据。窗口大小及控制区显隐变化会重新缩放当前屏幕；远端桌面分辨率或布局更新、重新连接后默认显示 **All**，可重新点选编号。Windows WebView2 与实际 macOS VNC 服务端的互通效果尚待实机验证。
+**Screen** 提供 **All / Screen 1 / Screen 2 / …** 按钮，连接后根据 VNC 服务端返回的真实屏幕列表生成编号，点击即可切屏，当前选中按钮高亮，无需框选。标准 VNC 使用 ExtendedDesktopSize 布局在本地裁剪显示，鼠标坐标随选区映射，服务端仍发送完整桌面。macOS Screen Sharing 保留 Apple `003.889` 协议版本，以增强模式初始化（ClientInit 位 7；不设置会话选择位 6），发送 ViewerInfo、SetMode、SetDisplay，并启用自动画面更新；同时处理 DisplayInfo（1101）、DisplayInfo2（1105 / `0x451`）及独立的 `0x51` 屏幕列表消息。Mac 单屏切换使用服务端返回的真实显示器 ID 发送 SetDisplay，服务端调整当前连接的画面大小，不修改远端显示器配置，也不创建虚拟桌面。屏幕编号按组合画面从左到右、从上到下排列。不通过 SSH 执行命令获取屏幕信息。协议参考见 [noVNC-ARD](https://github.com/peetinc/noVNC-ARD/blob/main/ard/ard-patch.js) 和 [DisplayInfo2 格式](https://github.com/peetinc/noVNC-ARD/blob/main/ard/display-info.js)。服务端没有提供屏幕列表时会显示提示，不按画面均分生成屏幕。Windows WebView2 与实际 macOS VNC 服务端的互通效果尚待实机验证。
+
+连接和屏幕列表更新时，应用日志写入 `VNC protocol diagnostic`，仅记录 Apple 协议标志、认证类型编号、画面尺寸、屏幕数量和当前屏幕 ID，便于区分协商与屏幕消息处理问题；不记录密码、键鼠内容或远端画面。通过 **Tools → Open Log File** 可查看。
 
 远端未提供光标图像或发送透明光标时，显示本地小圆点作为鼠标定位提示；收到可见光标图像后使用远端形状。支持键鼠操作、**Fit** 缩放、**View only** 只读模式、**Ctrl+Alt+Del**、手动断开和重连。**Send clipboard text** 弹出文本框，将输入的文本发送到远端剪贴板；远端剪贴板更新时弹出可复制的文本框。剪贴板为文本传输，不自动读取或改写系统剪贴板。VNC 凭据在需要时通过认证框输入，密码字段隐藏内容，不保存到 YiTerm 配置或日志。具体认证和剪贴板能力取决于服务器与 noVNC 的兼容情况；不提供音频或文件传输。
 

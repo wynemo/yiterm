@@ -131,6 +131,14 @@ export default class RFB extends EventTargetMixin {
         this._rfbVersion = 0;
         this._rfbMaxVersion = 3.8;
         this._rfbTightVNC = false;
+        this._appleARD = false;
+        this._appleScreens = [];
+        this._appleSelectedScreen = null;
+        this._appleInputCipher = null;
+        this._appleInputQueue = Promise.resolve();
+        this._appleDisplayInfo2Seen = false;
+        this._appleDisplayMessages = 0;
+        this._appleInvalidLayouts = 0;
         this._rfbVeNCryptState = 0;
         this._rfbXvpVer = 0;
 
@@ -378,7 +386,28 @@ export default class RFB extends EventTargetMixin {
 
     get desktopLayout() {
         return { width: this._fbWidth, height: this._fbHeight,
-                 screens: this._screens.map(screen => ({ ...screen })) };
+                 nativeSelection: this._appleARD,
+                 selectedScreenId: this._appleSelectedScreen,
+                 screens: (this._appleARD ? this._appleScreens : this._screens)
+                     .map(screen => ({ ...screen })) };
+    }
+
+    get protocolInfo() {
+        return { apple: this._appleARD, authentication: this._rfbAuthScheme,
+                 display_messages: this._appleDisplayMessages,
+                 invalid_layouts: this._appleInvalidLayouts };
+    }
+
+    selectScreen(id) {
+        if (!this._appleARD) {
+            this.displayRegion = id === null ? null : this._screens.find(screen => screen.id === id);
+            return;
+        }
+        if (id !== null && !this._appleScreens.some(screen => screen.id === id)) {
+            throw new RangeError('Unknown Apple display id');
+        }
+        this._appleSelectedScreen = id;
+        this._sendAppleDisplay(id);
     }
 
     set displayRegion(region) {
@@ -490,6 +519,25 @@ export default class RFB extends EventTargetMixin {
         if (down === undefined) {
             this.sendKey(keysym, code, true);
             this.sendKey(keysym, code, false);
+            return;
+        }
+
+        if (this._appleARD && this._appleInputCipher) {
+            if (!keysym) return;
+            const payload = new Uint8Array(16);
+            const data = new DataView(payload.buffer);
+            payload[0] = 0xff;
+            payload[1] = down ? 1 : 0;
+            data.setUint32(2, keysym || 0);
+            data.setUint32(6, (performance.now() * 1000) >>> 0);
+            this._appleInputQueue = this._appleInputQueue.then(async () => {
+                const encrypted = await legacyCrypto.encrypt({ name: 'AES-ECB' }, this._appleInputCipher, payload);
+                if (this._rfbConnectionState !== 'connected' || this._viewOnly) return;
+                this._sock.sQpush8(0x10); // Apple EncryptedEvent
+                this._sock.sQpush8(0);
+                this._sock.sQpushBytes(encrypted);
+                this._sock.flush();
+            }).catch(() => this._fail('Could not encode Apple keyboard input'));
             return;
         }
 
@@ -1237,6 +1285,21 @@ export default class RFB extends EventTargetMixin {
         if (this._rfbConnectionState !== 'connected') { return; }
         if (this._viewOnly) { return; } // View only, skip mouse events
 
+        if (this._appleARD) {
+            // Apple orders the right and middle buttons differently.
+            mask = (mask & ~6) | ((mask & 2) << 1) | ((mask & 4) >> 1);
+            if (this._appleInputCipher) {
+                const serverX = this._display.absX(x);
+                const serverY = this._display.absY(y);
+                // Modifier keys must arrive before subsequent mouse events.
+                this._appleInputQueue = this._appleInputQueue.then(() => {
+                    if (this._rfbConnectionState !== 'connected' || this._viewOnly) return;
+                    RFB.messages.pointerEvent(this._sock, serverX, serverY, mask);
+                }).catch(() => this._fail('Could not encode Apple pointer input'));
+                return;
+            }
+        }
+
         // Highest bit in mask is never sent to the server
         if (mask & 0x8000) {
             throw new Error("Illegal mouse button mask (mask: " + mask + ")");
@@ -1542,8 +1605,14 @@ export default class RFB extends EventTargetMixin {
             case "003.007":
                 this._rfbVersion = 3.7;
                 break;
-            case "003.008":
             case "003.889":  // Apple Remote Desktop
+                this._appleARD = true;
+                this._rfbVersion = 3.8;
+                this._sock.sQpushString("RFB 003.889\n");
+                this._sock.flush();
+                this._rfbInitState = 'Security';
+                return true;
+            case "003.008":
             case "004.000":  // Intel AMT KVM
             case "004.001":  // RealVNC 4.6
             case "005.000":  // RealVNC 5.3
@@ -1883,6 +1952,7 @@ export default class RFB extends EventTargetMixin {
         const key = await legacyCrypto.digest("MD5", sharedKey);
         const cipher = await legacyCrypto.importKey(
             "raw", key, { name: "AES-ECB" }, false, ["encrypt"]);
+        if (this._appleARD) this._appleInputCipher = cipher;
         const encrypted = await legacyCrypto.encrypt({ name: "AES-ECB" }, cipher, credentials);
 
         this._rfbCredentials.ardCredentials = encrypted;
@@ -2195,6 +2265,10 @@ export default class RFB extends EventTargetMixin {
         const nameLength = this._sock.rQshift32();
         if (this._sock.rQwait('server init name', nameLength, 24)) { return false; }
         let name = this._sock.rQshiftStr(nameLength);
+        if (this._appleARD && name.length >= 22 && name.charCodeAt(0) === 0) {
+            // Apple's ServerInit embeds flags/capabilities before the name.
+            name = name.substring(name.lastIndexOf('\0') + 1);
+        }
         name = decodeUTF8(name, true);
 
         if (this._rfbTightVNC) {
@@ -2247,9 +2321,18 @@ export default class RFB extends EventTargetMixin {
             this._fbDepth = 8;
         }
 
+        if (this._appleARD) {
+            this._sendAppleSetup();
+        }
         RFB.messages.pixelFormat(this._sock, this._fbDepth, true);
         this._sendEncodings();
-        RFB.messages.fbUpdateRequest(this._sock, false, 0, 0, this._fbWidth, this._fbHeight);
+        if (this._fbWidth > 0 && this._fbHeight > 0) {
+            if (this._appleARD) {
+                this._requestAppleUpdates();
+            } else {
+                RFB.messages.fbUpdateRequest(this._sock, false, 0, 0, this._fbWidth, this._fbHeight);
+            }
+        }
 
         this._updateConnectionState('connected');
         return true;
@@ -2284,7 +2367,10 @@ export default class RFB extends EventTargetMixin {
         encs.push(encodings.pseudoEncodingQEMUExtendedKeyEvent);
         encs.push(encodings.pseudoEncodingQEMULedEvent);
         encs.push(encodings.pseudoEncodingExtendedDesktopSize);
-        encs.push(encodings.pseudoEncodingAppleDisplayLayout);
+        if (this._appleARD) {
+            encs.push(encodings.pseudoEncodingAppleDisplayInfo);
+            encs.push(encodings.pseudoEncodingAppleDisplayLayout);
+        }
         encs.push(encodings.pseudoEncodingXvp);
         encs.push(encodings.pseudoEncodingFence);
         encs.push(encodings.pseudoEncodingContinuousUpdates);
@@ -2326,7 +2412,10 @@ export default class RFB extends EventTargetMixin {
                 return this._handleSecurityReason();
 
             case 'ClientInitialisation':
-                this._sock.sQpush8(this._shared ? 1 : 0); // ClientInitialisation
+                // Enhanced Apple mode (bit 7), sharing the existing console.
+                // Bit 6 is deliberately clear: we do not implement session
+                // selection or request a new virtual desktop.
+                this._sock.sQpush8((this._appleARD ? 0x80 : 0) | (this._shared ? 1 : 0));
                 this._sock.flush();
                 this._rfbInitState = 'ServerInitialisation';
                 return true;
@@ -2588,6 +2677,40 @@ export default class RFB extends EventTargetMixin {
     }
 
     _normalMsg() {
+        if (this._appleARD && this._FBU.rects === 0) {
+            const type = this._sock.rQpeek8();
+            if (type === 4 || type === 7) {
+                this._sock.rQskipBytes(1); // Apple ACK / NOP, no payload
+                return true;
+            }
+            if (type === 0x51) {
+                if (this._sock.rQwait('Apple display message length', 3)) return false;
+                const header = this._sock.rQpeekBytes(3, false);
+                const length = (header[1] << 8) | header[2];
+                if (this._sock.rQwait('Apple display message', length + 3)) return false;
+                this._sock.rQskipBytes(3);
+                this._applyAppleDisplayLayout(this._sock.rQshiftBytes(length, false));
+                return true;
+            }
+            if (type === 0x14) {
+                if (this._sock.rQwait('Apple state message length', 4)) return false;
+                const header = this._sock.rQpeekBytes(4, false);
+                const length = (header[2] << 8) | header[3];
+                if (this._sock.rQwait('Apple state message', length + 4)) return false;
+                this._sock.rQskipBytes(4);
+                let status = 0;
+                if (length >= 4) {
+                    this._sock.rQskipBytes(2); // flags
+                    status = this._sock.rQshift16();
+                    this._sock.rQskipBytes(length - 4);
+                } else {
+                    this._sock.rQskipBytes(length);
+                }
+                if (status === 1) this.disconnect(); // remote user closed it
+                if (status === 4) this._requestAppleUpdates(); // server tickle
+                return true;
+            }
+        }
         let msgType;
         if (this._FBU.rects > 0) {
             msgType = 0;
@@ -2599,7 +2722,7 @@ export default class RFB extends EventTargetMixin {
         switch (msgType) {
             case 0:  // FramebufferUpdate
                 ret = this._framebufferUpdate();
-                if (ret && !this._enabledContinuousUpdates) {
+                if (ret && !this._enabledContinuousUpdates && !this._appleARD) {
                     RFB.messages.fbUpdateRequest(this._sock, true, 0, 0,
                                                  this._fbWidth, this._fbHeight);
                 }
@@ -2722,6 +2845,9 @@ export default class RFB extends EventTargetMixin {
 
             case encodings.pseudoEncodingAppleDisplayLayout:
                 return this._handleAppleDisplayLayout();
+
+            case encodings.pseudoEncodingAppleDisplayInfo:
+                return this._handleAppleDisplayInfo();
 
             case encodings.pseudoEncodingExtendedMouseButtons:
                 this._extendedPointerEventSupported = true;
@@ -2922,78 +3048,135 @@ export default class RFB extends EventTargetMixin {
         return true;
     }
 
-    // YiTerm: Apple Screen Sharing advertises physical displays through
-    // encoding 1105 rather than the standard ExtendedDesktopSize extension.
-    // Wire-format reference (independent reverse engineering):
-    // https://github.com/renegadelink/iShareScreen/blob/main/src/isharescreen/proxy/protocol/rfb.py
-    _handleAppleDisplayLayout() {
-        if (this._sock.rQwait('AppleDisplayLayout length', 2)) {
-            return false;
+    // Apple RFB 003.889 display negotiation, independent of SSH transport.
+    // Protocol references:
+    // https://github.com/peetinc/noVNC-ARD/blob/main/ard/ard-patch.js
+    // https://github.com/peetinc/noVNC-ARD/blob/main/ard/display-info.js
+    _sendAppleSetup() {
+        // ViewerInfo: 62-byte body, generic viewer class, application/version
+        // fields, then a 32-byte capability bitmap. No clipboard subscription
+        // or media/encryption capabilities are requested by this integration.
+        this._sock.sQpush8(0x21);
+        this._sock.sQpush8(0);
+        this._sock.sQpush16(62);
+        this._sock.sQpush16(1);
+        for (const value of [2, 6, 1, 0, 15, 0, 0]) {
+            this._sock.sQpush32(value);
         }
+        this._sock.sQpushBytes(new Uint8Array(32));
+        this._sock.sQpush8(0x0a); // SetMode
+        this._sock.sQpush8(0);
+        this._sock.sQpush16(this._viewOnly ? 0 : 1);
+        this._sendAppleDisplay(null);
+        this._sendEncodings();
+    }
+
+    _sendAppleDisplay(id) {
+        this._sock.sQpush8(0x0d); // SetDisplay
+        this._sock.sQpush8(id === null ? 1 : 0);
+        this._sock.sQpush16(0);
+        this._sock.sQpush32(id === null ? 0 : id);
+        this._sock.flush();
+    }
+
+    _requestAppleUpdates() {
+        if (this._fbWidth < 1 || this._fbHeight < 1) return;
+        RFB.messages.fbUpdateRequest(this._sock, false, 0, 0, this._fbWidth, this._fbHeight);
+        this._sock.sQpush8(0x09); // AutoFrameBufferUpdate
+        this._sock.sQpush8(0);
+        this._sock.sQpush16(1);
+        this._sock.sQpush32(0);
+        this._sock.sQpush16(0);
+        this._sock.sQpush16(0);
+        this._sock.sQpush16(this._fbWidth);
+        this._sock.sQpush16(this._fbHeight);
+        this._sock.flush();
+    }
+
+    _handleAppleDisplayInfo() {
+        if (this._sock.rQwait('Apple DisplayInfo header', 8)) return false;
+        const header = this._sock.rQpeekBytes(8, false);
+        const count = (header[4] << 8) | header[5];
+        if (count > 255) return this._fail('Invalid Apple display count');
+        if (this._sock.rQwait('Apple DisplayInfo records', 8 + count * 28)) return false;
+        this._appleDisplayMessages++;
+        const width = this._sock.rQshift16();
+        const height = this._sock.rQshift16();
+        this._sock.rQskipBytes(4);
+        const screens = [];
+        for (let i = 0; i < count; i++) {
+            const id = this._sock.rQshift32();
+            const w = this._sock.rQshift16();
+            const h = this._sock.rQshift16();
+            this._sock.rQskipBytes(20);
+            if (w > 0 && h > 0) screens.push({ id, x: 0, y: 0, width: w, height: h });
+        }
+        // DisplayInfo supplies real IDs even on older Apple servers which
+        // omit per-display rectangles. Selection happens on the server.
+        if (!this._appleDisplayInfo2Seen && screens.length > 0) {
+            this._appleScreens = screens;
+        }
+        if (width > 0 && height > 0 && (width !== this._fbWidth || height !== this._fbHeight)) {
+            this._resize(width, height);
+        } else {
+            this.dispatchEvent(new CustomEvent('desktoplayout', { detail: this.desktopLayout }));
+        }
+        this._requestAppleUpdates();
+        return true;
+    }
+
+    _handleAppleDisplayLayout() {
+        if (this._sock.rQwait('Apple DisplayInfo2 length', 2)) return false;
         const prefix = this._sock.rQpeekBytes(2, false);
         const length = (prefix[0] << 8) | prefix[1];
-        if (this._sock.rQwait('AppleDisplayLayout payload', length + 2)) {
-            return false;
-        }
+        if (this._sock.rQwait('Apple DisplayInfo2 payload', length + 2)) return false;
         this._sock.rQskipBytes(2);
         const bytes = this._sock.rQshiftBytes(length, false);
-        if (length < 20) {
-            Log.Warn('Apple display layout is too short');
-            return true;
+        this._applyAppleDisplayLayout(bytes, this._FBU.width, this._FBU.height);
+        return true;
+    }
+
+    _applyAppleDisplayLayout(bytes, rectWidth = 0, rectHeight = 0) {
+        this._appleDisplayMessages++;
+        if (bytes.length < 20) {
+            Log.Warn('Apple DisplayInfo2 header is incomplete');
+            this._appleInvalidLayouts++;
+            this.dispatchEvent(new CustomEvent('protocolinfo'));
+            return;
         }
         const data = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
-        const version = data.getUint16(0);
-        const scaledWidth = data.getUint16(2);
-        const scaledHeight = data.getUint16(4);
-        const backingWidth = data.getUint16(6);
-        const backingHeight = data.getUint16(8);
         const count = data.getUint16(18);
-        if (version !== 5 || count < 1 || count > 255 || length < 20 + count * 56) {
-            Log.Warn('Unsupported Apple display layout version or record count');
-            return true;
-        }
-        // Each display contains logical and backing rectangles. Use the one
-        // matching the negotiated framebuffer, including Retina sessions.
-        let rectOffset;
-        if (backingWidth === this._fbWidth && backingHeight === this._fbHeight) {
-            rectOffset = 28;
-        } else if (scaledWidth === this._fbWidth && scaledHeight === this._fbHeight) {
-            rectOffset = 20;
-        } else {
-            Log.Warn('Apple display geometry does not match the framebuffer');
-            return true;
+        if (count > 255 || bytes.length < 20 + count * 56) {
+            Log.Warn('Apple DisplayInfo2 records are incomplete');
+            this._appleInvalidLayouts++;
+            this.dispatchEvent(new CustomEvent('protocolinfo'));
+            return;
         }
         const screens = [];
         for (let i = 0; i < count; i++) {
-            const offset = 20 + i * 56;
-            // Apple rects are top, left, bottom, right, not x/y/width/height.
-            const y = data.getUint16(offset + rectOffset);
-            const x = data.getUint16(offset + rectOffset + 2);
-            const bottom = data.getUint16(offset + rectOffset + 4);
-            const right = data.getUint16(offset + rectOffset + 6);
-            if (right <= x || bottom <= y || right > this._fbWidth || bottom > this._fbHeight) {
-                Log.Warn('Apple display rectangle is outside the framebuffer');
-                return true;
-            }
-            screens.push({ id: data.getUint32(offset + 16), x, y,
-                           width: right - x, height: bottom - y });
+            const at = 20 + i * 56;
+            const y = data.getInt16(at + 28);
+            const x = data.getInt16(at + 30);
+            const height = data.getInt16(at + 32) - y;
+            const width = data.getInt16(at + 34) - x;
+            if (width < 1 || height < 1) continue;
+            screens.push({ id: data.getUint32(at + 16), x, y, width, height });
         }
-        const unchanged = screens.length === this._screens.length &&
-            screens.every((screen, index) => {
-                const previous = this._screens[index];
-                return screen.id === previous.id && screen.x === previous.x &&
-                    screen.y === previous.y && screen.width === previous.width &&
-                    screen.height === previous.height;
-            });
-        if (unchanged) {
-            return true;
+        if (screens.length > 0) {
+            // Stable numbering follows the combined picture, left to right.
+            this._appleScreens = screens.sort((a, b) => a.x - b.x || a.y - b.y);
+            this._appleDisplayInfo2Seen = true;
         }
-        this._displayRegion = null;
-        this._screens = screens;
-        this._updateClip();
-        this._updateScale();
-        this.dispatchEvent(new CustomEvent('desktoplayout', { detail: this.desktopLayout }));
-        return true;
+        const current = data.getUint32(10);
+        this._appleSelectedScreen = this._appleScreens.some(screen => screen.id === current) ? current : null;
+        const width = rectWidth || data.getUint16(6);
+        const height = rectHeight || data.getUint16(8);
+        if (width > 0 && height > 0 && (width !== this._fbWidth || height !== this._fbHeight)) {
+            this._resize(width, height);
+        } else {
+            this.dispatchEvent(new CustomEvent('desktoplayout', { detail: this.desktopLayout }));
+        }
+        this._requestAppleUpdates();
     }
 
     _handleExtendedDesktopSize() {

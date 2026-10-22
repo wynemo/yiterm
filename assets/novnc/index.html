@@ -40,6 +40,18 @@ import RFB from './core/rfb.js';
 let rfb;
 const el = id => document.getElementById(id);
 const status = text => el('status').textContent = text;
+let lastDiagnostic = '';
+const reportProtocol = event => {
+    const layout = rfb.desktopLayout;
+    const body = JSON.stringify({ event, ...rfb.protocolInfo, width: layout.width,
+        height: layout.height, screens: layout.screens.length,
+        selected_screen: layout.selectedScreenId });
+    if (body === lastDiagnostic) return;
+    lastDiagnostic = body;
+    fetch(new URL('./diagnostic', location.href), {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body,
+    }).catch(() => {});
+};
 let screenInfoTimer;
 let selectedMonitor = -1;
 let monitorsConnected = false;
@@ -54,7 +66,7 @@ const renderMonitors = () => {
         button.disabled = !monitorsConnected;
         button.setAttribute('aria-pressed', String(selectedMonitor === index));
         button.onclick = () => {
-            rfb.displayRegion = index < 0 ? null : screens[index];
+            rfb.selectScreen(index < 0 ? null : screens[index].id);
             selectedMonitor = index;
             renderMonitors();
             rfb.focus({ preventScroll: true });
@@ -68,7 +80,9 @@ const renderMonitors = () => {
 };
 const resetMonitors = (connected = false) => {
     clearTimeout(screenInfoTimer);
-    selectedMonitor = -1;
+    selectedMonitor = connected && rfb.desktopLayout.nativeSelection
+        ? rfb.desktopLayout.screens.findIndex(screen => screen.id === rfb.desktopLayout.selectedScreenId)
+        : -1;
     monitorsConnected = connected;
     renderMonitors();
     const waiting = connected && rfb.desktopLayout.screens.length === 0;
@@ -108,10 +122,13 @@ el('form').onsubmit = event => {
     client.scaleViewport = el('scale').checked;
     client.viewOnly = el('readonly').checked;
     client.addEventListener('desktoplayout', () => {
-        if (rfb === client) resetMonitors(true);
+        if (rfb === client) { resetMonitors(true); reportProtocol('layout'); }
+    });
+    client.addEventListener('protocolinfo', () => {
+        if (rfb === client) reportProtocol('layout');
     });
     client.addEventListener('connect', () => {
-        if (rfb === client) { status('Connected'); resetMonitors(true); }
+        if (rfb === client) { status('Connected'); resetMonitors(true); reportProtocol('connection'); }
     });
     client.addEventListener('disconnect', event => {
         if (rfb !== client) return;
