@@ -16,13 +16,97 @@ use gpui_component::{
     IndexPath, Root, Selectable, Sizable,
     button::{Button, ButtonVariants},
     input::{Input, InputEvent, InputState, NumberInput, NumberInputEvent, StepAction},
-    select::{SearchableVec, Select, SelectEvent, SelectState},
+    select::{SearchableVec, Select, SelectEvent, SelectItem, SelectState},
     switch::Switch,
+    tooltip::Tooltip,
 };
 use std::{borrow::Cow, ops::Range};
 
 type Rect = Bounds<Pixels>;
 const DIVIDER: f32 = 5.;
+
+fn shell_menu_width(window: &Window) -> Pixels {
+    px(520.).min((window.viewport_size().width - px(32.)).max(px(1.)))
+}
+
+#[derive(Clone)]
+struct ShellChoice(String);
+
+impl ShellChoice {
+    fn name(&self) -> SharedString {
+        self.0
+            .rsplit(['/', '\\'])
+            .next()
+            .unwrap_or(&self.0)
+            .to_owned()
+            .into()
+    }
+
+    fn label(&self) -> impl IntoElement + use<> {
+        let path = self.0.clone();
+        div()
+            .id("shell-choice-label")
+            .w_full()
+            .min_w_0()
+            .truncate()
+            .child(self.name())
+            .tooltip(move |window, cx| {
+                Tooltip::new(path.clone())
+                    .max_w(shell_menu_width(window))
+                    .whitespace_normal()
+                    .build(window, cx)
+            })
+    }
+}
+
+impl SelectItem for ShellChoice {
+    type Value = String;
+
+    fn title(&self) -> SharedString {
+        self.0.clone().into()
+    }
+
+    fn value(&self) -> &String {
+        &self.0
+    }
+
+    fn display_title(&self) -> Option<gpui::AnyElement> {
+        Some(self.label().into_any_element())
+    }
+
+    fn render(&self, window: &mut Window, _: &mut App) -> impl IntoElement {
+        let path = self.0.clone();
+        div()
+            .id("shell-choice-row")
+            .w((shell_menu_width(window) - px(32.)).max(px(1.)))
+            .flex()
+            .items_center()
+            .gap(px(12.))
+            .child(
+                div()
+                    .max_w((shell_menu_width(window) - px(32.)) * 0.5)
+                    .flex_shrink_0()
+                    .truncate()
+                    .child(self.name()),
+            )
+            .when(self.name().as_ref() != self.0, |row| {
+                row.child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .truncate()
+                        .opacity(0.6)
+                        .child(path.clone()),
+                )
+            })
+            .tooltip(move |window, cx| {
+                Tooltip::new(path.clone())
+                    .max_w(shell_menu_width(window))
+                    .whitespace_normal()
+                    .build(window, cx)
+            })
+    }
+}
 
 gpui::actions!(terminal, [Complete, CompletePrevious]);
 
@@ -162,7 +246,7 @@ pub(super) struct TerminalUi {
     context_menu: bool,
     font_select: gpui::Entity<SelectState<SearchableVec<String>>>,
     font_size: gpui::Entity<InputState>,
-    shell_select: gpui::Entity<SelectState<SearchableVec<String>>>,
+    shell_select: gpui::Entity<SelectState<SearchableVec<ShellChoice>>>,
     shell_program: gpui::Entity<InputState>,
     _settings_subscriptions: Vec<gpui::Subscription>,
     menu: Option<Menu>,
@@ -291,7 +375,7 @@ impl TerminalUi {
             cx.subscribe_in(
                 &shell_select,
                 window,
-                |this, _, event: &SelectEvent<SearchableVec<String>>, window, cx| {
+                |this, _, event: &SelectEvent<SearchableVec<ShellChoice>>, window, cx| {
                     if let SelectEvent::Confirm(Some(value)) = event {
                         match value.as_str() {
                             "Default" => {
@@ -1973,7 +2057,7 @@ impl Render for TerminalUi {
         }
         if self.app.settings_open || self.app.about_open {
             let panel = if self.app.settings_open {
-                self.settings_panel(cx)
+                self.settings_panel(window, cx)
             } else {
                 self.about_panel(cx)
             };
@@ -2200,7 +2284,7 @@ impl TerminalUi {
                 }
             }))
     }
-    fn settings_panel(&self, cx: &ViewContext<Self>) -> gpui::AnyElement {
+    fn settings_panel(&self, window: &Window, cx: &ViewContext<Self>) -> gpui::AnyElement {
         let theme = self.app.theme;
         let description = |title: &'static str, detail: &'static str| {
             div()
@@ -2298,6 +2382,7 @@ impl TerminalUi {
                                 div().flex_1().min_w_0().child(
                                     Select::new(&self.shell_select)
                                         .small()
+                                        .menu_width(shell_menu_width(window))
                                         .search_placeholder("Search shells…")
                                         .w_full(),
                                 ),
@@ -2798,7 +2883,7 @@ pub(super) fn run(app: TerminalApp) -> Result<()> {
     std::mem::replace(&mut *result.borrow_mut(), Ok(()))
 }
 
-fn shell_choices(shell: &settings::ShellSettings) -> (Vec<String>, usize) {
+fn shell_choices(shell: &settings::ShellSettings) -> (Vec<ShellChoice>, usize) {
     let mut choices = vec!["Default".to_owned(), "Program".to_owned()];
     choices.extend(settings::available_shell_programs());
     let selected = if shell.mode == settings::ShellMode::Default {
@@ -2812,5 +2897,5 @@ fn shell_choices(shell: &settings::ShellSettings) -> (Vec<String>, usize) {
                 choices.len() - 1
             })
     };
-    (choices, selected)
+    (choices.into_iter().map(ShellChoice).collect(), selected)
 }
