@@ -10707,7 +10707,7 @@ dependencies = [
 
 [[package]]
 name = "yiterm"
-version = "0.0.15"
+version = "0.0.16"
 dependencies = [
  "alacritty_terminal",
  "anyhow",
