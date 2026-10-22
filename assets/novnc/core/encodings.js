@@ -27,6 +27,7 @@ export const encodings = {
     pseudoEncodingQEMULedEvent: -261,
     pseudoEncodingDesktopName: -307,
     pseudoEncodingExtendedDesktopSize: -308,
+    pseudoEncodingAppleDisplayLayout: 0x451,
     pseudoEncodingXvp: -309,
     pseudoEncodingFence: -312,
     pseudoEncodingContinuousUpdates: -313,

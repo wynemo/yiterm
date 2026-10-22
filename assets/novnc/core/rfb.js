@@ -2284,6 +2284,7 @@ export default class RFB extends EventTargetMixin {
         encs.push(encodings.pseudoEncodingQEMUExtendedKeyEvent);
         encs.push(encodings.pseudoEncodingQEMULedEvent);
         encs.push(encodings.pseudoEncodingExtendedDesktopSize);
+        encs.push(encodings.pseudoEncodingAppleDisplayLayout);
         encs.push(encodings.pseudoEncodingXvp);
         encs.push(encodings.pseudoEncodingFence);
         encs.push(encodings.pseudoEncodingContinuousUpdates);
@@ -2719,6 +2720,9 @@ export default class RFB extends EventTargetMixin {
             case encodings.pseudoEncodingExtendedDesktopSize:
                 return this._handleExtendedDesktopSize();
 
+            case encodings.pseudoEncodingAppleDisplayLayout:
+                return this._handleAppleDisplayLayout();
+
             case encodings.pseudoEncodingExtendedMouseButtons:
                 this._extendedPointerEventSupported = true;
                 return true;
@@ -2918,6 +2922,80 @@ export default class RFB extends EventTargetMixin {
         return true;
     }
 
+    // YiTerm: Apple Screen Sharing advertises physical displays through
+    // encoding 1105 rather than the standard ExtendedDesktopSize extension.
+    // Wire-format reference (independent reverse engineering):
+    // https://github.com/renegadelink/iShareScreen/blob/main/src/isharescreen/proxy/protocol/rfb.py
+    _handleAppleDisplayLayout() {
+        if (this._sock.rQwait('AppleDisplayLayout length', 2)) {
+            return false;
+        }
+        const prefix = this._sock.rQpeekBytes(2, false);
+        const length = (prefix[0] << 8) | prefix[1];
+        if (this._sock.rQwait('AppleDisplayLayout payload', length + 2)) {
+            return false;
+        }
+        this._sock.rQskipBytes(2);
+        const bytes = this._sock.rQshiftBytes(length, false);
+        if (length < 20) {
+            Log.Warn('Apple display layout is too short');
+            return true;
+        }
+        const data = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+        const version = data.getUint16(0);
+        const scaledWidth = data.getUint16(2);
+        const scaledHeight = data.getUint16(4);
+        const backingWidth = data.getUint16(6);
+        const backingHeight = data.getUint16(8);
+        const count = data.getUint16(18);
+        if (version !== 5 || count < 1 || count > 255 || length < 20 + count * 56) {
+            Log.Warn('Unsupported Apple display layout version or record count');
+            return true;
+        }
+        // Each display contains logical and backing rectangles. Use the one
+        // matching the negotiated framebuffer, including Retina sessions.
+        let rectOffset;
+        if (backingWidth === this._fbWidth && backingHeight === this._fbHeight) {
+            rectOffset = 28;
+        } else if (scaledWidth === this._fbWidth && scaledHeight === this._fbHeight) {
+            rectOffset = 20;
+        } else {
+            Log.Warn('Apple display geometry does not match the framebuffer');
+            return true;
+        }
+        const screens = [];
+        for (let i = 0; i < count; i++) {
+            const offset = 20 + i * 56;
+            // Apple rects are top, left, bottom, right, not x/y/width/height.
+            const y = data.getUint16(offset + rectOffset);
+            const x = data.getUint16(offset + rectOffset + 2);
+            const bottom = data.getUint16(offset + rectOffset + 4);
+            const right = data.getUint16(offset + rectOffset + 6);
+            if (right <= x || bottom <= y || right > this._fbWidth || bottom > this._fbHeight) {
+                Log.Warn('Apple display rectangle is outside the framebuffer');
+                return true;
+            }
+            screens.push({ id: data.getUint32(offset + 16), x, y,
+                           width: right - x, height: bottom - y });
+        }
+        const unchanged = screens.length === this._screens.length &&
+            screens.every((screen, index) => {
+                const previous = this._screens[index];
+                return screen.id === previous.id && screen.x === previous.x &&
+                    screen.y === previous.y && screen.width === previous.width &&
+                    screen.height === previous.height;
+            });
+        if (unchanged) {
+            return true;
+        }
+        this._displayRegion = null;
+        this._screens = screens;
+        this._updateClip();
+        this._updateScale();
+        this.dispatchEvent(new CustomEvent('desktoplayout', { detail: this.desktopLayout }));
+        return true;
+    }
+
     _handleExtendedDesktopSize() {
         if (this._sock.rQwait("ExtendedDesktopSize", 4)) {
             return false;
@@ -3032,11 +3110,15 @@ export default class RFB extends EventTargetMixin {
     }
 
     // Handle resize-messages from the server
-    _resize(width, height, screens = []) {
+    _resize(width, height, screens = null) {
+        // A redundant DesktopSize may follow Apple's layout announcement.
+        // Keep the screen list when the framebuffer dimensions did not change.
+        const previousScreens = this._fbWidth === width && this._fbHeight === height
+            ? this._screens : [];
         this._fbWidth = width;
         this._fbHeight = height;
         this._displayRegion = null;
-        this._screens = screens.filter(screen => screen.width > 0 && screen.height > 0 &&
+        this._screens = (screens ?? previousScreens).filter(screen => screen.width > 0 && screen.height > 0 &&
             screen.x + screen.width <= width && screen.y + screen.height <= height);
 
         this._display.resize(this._fbWidth, this._fbHeight);

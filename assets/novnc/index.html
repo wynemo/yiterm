@@ -12,10 +12,6 @@ input, button, select { padding: 5px; }
 #monitors { display: inline-flex; gap: 4px; align-items: center; }
 #monitors button[aria-pressed="true"] { background: #1769aa; color: white; border-color: #67b7ff; }
 #screen { position: relative; flex: 1 0 0; min-height: 0; overflow: hidden; }
-#region-picker { position: absolute; inset: 0; z-index: 2; cursor: crosshair; touch-action: none; }
-#region-picker[hidden], #selection[hidden] { display: none; }
-#region-hint { position: absolute; top: 8px; left: 8px; padding: 6px; background: #202124; }
-#selection { position: fixed; border: 2px solid #67b7ff; box-sizing: border-box; background: #67b7ff33; pointer-events: none; }
 #status { padding: 0 10px; }
 dialog form { flex-direction: column; }
 </style>
@@ -31,8 +27,7 @@ dialog form { flex-direction: column; }
   <label><input id="scale" type="checkbox" checked>Fit</label>
   <label><input id="readonly" type="checkbox">View only</label>
   <span id="monitors" role="group" aria-label="Screen">Screen</span>
-  <button id="select-region" type="button" disabled>Select area…</button>
-  <button id="clear-regions" type="button" hidden>Reset screens</button>
+  <span id="screen-info" role="status"></span>
   <button id="cad">Ctrl+Alt+Del</button>
   <button id="paste">Send clipboard text</button>
 </div>
@@ -45,16 +40,12 @@ import RFB from './core/rfb.js';
 let rfb;
 const el = id => document.getElementById(id);
 const status = text => el('status').textContent = text;
-// Keep manually defined screens for reconnects to this target in this page.
-const manualLayouts = new Map();
-let connectedTarget = '';
-let availableScreens = [];
-let monitorsConnected = false;
+let screenInfoTimer;
 let selectedMonitor = -1;
-let cancelSelection = () => {};
-const layoutKey = () => JSON.stringify([connectedTarget, rfb.desktopLayout.width, rfb.desktopLayout.height]);
+let monitorsConnected = false;
 const renderMonitors = () => {
     el('monitors').replaceChildren('Screen ');
+    const screens = monitorsConnected ? rfb.desktopLayout.screens : [];
     const add = (label, index, title) => {
         const button = document.createElement('button');
         button.type = 'button';
@@ -63,8 +54,7 @@ const renderMonitors = () => {
         button.disabled = !monitorsConnected;
         button.setAttribute('aria-pressed', String(selectedMonitor === index));
         button.onclick = () => {
-            cancelSelection();
-            rfb.displayRegion = index < 0 ? null : availableScreens[index];
+            rfb.displayRegion = index < 0 ? null : screens[index];
             selectedMonitor = index;
             renderMonitors();
             rfb.focus({ preventScroll: true });
@@ -72,122 +62,25 @@ const renderMonitors = () => {
         el('monitors').append(button);
     };
     add('All', -1, 'Show all screens');
-    availableScreens.forEach((screen, index) => {
-        add(String(index + 1), index, `Screen ${index + 1}: ${screen.width} × ${screen.height}`);
+    screens.forEach((screen, index) => {
+        add(`Screen ${index + 1}`, index, `${screen.width} x ${screen.height}`);
     });
-    el('clear-regions').hidden = !monitorsConnected || !manualLayouts.has(layoutKey());
 };
 const resetMonitors = (connected = false) => {
-    cancelSelection();
+    clearTimeout(screenInfoTimer);
     selectedMonitor = -1;
     monitorsConnected = connected;
-    availableScreens = [];
-    if (connected) {
-        const reported = rfb.desktopLayout.screens;
-        const manual = manualLayouts.get(layoutKey()) || [];
-        availableScreens = reported.length > 1 ? [...reported, ...manual] :
-            manual.length ? [...manual] : reported;
-    }
     renderMonitors();
-    el('select-region').disabled = !connected;
-};
-el('clear-regions').onclick = () => {
-    manualLayouts.delete(layoutKey());
-    rfb.displayRegion = null;
-    resetMonitors(true);
-    rfb.focus({ preventScroll: true });
+    const waiting = connected && rfb.desktopLayout.screens.length === 0;
+    el('screen-info').textContent = waiting ? 'Detecting screens...' : '';
+    if (waiting) {
+        screenInfoTimer = setTimeout(() => {
+            el('screen-info').textContent = 'Server did not provide a screen list.';
+        }, 8000);
+    }
 };
 renderMonitors();
-el('select-region').onclick = () => {
-    cancelSelection();
-    const client = rfb;
-    client.displayRegion = null;
-    client.scaleViewport = true;
-    el('scale').checked = true;
-    selectedMonitor = -1;
-    renderMonitors();
-    const picker = document.createElement('div');
-    picker.id = 'region-picker';
-    const hint = document.createElement('div');
-    hint.id = 'region-hint';
-    hint.append('Drag around one screen. Esc to cancel. ');
-    const cancel = document.createElement('button');
-    cancel.type = 'button';
-    cancel.textContent = 'Cancel';
-    hint.append(cancel);
-    const box = document.createElement('div');
-    box.id = 'selection';
-    box.hidden = true;
-    picker.append(hint, box);
-    el('screen').append(picker);
-    let start = null;
-    let bounds = null;
-    const point = event => ({
-        x: Math.max(bounds.left, Math.min(bounds.right, event.clientX)),
-        y: Math.max(bounds.top, Math.min(bounds.bottom, event.clientY)),
-    });
-    const keydown = event => {
-        event.preventDefault();
-        event.stopImmediatePropagation();
-        if (event.key === 'Escape') cancelSelection();
-    };
-    document.addEventListener('keydown', keydown, true);
-    cancelSelection = () => {
-        picker.remove();
-        document.removeEventListener('keydown', keydown, true);
-        window.removeEventListener('resize', cancelSelection);
-        cancelSelection = () => {};
-        client.focus({ preventScroll: true });
-    };
-    window.addEventListener('resize', cancelSelection);
-    cancel.onclick = () => cancelSelection();
-    picker.onpointerdown = event => {
-        if (event.button !== 0 || hint.contains(event.target)) return;
-        const canvas = el('screen').querySelector('canvas');
-        if (!canvas) return;
-        bounds = canvas.getBoundingClientRect();
-        if (!bounds.width || !bounds.height) return;
-        start = point(event);
-        picker.setPointerCapture(event.pointerId);
-        box.hidden = false;
-        box.style.left = `${start.x}px`;
-        box.style.top = `${start.y}px`;
-        box.style.width = box.style.height = '0px';
-        event.preventDefault();
-    };
-    picker.onpointermove = event => {
-        if (!start) return;
-        const end = point(event);
-        box.style.left = `${Math.min(start.x, end.x)}px`;
-        box.style.top = `${Math.min(start.y, end.y)}px`;
-        box.style.width = `${Math.abs(end.x - start.x)}px`;
-        box.style.height = `${Math.abs(end.y - start.y)}px`;
-    };
-    picker.onpointerup = event => {
-        if (!start) return;
-        const end = point(event);
-        const layout = client.desktopLayout;
-        const x = Math.round((Math.min(start.x, end.x) - bounds.left) / bounds.width * layout.width);
-        const y = Math.round((Math.min(start.y, end.y) - bounds.top) / bounds.height * layout.height);
-        const width = Math.min(layout.width - x, Math.round(Math.abs(end.x - start.x) / bounds.width * layout.width));
-        const height = Math.min(layout.height - y, Math.round(Math.abs(end.y - start.y) / bounds.height * layout.height));
-        start = null;
-        picker.releasePointerCapture(event.pointerId);
-        if (width < 8 || height < 8) { box.hidden = true; return; }
-        const region = { x, y, width, height };
-        const manual = manualLayouts.get(layoutKey()) || [];
-        manual.push(region);
-        manualLayouts.set(layoutKey(), manual);
-        cancelSelection();
-        resetMonitors(true);
-        selectedMonitor = availableScreens.length - 1;
-        client.displayRegion = region;
-        renderMonitors();
-    };
-    picker.onpointercancel = () => { start = null; box.hidden = true; };
-};
 el('toggle-controls').onclick = () => {
-    cancelSelection();
     const hidden = !el('controls').hidden;
     el('controls').hidden = hidden;
     el('toggle-controls').textContent = hidden ? 'Show controls' : 'Hide controls';
@@ -202,7 +95,6 @@ el('form').onsubmit = event => {
     clearCredentials();
     rfb?.disconnect();
     el('screen').replaceChildren();
-    connectedTarget = JSON.stringify([el('host').value.trim(), Number(el('port').value)]);
     const url = new URL('./ws', location.href);
     url.protocol = 'ws:';
     url.search = new URLSearchParams({host: el('host').value, port: el('port').value});
@@ -258,7 +150,7 @@ el('form').onsubmit = event => {
 el('cancel').onclick = () => { clearCredentials(); rfb?.disconnect(); };
 el('credentials').oncancel = () => { clearCredentials(); rfb?.disconnect(); };
 el('disconnect').onclick = () => rfb?.disconnect();
-el('scale').onchange = () => { cancelSelection(); if (rfb) rfb.scaleViewport = el('scale').checked; };
+el('scale').onchange = () => { if (rfb) rfb.scaleViewport = el('scale').checked; };
 el('readonly').onchange = () => { if (rfb) rfb.viewOnly = el('readonly').checked; };
 el('cad').onclick = () => rfb?.sendCtrlAltDel();
 el('paste').onclick = () => {
