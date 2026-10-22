@@ -135,6 +135,8 @@ VNC 标签与浏览器共用右侧标签栏和已认证 SSH transport；每个 V
 
 VNC 页面右上角的 **Hide controls / Show controls** 可隐藏或显示 Host、Port、连接操作、工具按钮和状态信息。默认显示；收起后只保留右上角的恢复按钮，远端桌面使用腾出的空间。切换不会断开连接或重置输入与选项；**Fit** 开启时桌面随可用区域自动缩放。
 
+**Screen** 默认选择 **All screens**；服务器通过 ExtendedDesktopSize 提供屏幕布局时，可选择 **Screen 1 / Screen 2 / …** 单独查看某块屏幕。未提供布局或需要自定义范围时，点击 **Select area…**，在完整桌面预览中拖框选中一块屏幕（支持不同尺寸和排列），按 **Esc** 或 **Cancel** 取消。框选时自动开启 **Fit**，选中后显示 **Selected area**；切回 **All screens** 恢复完整桌面。选择仅裁剪本地显示，鼠标坐标随所选区域映射，不改变远端显示器配置、不重新连接，也不减少服务端发送的桌面数据。窗口大小及控制区显隐变化会重新缩放当前区域；远端桌面分辨率或布局更新、重新连接后恢复 **All screens**。
+
 远端未提供光标图像或发送透明光标时，显示本地小圆点作为鼠标定位提示；收到可见光标图像后使用远端形状。支持键鼠操作、**Fit** 缩放、**View only** 只读模式、**Ctrl+Alt+Del**、手动断开和重连。**Send clipboard text** 弹出文本框，将输入的文本发送到远端剪贴板；远端剪贴板更新时弹出可复制的文本框。剪贴板为文本传输，不自动读取或改写系统剪贴板。VNC 凭据在需要时通过认证框输入，密码字段隐藏内容，不保存到 YiTerm 配置或日志。具体认证和剪贴板能力取决于服务器与 noVNC 的兼容情况；不提供音频或文件传输。
 
 内置 [noVNC v1.7.0](https://github.com/novnc/noVNC/tree/v1.7.0) 原始资源位于 `assets/novnc/`，构建时嵌入程序，无需 CDN、Node.js 或远端 websockify。许可证与来源见 [LICENSE.txt](assets/novnc/LICENSE.txt) 和 [UPSTREAM.txt](assets/novnc/UPSTREAM.txt)。本机 Rust 桥接仅监听 `127.0.0.1` 随机端口，以随机会话令牌和 WebSocket Origin 检查限制访问；VNC WebView 禁用代理并限制在内置页面导航，页面的 CSP 限制资源和网络请求。桥接通过现有 SOCKS5 将目标域名交给 SSH 服务器解析，不回退本机直连。SSH 保护到 SSH 服务器的链路，SSH 服务器到另一台 VNC 主机之间的加密取决于 VNC 服务配置。

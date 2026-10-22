@@ -1,5 +1,7 @@
 noVNC v1.7.0
 Source: https://github.com/novnc/noVNC/tree/v1.7.0
-core/ and vendor/ are unmodified upstream sources.
+vendor/ and core/ are upstream sources except for YiTerm's monitor selection
+changes in core/rfb.js and core/display.js (desktoplayout event, desktopLayout,
+displayRegion and viewportChangeRegion).
 index.html is YiTerm's integration page.
 License notices: LICENSE.txt, AUTHORS, docs/LICENSE*, vendor/pako/LICENSE.

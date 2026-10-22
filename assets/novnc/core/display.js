@@ -172,6 +172,12 @@ export default class Display {
         }
     }
 
+    // YiTerm: crop both rendering and pointer coordinates to a monitor/region.
+    viewportChangeRegion({ x, y, width, height }) {
+        this.viewportChangeSize(width, height);
+        this.viewportChangePos(x - this._viewportLoc.x, y - this._viewportLoc.y);
+    }
+
     absX(x) {
         if (this._scale === 0) {
             return 0;

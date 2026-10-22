@@ -136,6 +136,9 @@ export default class RFB extends EventTargetMixin {
 
         this._fbWidth = 0;
         this._fbHeight = 0;
+        // YiTerm: local monitor selection; never changes the remote desktop.
+        this._displayRegion = null;
+        this._screens = [];
 
         this._fbName = "";
 
@@ -372,6 +375,25 @@ export default class RFB extends EventTargetMixin {
 
     get background() { return this._screen.style.background; }
     set background(cssValue) { this._screen.style.background = cssValue; }
+
+    get desktopLayout() {
+        return { width: this._fbWidth, height: this._fbHeight,
+                 screens: this._screens.map(screen => ({ ...screen })) };
+    }
+
+    set displayRegion(region) {
+        if (region !== null) {
+            const { x, y, width, height } = region;
+            if (![x, y, width, height].every(Number.isInteger) ||
+                x < 0 || y < 0 || width < 1 || height < 1 ||
+                x + width > this._fbWidth || y + height > this._fbHeight) {
+                throw new RangeError('Display region is outside the desktop');
+            }
+        }
+        this._displayRegion = region === null ? null : { ...region };
+        this._updateClip();
+        this._updateScale();
+    }
 
     get qualityLevel() {
         return this._qualityLevel;
@@ -742,6 +764,14 @@ export default class RFB extends EventTargetMixin {
     // Update state of clipping in Display object, and make sure the
     // configured viewport matches the current screen size
     _updateClip() {
+        if (this._displayRegion) {
+            const region = this._displayRegion;
+            this._display.clipViewport = true;
+            this._display.viewportChangeRegion(region);
+            // Treat the selected region as the complete visible desktop.
+            this._setClippingViewport(false);
+            return;
+        }
         const curClip = this._display.clipViewport;
         let newClip = this._clipViewport;
 
@@ -2906,17 +2936,19 @@ export default class RFB extends EventTargetMixin {
         this._sock.rQskipBytes(1);  // number-of-screens
         this._sock.rQskipBytes(3);  // padding
 
+        const screens = [];
         for (let i = 0; i < numberOfScreens; i += 1) {
+            const screen = {
+                id: this._sock.rQshift32(),
+                x: this._sock.rQshift16(), y: this._sock.rQshift16(),
+                width: this._sock.rQshift16(), height: this._sock.rQshift16(),
+                flags: this._sock.rQshift32(),
+            };
+            screens.push(screen);
             // Save the id and flags of the first screen
             if (i === 0) {
-                this._screenID = this._sock.rQshift32();    // id
-                this._sock.rQskipBytes(2);                  // x-position
-                this._sock.rQskipBytes(2);                  // y-position
-                this._sock.rQskipBytes(2);                  // width
-                this._sock.rQskipBytes(2);                  // height
-                this._screenFlags = this._sock.rQshift32(); // flags
-            } else {
-                this._sock.rQskipBytes(16);
+                this._screenID = screen.id;
+                this._screenFlags = screen.flags;
             }
         }
 
@@ -2953,7 +2985,7 @@ export default class RFB extends EventTargetMixin {
             Log.Warn("Server did not accept the resize request: "
                      + msg);
         } else {
-            this._resize(this._FBU.width, this._FBU.height);
+            this._resize(this._FBU.width, this._FBU.height, screens);
         }
 
         // Normally we only apply the current resize mode after a
@@ -3000,9 +3032,12 @@ export default class RFB extends EventTargetMixin {
     }
 
     // Handle resize-messages from the server
-    _resize(width, height) {
+    _resize(width, height, screens = []) {
         this._fbWidth = width;
         this._fbHeight = height;
+        this._displayRegion = null;
+        this._screens = screens.filter(screen => screen.width > 0 && screen.height > 0 &&
+            screen.x + screen.width <= width && screen.y + screen.height <= height);
 
         this._display.resize(this._fbWidth, this._fbHeight);
 
@@ -3014,6 +3049,7 @@ export default class RFB extends EventTargetMixin {
 
         // Keep this size until browser client size changes
         this._saveExpectedClientSize();
+        this.dispatchEvent(new CustomEvent('desktoplayout', { detail: this.desktopLayout }));
     }
 
     _xvpOp(ver, op) {
