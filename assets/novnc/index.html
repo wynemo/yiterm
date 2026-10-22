@@ -9,6 +9,8 @@ body { margin: 0; height: 100vh; display: flex; flex-direction: column; overflow
 #toggle-controls { position: fixed; top: 6px; right: 6px; z-index: 1; }
 form, .tools { display: flex; gap: 8px; padding: 10px; flex-wrap: wrap; }
 input, button, select { padding: 5px; }
+#monitors { display: inline-flex; gap: 4px; align-items: center; }
+#monitors button[aria-pressed="true"] { background: #1769aa; color: white; border-color: #67b7ff; }
 #screen { position: relative; flex: 1 0 0; min-height: 0; overflow: hidden; }
 #region-picker { position: absolute; inset: 0; z-index: 2; cursor: crosshair; touch-action: none; }
 #region-picker[hidden], #selection[hidden] { display: none; }
@@ -28,8 +30,9 @@ dialog form { flex-direction: column; }
   <button id="disconnect">Disconnect</button>
   <label><input id="scale" type="checkbox" checked>Fit</label>
   <label><input id="readonly" type="checkbox">View only</label>
-  <label>Screen <select id="monitor" disabled><option value="all">All screens</option></select></label>
+  <span id="monitors" role="group" aria-label="Screen">Screen</span>
   <button id="select-region" type="button" disabled>Select area…</button>
+  <button id="clear-regions" type="button" hidden>Reset screens</button>
   <button id="cad">Ctrl+Alt+Del</button>
   <button id="paste">Send clipboard text</button>
 </div>
@@ -42,31 +45,67 @@ import RFB from './core/rfb.js';
 let rfb;
 const el = id => document.getElementById(id);
 const status = text => el('status').textContent = text;
-let customRegion = null;
+// Keep manually defined screens for reconnects to this target in this page.
+const manualLayouts = new Map();
+let connectedTarget = '';
+let availableScreens = [];
+let monitorsConnected = false;
+let selectedMonitor = -1;
 let cancelSelection = () => {};
+const layoutKey = () => JSON.stringify([connectedTarget, rfb.desktopLayout.width, rfb.desktopLayout.height]);
+const renderMonitors = () => {
+    el('monitors').replaceChildren('Screen ');
+    const add = (label, index, title) => {
+        const button = document.createElement('button');
+        button.type = 'button';
+        button.textContent = label;
+        button.title = title;
+        button.disabled = !monitorsConnected;
+        button.setAttribute('aria-pressed', String(selectedMonitor === index));
+        button.onclick = () => {
+            cancelSelection();
+            rfb.displayRegion = index < 0 ? null : availableScreens[index];
+            selectedMonitor = index;
+            renderMonitors();
+            rfb.focus({ preventScroll: true });
+        };
+        el('monitors').append(button);
+    };
+    add('All', -1, 'Show all screens');
+    availableScreens.forEach((screen, index) => {
+        add(String(index + 1), index, `Screen ${index + 1}: ${screen.width} × ${screen.height}`);
+    });
+    el('clear-regions').hidden = !monitorsConnected || !manualLayouts.has(layoutKey());
+};
 const resetMonitors = (connected = false) => {
     cancelSelection();
-    customRegion = null;
-    el('monitor').replaceChildren(new Option('All screens', 'all'));
-    (connected ? rfb.desktopLayout.screens : []).forEach((screen, index) => {
-        el('monitor').add(new Option(`Screen ${index + 1} (${screen.width} × ${screen.height})`, String(index)));
-    });
-    el('monitor').disabled = !connected;
+    selectedMonitor = -1;
+    monitorsConnected = connected;
+    availableScreens = [];
+    if (connected) {
+        const reported = rfb.desktopLayout.screens;
+        const manual = manualLayouts.get(layoutKey()) || [];
+        availableScreens = reported.length > 1 ? [...reported, ...manual] :
+            manual.length ? [...manual] : reported;
+    }
+    renderMonitors();
     el('select-region').disabled = !connected;
 };
-el('monitor').onchange = () => {
-    const value = el('monitor').value;
-    rfb.displayRegion = value === 'all' ? null :
-        value === 'custom' ? customRegion : rfb.desktopLayout.screens[Number(value)];
+el('clear-regions').onclick = () => {
+    manualLayouts.delete(layoutKey());
+    rfb.displayRegion = null;
+    resetMonitors(true);
     rfb.focus({ preventScroll: true });
 };
+renderMonitors();
 el('select-region').onclick = () => {
     cancelSelection();
     const client = rfb;
     client.displayRegion = null;
     client.scaleViewport = true;
     el('scale').checked = true;
-    el('monitor').value = 'all';
+    selectedMonitor = -1;
+    renderMonitors();
     const picker = document.createElement('div');
     picker.id = 'region-picker';
     const hint = document.createElement('div');
@@ -135,13 +174,15 @@ el('select-region').onclick = () => {
         start = null;
         picker.releasePointerCapture(event.pointerId);
         if (width < 8 || height < 8) { box.hidden = true; return; }
-        customRegion = { x, y, width, height };
-        if (!el('monitor').querySelector('option[value="custom"]')) {
-            el('monitor').add(new Option('Selected area', 'custom'));
-        }
-        el('monitor').value = 'custom';
-        client.displayRegion = customRegion;
+        const region = { x, y, width, height };
+        const manual = manualLayouts.get(layoutKey()) || [];
+        manual.push(region);
+        manualLayouts.set(layoutKey(), manual);
         cancelSelection();
+        resetMonitors(true);
+        selectedMonitor = availableScreens.length - 1;
+        client.displayRegion = region;
+        renderMonitors();
     };
     picker.onpointercancel = () => { start = null; box.hidden = true; };
 };
@@ -161,6 +202,7 @@ el('form').onsubmit = event => {
     clearCredentials();
     rfb?.disconnect();
     el('screen').replaceChildren();
+    connectedTarget = JSON.stringify([el('host').value.trim(), Number(el('port').value)]);
     const url = new URL('./ws', location.href);
     url.protocol = 'ws:';
     url.search = new URLSearchParams({host: el('host').value, port: el('port').value});
