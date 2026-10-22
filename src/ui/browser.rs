@@ -760,16 +760,6 @@ impl Render for BrowserPage {
                         ),
                 )
             })
-            .when(self._vnc.is_some(), |element| {
-                element.child(
-                    div()
-                        .h(px(TOOLBAR_HEIGHT))
-                        .flex()
-                        .items_center()
-                        .px(px(8.))
-                        .child("SSH VNC"),
-                )
-            })
             .child(
                 div()
                     .flex()
