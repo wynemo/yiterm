@@ -947,10 +947,6 @@ fn main() -> Result<()> {
     if let Some(result) = yiterm::update::run_helper_if_requested() {
         return result;
     }
-    #[cfg(unix)]
-    if ssh::is_wrapper() {
-        return ssh::run_wrapper();
-    }
     let args = Args::parse();
     let logging = logging::init(args.config.as_deref(), args.log_filter.as_deref())?;
     let result = run(args, &logging);

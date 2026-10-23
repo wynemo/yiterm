@@ -96,6 +96,12 @@ Windows、macOS 和 Linux CI 只执行 Release 构建、打包校验和产物上
 
 Windows / macOS CI 保留 Cargo registry、Git 依赖及完整 Release 编译产物，避免缓存清理移除 `vendor/gpui`、`vendor/alacritty_terminal` 等本地依赖后每次重新编译。缓存键包含 runner、目标架构、Cargo 清单与锁文件、全部 vendor 内容、Cargo 配置及工作流（含固定工具链和构建参数），只接受精确匹配。CI 在构建前固定 vendor 文件时间戳，避免 checkout 时间变化使未修改的依赖失效；vendor 内容变化时使用新缓存重新构建。精确命中成功构建保存的缓存后，Cargo 使用离线模式，省去 crates.io 索引更新；未命中时正常联网获取依赖。首次构建或依赖、工作流变化后的构建需要重新填充缓存；实际提速以之后 Windows CI 的构建耗时为准。
 
+### Linux / macOS SSH 与 shell 环境
+
+Linux 和 macOS 均使用系统 OpenSSH，不创建临时 `bin/ssh`、不往 PATH 中插入 YiTerm 目录，也不设置 `YITERM_REAL_SSH`、`YITERM_SSH_DIRECTORY`。本地 shell 由系统按正常流程加载自己的配置；不使用 YiTerm rc 文件或 ZDOTDIR 覆盖，不额外 source 用户配置，不添加 SSH 函数或别名，也不修改用户配置文件。新版本从旧 YiTerm shell 中启动时，会移除已确认属于旧版本的 SSH PATH 接管及其内部环境变量。
+
+`yiterm --ssh host` 直接启动系统 `ssh`，通过命令参数启用 ControlMaster 连接复用。控制 socket 位于当前用户独占的 `~/.yiterm/ssh/`（目录权限 `0700`），仅在主动建立连接时按需创建；每条连接使用独立 socket，避免不同代理、身份或主机密钥配置误用同一个连接。`ControlPersist=no` 让连接随终端 SSH 会话退出；目录不可用时不注入复用参数，按系统 SSH 配置运行。普通 shell 中输入的 `ssh host` 完全按用户配置运行，YiTerm 通过前台进程识别目标，使用系统 scp 上传图片；已有 ControlPath 或密钥 / agent 认证可以免交互上传。普通 SSH 没有连接复用且必须交互输入密码时，后台图片上传无法完成，不会退回粘贴本机路径。已有会话环境不变，更新后需重新启动 YiTerm 并新建 tab / pane。
+
 ### Windows SSH 与图片上传
 
 Windows 发布包携带独立的控制台程序 `bin/ssh.exe`，所有标签页和分栏共用该文件，各连接运行独立进程。YiTerm 将随包 `bin` 加入其子 shell 的 PATH 最前面，输入 `ssh host` 即调用内置客户端；`--ssh` 直接启动该程序。不修改系统 PATH，不使用 shell 函数、别名或转发脚本。会话临时目录只保存会话数据和必要的 shell 初始化脚本，不复制 exe，也不修改 PE 头；不要单独移动主程序或删除 `bin/ssh.exe`。从源码运行 Windows 版本前执行 `cargo build --locked --release --bins`，Cargo 输出目录中的 `ssh.exe` 可供同目录的主程序使用。
@@ -104,7 +110,7 @@ Windows 下，独立 `ssh.exe` 使用内置 Rust SSH 客户端（`russh`）。�
 
 仍需安装系统 OpenSSH：内置客户端通过 `ssh -G` 解析 SSH config 中的别名、HostName、User、Port、IdentityFile、ProxyJump 和 known_hosts 路径。`ProxyJump` 的跳板链路由系统 OpenSSH 建立，目标主机仍由内置客户端认证并复用连接上传图片；跳板机认证按系统 OpenSSH 的配置和提示处理。支持 OpenSSH 格式私钥文件和 Windows OpenSSH agent；`IdentitiesOnly=yes` 时仅尝试密钥文件。首次连接显示 SHA-256 主机指纹，确认后写入 known_hosts；主机密钥变化或被撤销时拒绝连接。`StrictHostKeyChecking` 支持 `ask`、`yes` 和 `accept-new`。握手/指纹确认和认证阶段各有 120 秒期限。`ssh -G` 可能去掉 known_hosts 路径列表的引号；多个绝对路径可以包含空格，无法判断分隔的相对路径列表会报错，应改用绝对路径或系统客户端。
 
-内置客户端暂不支持 ProxyCommand、端口/agent/X11 转发、SSH 证书和远程命令。遇到这些配置会提示使用 `ssh --system <原有参数>`，显式调用系统 OpenSSH；`ssh -V`、`ssh -G` 和 `ssh -Q` 也直接调用系统客户端。系统客户端会话仍通过独立 scp 上传图片，因此密码认证的会话不能保证免交互上传。macOS 继续使用系统 OpenSSH 的 ControlMaster 连接复用。
+内置客户端暂不支持 ProxyCommand、端口/agent/X11 转发、SSH 证书和远程命令。遇到这些配置会提示使用 `ssh --system <原有参数>`，显式调用系统 OpenSSH；`ssh -V`、`ssh -G` 和 `ssh -Q` 也直接调用系统客户端。系统客户端会话仍通过独立 scp 上传图片，因此密码认证的会话不能保证免交互上传。Linux / macOS 继续使用系统 OpenSSH 的 ControlMaster 连接复用。
 
 内置上传单张限制为 50 MiB，远端文件名为 `/tmp/yiterm-drop-<UUID>.png`，创建权限为 `0600`。GUI 通过仅当前 Windows 用户可访问的命名管道请求当前分栏的 wrapper 上传，不传递密码；上传完成且目标进程仍有效才粘贴远端路径。失败或取消时尽力清理未完成文件；服务器断开时可能无法清理。
 

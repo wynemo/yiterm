@@ -1,11 +1,11 @@
-//! Ordinary SSH sessions are launched through a private PATH shim. On Unix the
-//! shim execs OpenSSH, so job control, signals and exit status remain native.
-use anyhow::{Context, Result, bail, ensure};
-use std::{
-    ffi::OsString,
-    path::{Path, PathBuf},
-    process::Command,
-};
+//! Windows uses its bundled SSH client. Unix starts the user's shell and
+//! system OpenSSH directly; it never installs an ssh executable into PATH.
+#[cfg(windows)]
+use anyhow::bail;
+use anyhow::{Context, Result, ensure};
+use std::path::{Path, PathBuf};
+#[cfg(windows)]
+use std::{ffi::OsString, process::Command};
 use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System, UpdateKind};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -16,48 +16,123 @@ pub struct Remote {
 }
 
 pub struct Integration {
+    #[cfg(windows)]
     directory: tempfile::TempDir,
+    #[cfg(windows)]
     bin: PathBuf,
     real_ssh: Option<PathBuf>,
     pub real_scp: PathBuf,
 }
+
+#[cfg(unix)]
+impl Integration {
+    pub fn new(_executable: &Path) -> Result<Self> {
+        Ok(Self {
+            real_ssh: find_program("ssh", None),
+            real_scp: find_program("scp", None).unwrap_or_else(|| PathBuf::from("scp")),
+        })
+    }
+
+    pub fn direct(&self, host: &str) -> Result<portable_pty::CommandBuilder> {
+        let ssh = self.real_ssh.as_ref().context("OpenSSH is not installed")?;
+        let mut command = portable_pty::CommandBuilder::new(ssh);
+        command.arg("-tt");
+        // Each explicitly managed connection gets its own socket, so different
+        // proxies, identities or host-key policies can never share a master.
+        match unix_control_path() {
+            Ok(path) => {
+                command.arg("-oControlMaster=auto");
+                command.arg("-oControlPersist=no");
+                command.arg(format!("-oControlPath={}", path.display()));
+            }
+            Err(error) => tracing::warn!(%error, "SSH connection reuse unavailable"),
+        }
+        command.args(["--", host]);
+        self.configure(&mut command)?;
+        Ok(command)
+    }
+
+    pub fn configure(&self, command: &mut portable_pty::CommandBuilder) -> Result<()> {
+        // Do not propagate the former PATH-shim protocol into new shells.
+        for key in [
+            "YITERM_REAL_SSH",
+            "YITERM_SSH_DIRECTORY",
+            "YITERM_ORIGINAL_ZDOTDIR",
+        ] {
+            command.env_remove(key);
+        }
+        // A new YiTerm may itself have been launched inside an old YiTerm
+        // shell. Remove only that verified legacy shim, not arbitrary paths.
+        if let Some(directory) = std::env::var_os("YITERM_SSH_DIRECTORY") {
+            let bin = PathBuf::from(directory).join("bin");
+            if legacy_unix_ssh_shim(&bin.join("ssh")) {
+                let paths = std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default())
+                    .filter(|path| path != &bin)
+                    .collect::<Vec<_>>();
+                command.env("PATH", std::env::join_paths(paths)?);
+            }
+        }
+        Ok(())
+    }
+
+    pub fn shell(&self, shell: &str) -> Result<portable_pty::CommandBuilder> {
+        // Let the selected shell load its normal startup files itself.
+        // No --rcfile, ZDOTDIR override, aliases, functions or PATH rewriting.
+        let mut command = portable_pty::CommandBuilder::new(shell);
+        self.configure(&mut command)?;
+        Ok(command)
+    }
+}
+
+#[cfg(unix)]
+fn unix_control_path() -> Result<PathBuf> {
+    use std::os::unix::fs::{DirBuilderExt, MetadataExt};
+    let home = directories::BaseDirs::new().context("Cannot locate home directory")?;
+    let root = home.home_dir().join(".yiterm");
+    let directory = root.join("ssh");
+    for path in [&root, &directory] {
+        match std::fs::DirBuilder::new().mode(0o700).create(path) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(error) => return Err(error.into()),
+        }
+        let metadata = std::fs::symlink_metadata(path)?;
+        ensure!(
+            metadata.is_dir()
+                && metadata.uid() == unsafe { libc::geteuid() }
+                && metadata.mode() & 0o077 == 0,
+            "SSH control directory must be private to this user"
+        );
+    }
+    let path = directory.join(format!("c-{}", uuid::Uuid::new_v4().simple()));
+    ensure!(
+        path.as_os_str().as_encoded_bytes().len() < 100,
+        "SSH control socket path is too long"
+    );
+    Ok(path)
+}
+
+#[cfg(unix)]
+fn legacy_unix_ssh_shim(path: &Path) -> bool {
+    path.file_name().is_some_and(|name| name == "ssh")
+        && std::env::current_exe()
+            .ok()
+            .is_some_and(|executable| same_file(path, &executable))
+}
+
+#[cfg(windows)]
 impl Integration {
     pub fn new(executable: &Path) -> Result<Self> {
-        // Keep Unix socket paths short, and all sockets/scripts user-private.
-        #[cfg(unix)]
-        let directory = tempfile::Builder::new()
-            .prefix("yiterm-")
-            .tempdir_in("/tmp")?;
-        #[cfg(not(unix))]
         let directory = tempfile::Builder::new().prefix("yiterm-").tempdir()?;
-        #[cfg(windows)]
         let bin = windows_helper(executable)?
             .parent()
             .context("SSH helper has no parent directory")?
             .to_path_buf();
-        #[cfg(not(windows))]
-        let bin = directory.path().join("bin");
         let real_ssh = std::env::var_os("YITERM_REAL_SSH")
             .and_then(|path| PathBuf::from(path).canonicalize().ok())
-            .filter(|path| {
-                !same_file(
-                    path,
-                    &bin.join(if cfg!(windows) { "ssh.exe" } else { "ssh" }),
-                ) && !(cfg!(windows) && bundled_windows_ssh(path))
-            })
+            .filter(|path| !same_file(path, &bin.join("ssh.exe")) && !bundled_windows_ssh(path))
             .or_else(|| find_program("ssh", Some(&bin)));
         let real_scp = find_program("scp", None).unwrap_or_else(|| PathBuf::from("scp"));
-        #[cfg(not(windows))]
-        {
-            std::fs::create_dir(&bin)?;
-            if real_ssh.is_some() {
-                let shim = bin.join("ssh");
-                #[cfg(unix)]
-                std::os::unix::fs::symlink(executable, shim)?;
-                #[cfg(not(unix))]
-                std::fs::copy(executable, &shim)?;
-            }
-        }
         Ok(Self {
             directory,
             bin,
@@ -67,7 +142,7 @@ impl Integration {
     }
     pub fn direct(&self, host: &str) -> Result<portable_pty::CommandBuilder> {
         ensure!(self.real_ssh.is_some(), "OpenSSH is not installed");
-        let executable = self.bin.join(if cfg!(windows) { "ssh.exe" } else { "ssh" });
+        let executable = self.bin.join("ssh.exe");
         let mut command = portable_pty::CommandBuilder::new(executable);
         command.args(["-tt", "--", host]);
         self.configure(&mut command)?;
@@ -81,7 +156,6 @@ impl Integration {
         ));
         command.env("PATH", std::env::join_paths(paths)?);
         command.env("YITERM_SSH_DIRECTORY", self.directory.path());
-        #[cfg(windows)]
         for (key, value) in crate::logging::child_environment() {
             command.env(key, value);
         }
@@ -91,16 +165,13 @@ impl Integration {
         Ok(())
     }
 
-    #[cfg(windows)]
     pub fn listen_for_osc52(&self) -> Result<crate::native_ssh::ClipboardRequests> {
         crate::native_ssh::ClipboardRequests::listen(crate::native_ssh::osc52_pipe_name(
             self.directory.path(),
         )?)
     }
     pub fn shell(&self, shell: &str) -> Result<portable_pty::CommandBuilder> {
-        #[cfg(windows)]
         let resolved = crate::settings::resolve_windows_shell(shell)?;
-        #[cfg(windows)]
         let shell = resolved
             .to_str()
             .context("Shell path is not valid Unicode")?;
@@ -129,11 +200,7 @@ impl Integration {
             }
             "bash" => {
                 let rc = self.directory.path().join("bashrc");
-                let bash_bin = if cfg!(windows) {
-                    format!("\"$(cygpath -u {quoted})\"")
-                } else {
-                    quoted.clone()
-                };
+                let bash_bin = format!("\"$(cygpath -u {quoted})\"");
                 std::fs::write(
                     &rc,
                     format!(
@@ -210,6 +277,7 @@ fn windows_helper(executable: &Path) -> Result<PathBuf> {
 /// Snapshot used by background workers without retaining the pane itself.
 #[derive(Clone)]
 pub struct DetectionContext {
+    #[cfg(windows)]
     directory: PathBuf,
     #[cfg(windows)]
     executable: PathBuf,
@@ -218,6 +286,7 @@ pub struct DetectionContext {
 impl Integration {
     pub fn detection_context(&self) -> DetectionContext {
         DetectionContext {
+            #[cfg(windows)]
             directory: self.directory.path().to_path_buf(),
             #[cfg(windows)]
             executable: self.bin.join("ssh.exe"),
@@ -225,16 +294,10 @@ impl Integration {
     }
 }
 
+#[cfg(windows)]
 impl DetectionContext {
     fn is_wrapper(&self, executable: Option<&Path>) -> bool {
-        #[cfg(windows)]
-        {
-            executable.is_some_and(|path| same_file(path, &self.executable))
-        }
-        #[cfg(not(windows))]
-        {
-            shim_directory(executable).is_some()
-        }
+        executable.is_some_and(|path| same_file(path, &self.executable))
     }
 }
 
@@ -284,50 +347,28 @@ fn find_program_in(
         .into_iter()
         .map(|dir| dir.join(name))
         .filter(|path| path.is_file())
+        .filter(|path| {
+            #[cfg(unix)]
+            {
+                !legacy_unix_ssh_shim(path)
+            }
+            #[cfg(not(unix))]
+            {
+                true
+            }
+        })
         .filter(|path| excluded_directory.is_none_or(|dir| !same_file(path, &dir.join(name))))
         .filter(|path| !(name.eq_ignore_ascii_case("ssh.exe") && bundled_windows_ssh(path)))
         .find_map(|path| path.canonicalize().ok())
 }
 
-/// Called before GUI startup when invoked as the session's `ssh` shim.
-#[cfg(unix)]
-pub fn is_wrapper() -> bool {
-    std::env::args_os()
-        .next()
-        .and_then(|p| PathBuf::from(p).file_stem().map(|s| s.to_os_string()))
-        .is_some_and(|name| name.to_string_lossy().eq_ignore_ascii_case("ssh"))
-        && std::env::var_os("YITERM_REAL_SSH").is_some()
-}
-
-fn with_multiplexing(args: Vec<OsString>, directory: &Path, unix: bool) -> Vec<OsString> {
-    if !unix {
-        return args;
-    }
-    let mut defaults = vec![
-        OsString::from("-oControlMaster=auto"),
-        OsString::from("-oControlPersist=no"),
-        OsString::from(format!("-oControlPath={}/c-%C", directory.display())),
-    ];
-    // Insert defaults before the destination, after all user flags. OpenSSH's
-    // first-value-wins rule keeps explicit user -o/-S options authoritative.
-    let strings: Vec<_> = args
-        .iter()
-        .map(|s| s.to_string_lossy().into_owned())
-        .collect();
-    let index = destination_index(&strings).unwrap_or(args.len());
-    let mut output = args[..index].to_vec();
-    output.append(&mut defaults);
-    output.extend_from_slice(&args[index..]);
-    output
-}
-
+#[cfg(windows)]
 pub fn run_wrapper() -> Result<()> {
     let real = std::env::var_os("YITERM_REAL_SSH").context("Missing real SSH executable")?;
     let directory = PathBuf::from(
         std::env::var_os("YITERM_SSH_DIRECTORY").context("Missing session directory")?,
     );
     let args: Vec<_> = std::env::args_os().skip(1).collect();
-    #[cfg(windows)]
     let args = {
         if !crate::native_ssh::config::system_requested(&args) {
             let code = crate::native_ssh::run(Path::new(&real), &directory, args)?;
@@ -339,51 +380,17 @@ pub fn run_wrapper() -> Result<()> {
         }
         args
     };
-    let args = with_multiplexing(args, &directory, cfg!(unix));
     let mut command = Command::new(real);
     command.args(args);
     // Wrapper variables must not propagate to remote sessions via SendEnv.
     command
         .env_remove("YITERM_REAL_SSH")
         .env_remove("YITERM_SSH_DIRECTORY");
-    #[cfg(unix)]
-    {
-        use std::os::unix::process::CommandExt;
-        Err(command.exec().into())
-    }
-    #[cfg(not(unix))]
-    {
-        let status = command.status()?;
-        std::process::exit(status.code().unwrap_or(1));
-    }
+    let status = command.status()?;
+    std::process::exit(status.code().unwrap_or(1));
 }
 
 const VALUE_FLAGS: &str = "BbcDEeFIiJLlmOopQRSWw";
-fn destination_index(args: &[String]) -> Result<usize> {
-    let mut index = 0;
-    while index < args.len() {
-        let arg = &args[index];
-        if arg == "--" {
-            return Ok(index);
-        }
-        if !arg.starts_with('-') || arg == "-" {
-            return Ok(index);
-        }
-        let chars: Vec<_> = arg[1..].chars().collect();
-        for (offset, flag) in chars.iter().enumerate() {
-            if VALUE_FLAGS.contains(*flag) {
-                if offset + 1 == chars.len() {
-                    index += 1;
-                    ensure!(index < args.len(), "SSH option -{flag} needs a value");
-                }
-                break;
-            }
-        }
-        index += 1;
-    }
-    bail!("SSH destination is missing")
-}
-
 pub fn parse(args: &[String]) -> Result<Remote> {
     let mut options = Vec::new();
     let mut index = 0;
@@ -552,6 +559,8 @@ fn detect_once(
     context: &DetectionContext,
 ) -> Result<Option<Detection>> {
     #[cfg(unix)]
+    let _ = context;
+    #[cfg(unix)]
     ensure!(
         group.is_some(),
         "Cannot identify the terminal foreground job; image was not pasted"
@@ -601,18 +610,19 @@ fn detect_once(
     );
     let mut real_candidates = Vec::new();
     for pid in candidates {
-        let Some(process) = system.process(pid) else {
-            continue;
-        };
-        // Explicit system-SSH invocations still have a waiting shim parent.
-        // Native shims own the connection themselves and must be selected.
-        if context.is_wrapper(process.exe())
-            && (!cfg!(windows)
-                || crate::native_ssh::config::system_requested(
-                    &process.cmd().iter().skip(1).cloned().collect::<Vec<_>>(),
-                ))
+        #[cfg(windows)]
         {
-            continue;
+            let Some(process) = system.process(pid) else {
+                continue;
+            };
+            // Explicit system SSH has a waiting Windows helper parent.
+            if context.is_wrapper(process.exe())
+                && crate::native_ssh::config::system_requested(
+                    &process.cmd().iter().skip(1).cloned().collect::<Vec<_>>(),
+                )
+            {
+                continue;
+            }
         }
         real_candidates.push(pid);
     }
@@ -644,13 +654,18 @@ fn detect_once(
         let remote = parse(&args)?;
         found.push(Detection {
             remote,
-            upload_pipe: if cfg!(windows) {
-                context
-                    .is_wrapper(process.exe())
-                    .then(|| crate::native_ssh::pipe_name(&context.directory, pid.as_u32()))
-                    .transpose()?
-            } else {
-                None
+            upload_pipe: {
+                #[cfg(windows)]
+                {
+                    context
+                        .is_wrapper(process.exe())
+                        .then(|| crate::native_ssh::pipe_name(&context.directory, pid.as_u32()))
+                        .transpose()?
+                }
+                #[cfg(not(windows))]
+                {
+                    None
+                }
             },
             identity: TargetIdentity {
                 pid: pid.as_u32(),
@@ -664,18 +679,6 @@ fn detect_once(
         "Multiple SSH sessions are active; cannot safely choose the image destination"
     );
     Ok(found.pop())
-}
-
-#[cfg(not(windows))]
-fn shim_directory(executable: Option<&Path>) -> Option<&Path> {
-    let bin = executable?.parent()?;
-    let directory = bin.parent()?;
-    (bin.file_name()? == "bin"
-        && directory
-            .file_name()?
-            .to_string_lossy()
-            .starts_with("yiterm-"))
-    .then_some(directory)
 }
 
 pub fn target_is_alive(target: TargetIdentity, group: Option<i32>) -> bool {
