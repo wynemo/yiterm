@@ -53,23 +53,7 @@ jobs:
         with:
           python-version: '3.13'
 
-      # The exact cache key includes every vendor file. Keep checkout mtimes
-      # stable so Cargo can reuse unchanged path dependencies after restore.
-      - name: Normalize vendored dependency timestamps
-        shell: python
-        run: |
-          import os
-          from pathlib import Path
-
-          timestamp = 946684800  # 2000-01-01 UTC
-          vendor = Path("vendor")
-          for path in vendor.rglob("*"):
-              os.utime(path, (timestamp, timestamp))
-          os.utime(vendor, (timestamp, timestamp))
-
-      # rust-cache removes crates inside the workspace root, including vendor/.
-      # Preserve them and use exact matches only: normalizing mtimes is safe
-      # only when the vendored source matches the cached compilation artifacts.
+      # Keep registry dependencies and local crate artifacts on fallback restores.
       - name: Cache Cargo dependencies and release artifacts
         id: release-cache
         uses: actions/cache@v4
@@ -79,7 +63,55 @@ jobs:
             ~/.cargo/git
             target/release
             target/${{ matrix.target }}/release
-          key: release-v1-${{ matrix.runner }}-${{ matrix.target }}-${{ hashFiles('Cargo.lock', '**/Cargo.toml', 'vendor/**', '.cargo/**', '.github/workflows/ci.yml') }}
+          key: release-v2-${{ matrix.runner }}-${{ matrix.target }}-rust-1.99.1-${{ hashFiles('Cargo.lock', '**/Cargo.toml', 'vendor/**', '.cargo/**', '.github/workflows/ci.yml') }}
+          restore-keys: |
+            release-v2-${{ matrix.runner }}-${{ matrix.target }}-rust-1.99.1-
+            release-v1-${{ matrix.runner }}-${{ matrix.target }}-
+
+      # Cargo uses source mtimes for local crates. Restore them only when the
+      # entire crate still matches the source used by the cached build.
+      - name: Restore unchanged vendored crate timestamps
+        shell: python
+        run: |
+          import hashlib
+          import json
+          import os
+          from pathlib import Path
+
+          manifest = Path("target/release/ci-vendor-mtimes.json")
+          previous = json.loads(manifest.read_text()) if manifest.exists() else {}
+          current = {}
+          restored = []
+          changed = []
+          for crate in sorted(Path("vendor").iterdir()):
+              if not crate.is_dir():
+                  continue
+              paths = sorted(crate.rglob("*"))
+              digest = hashlib.sha256()
+              for path in paths:
+                  digest.update(path.relative_to(crate).as_posix().encode())
+                  digest.update(b"\0")
+                  digest.update(b"file\0" if path.is_file() else b"dir\0")
+                  if path.is_file():
+                      digest.update(hashlib.sha256(path.read_bytes()).digest())
+              fingerprint = digest.hexdigest()
+              cached = previous.get(crate.name, {})
+              entries = [crate, *paths]
+              if cached.get("digest") == fingerprint:
+                  for path in entries:
+                      stat = path.stat()
+                      os.utime(path, ns=(stat.st_atime_ns, cached["mtimes"][path.as_posix()]))
+                  restored.append(crate.name)
+              else:
+                  changed.append(crate.name)
+              current[crate.name] = {
+                  "digest": fingerprint,
+                  "mtimes": {path.as_posix(): path.stat().st_mtime_ns for path in entries},
+              }
+          manifest.parent.mkdir(parents=True, exist_ok=True)
+          manifest.write_text(json.dumps(current))
+          print("Restored unchanged crates:", ", ".join(restored) or "none")
+          print("Crates with changed or uncached sources:", ", ".join(changed) or "none")
 
       - name: Build release
         env:

@@ -94,7 +94,9 @@ Linux 使用本地补丁 `vendor/eframe`：优先创建默认 OpenGL 3.3 core �
 
 Windows、macOS 和 Linux CI 只执行 Release 构建、打包校验和产物上传，不编译或运行测试。构建产物上传后即可下载；正式 GitHub Release 在所有平台构建成功且版本 tag 匹配后发布。
 
-Windows / macOS CI 保留 Cargo registry、Git 依赖及完整 Release 编译产物，避免缓存清理移除 `vendor/gpui`、`vendor/alacritty_terminal` 等本地依赖后每次重新编译。缓存键包含 runner、目标架构、Cargo 清单与锁文件、全部 vendor 内容、Cargo 配置及工作流（含固定工具链和构建参数），只接受精确匹配。CI 在构建前固定 vendor 文件时间戳，避免 checkout 时间变化使未修改的依赖失效；vendor 内容变化时使用新缓存重新构建。精确命中成功构建保存的缓存后，Cargo 使用离线模式，省去 crates.io 索引更新；未命中时正常联网获取依赖。首次构建或依赖、工作流变化后的构建需要重新填充缓存；实际提速以之后 Windows CI 的构建耗时为准。
+Windows / macOS CI 保留 Cargo registry、Git 依赖及完整 Release 编译产物。缓存键包含 runner、目标架构、固定 Rust 版本、Cargo 清单与锁文件、全部 vendor 内容、Cargo 配置及工作流；精确匹配失败时，先恢复同平台、架构和 Rust 版本的最近缓存，再由 Cargo 判断需要重编的部分。迁移期间也可回退到旧版同平台、架构缓存，避免重新编译所有第三方依赖。成功构建后保存新键的缓存。
+
+CI 在 Release 缓存内记录各 vendor crate 的内容摘要及文件、目录时间戳。只有整个 crate 内容与缓存一致时才恢复原时间戳；变化的 crate 保留本次 checkout 时间，由 Cargo 重编并更新相关依赖产物。这样既避免未修改的 vendor crate 因 checkout 时间变化而重编，也避免固定旧时间戳掩盖源码修改。首次迁移的旧缓存没有摘要记录，vendor crate 会保守重编一次，registry / Git 依赖仍可复用。精确命中成功构建的缓存后，Cargo 使用离线模式；回退或未命中时允许联网获取依赖。实际缓存命中及重编范围以 CI 日志为准。
 
 ### Linux / macOS SSH 与 shell 环境
 
