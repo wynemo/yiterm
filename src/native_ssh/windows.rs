@@ -636,6 +636,14 @@ impl Prompt for ConsolePrompt {
 }
 
 pub fn run(real_ssh: &Path, directory: &Path, args: Vec<OsString>) -> Result<i32> {
+    run_client(real_ssh, directory, args, false)
+}
+
+pub fn run_mosh(real_ssh: &Path, directory: &Path, args: Vec<OsString>) -> Result<i32> {
+    run_client(real_ssh, directory, args, true)
+}
+
+fn run_client(real_ssh: &Path, directory: &Path, args: Vec<OsString>, mosh: bool) -> Result<i32> {
     let _logging = match crate::logging::init(None, None) {
         Ok(logging) => {
             if let Some(warning) = &logging.warning {
@@ -648,16 +656,17 @@ pub fn run(real_ssh: &Path, directory: &Path, args: Vec<OsString>) -> Result<i32
             None
         }
     };
-    tracing::info!("Built-in SSH wrapper started");
-    let result = run_inner(real_ssh, directory, args);
+    tracing::info!(mosh, "Built-in remote-session wrapper started");
+    let result = run_inner(real_ssh, directory, args, mosh);
     if let Err(error) = &result {
-        tracing::error!(error = %format!("{error:#}"), "Built-in SSH session failed");
+        tracing::error!(error = %format!("{error:#}"), "Built-in remote session failed");
     }
     result
 }
 
-fn run_inner(real_ssh: &Path, directory: &Path, args: Vec<OsString>) -> Result<i32> {
+fn run_inner(real_ssh: &Path, directory: &Path, args: Vec<OsString>, mosh: bool) -> Result<i32> {
     let config = config::resolve(real_ssh, &args)?;
+    let udp_host = config.host.clone();
     let osc52_pipe = super::osc52_pipe_name(directory)?;
     let console = Console::enter()?;
     let runtime = tokio::runtime::Builder::new_multi_thread()
@@ -672,7 +681,9 @@ fn run_inner(real_ssh: &Path, directory: &Path, args: Vec<OsString>) -> Result<i
         });
         console.enable_terminal_input()?;
         let mut size = console.size()?;
-        let mut channel = super::shell(&handle, size.0, size.1).await?;
+        let endpoint = if mosh {
+            Some(crate::mosh::bootstrap(&handle, &udp_host).await?)
+        } else { None };
         let name = super::pipe_name(directory, std::process::id())?;
         let pipe = create_pipe_server(&name, true)?;
         let upload_pipe_name = name.clone();
@@ -765,6 +776,23 @@ fn run_inner(real_ssh: &Path, directory: &Path, args: Vec<OsString>) -> Result<i
         let mut mouse_diagnostics = tracing::enabled!(target: "yiterm::mouse", tracing::Level::DEBUG)
             .then(crate::mouse::MouseModes::default);
         let result = async {
+            if let Some(endpoint) = endpoint {
+                return crate::mosh::run(endpoint, &mut rx, || console.size(), |bytes| {
+                    let (terminal, requests) = osc52_filter.advance(bytes);
+                    // Use the same authenticated per-pane clipboard IPC as SSH.
+                    // Requests are dispatched independently of the UDP loop.
+                    for request in requests {
+                        let pipe = osc52_pipe.clone();
+                        tokio::spawn(async move {
+                            if let Err(error) = forward_osc52_request(&pipe, &request).await {
+                                tracing::warn!(%error, "Could not forward Mosh OSC 52 request");
+                            }
+                        });
+                    }
+                    output(&terminal)
+                }).await;
+            }
+            let mut channel = super::shell(&handle, size.0, size.1).await?;
             loop {
                 tokio::select! {
                     bytes = rx.recv(), if input_open => {

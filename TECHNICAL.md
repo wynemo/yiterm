@@ -19,7 +19,7 @@ gh auth login
 python scripts/download_latest.py
 ```
 
-首次运行前执行 `gh auth login`，脚本通过 `gh api` 复用登录状态，也支持 gh 的 `GH_TOKEN` / `GITHUB_TOKEN` 环境变量。脚本默认同时下载 Windows x64 和 Linux x64，分别选择默认分支最新有对应平台产物、未过期的 push 构建。校验 SHA-256 后，把 Windows 的 `yiterm.exe`、`bin/ssh.exe`、`conpty.dll`、`OpenConsole.exe` 和 Linux 的 `yiterm` 写入当前目录（覆盖同名文件），并为 Linux 程序设置可执行权限（`0755`）。所有请求的平台下载、校验完成后才开始替换现有文件。可用 `--branch main` 指定分支，或用 `--output 路径` 指定目录。
+首次运行前执行 `gh auth login`，脚本通过 `gh api` 复用登录状态，也支持 gh 的 `GH_TOKEN` / `GITHUB_TOKEN` 环境变量。脚本默认同时下载 Windows x64 和 Linux x64，分别选择默认分支最新有对应平台产物、未过期的 push 构建。校验 SHA-256 后，把 Windows 的 `yiterm.exe`、`bin/ssh.exe`、`bin/mosh.exe`、`conpty.dll`、`OpenConsole.exe` 和 Linux 的 `yiterm` 写入当前目录（覆盖同名文件），并为 Linux 程序设置可执行权限（`0755`）。所有请求的平台下载、校验完成后才开始替换现有文件。可用 `--branch main` 指定分支，或用 `--output 路径` 指定目录。
 
 安装 Rust stable；macOS 还需 Xcode Command Line Tools，Windows 需 MSVC C++ 构建工具。
 
@@ -114,6 +114,26 @@ Windows 下，独立 `ssh.exe` 使用内置 Rust SSH 客户端（`russh`）。�
 
 内置上传单张限制为 50 MiB，远端文件名为 `/tmp/yiterm-drop-<UUID>.png`，创建权限为 `0600`。GUI 通过仅当前 Windows 用户可访问的命名管道请求当前分栏的 wrapper 上传，不传递密码；上传完成且目标进程仍有效才粘贴远端路径。失败或取消时尽力清理未完成文件；服务器断开时可能无法清理。
 
+### Windows 原生 Mosh
+
+Windows 发布包同时包含 `bin/mosh.exe`，与 `bin/ssh.exe` 一起加入 YiTerm 子 shell 的 PATH。无需 WSL、Cygwin 或本机 Swift 运行时。解压时保留整个 `bin` 目录；源码运行使用 `cargo build --locked --release --bins`，自动更新和最新构建下载脚本也包含此程序。macOS / Linux 暂不提供内置 Mosh 入口。
+
+在 YiTerm 的本地终端中输入，或从命令行直接新建远端会话：
+
+```powershell
+mosh user@host
+mosh -p 2222 -i C:\Users\you\.ssh\id_ed25519 my-server
+yiterm --mosh my-server
+```
+
+目标可以是 SSH config 别名；认证、主机指纹确认、密钥、agent、keyboard-interactive 和 ProxyJump 复用内置 SSH 实现。这里的 `-p` 指 **SSH 端口**，其余参数也使用内置 SSH 的语法（`-l`、`-i`、`-F`、`-J`、`-o`）；不兼容系统 Mosh 的 `-p` UDP 端口语义、`--ssh`、远程命令等参数。`mosh --help` 查看入口说明。`--mosh` 与 `--ssh`、`--shell` 互斥。
+
+远端须安装支持协议 v2 的 `mosh-server`，并提供 UTF-8 locale。客户端通过已认证的 SSH exec 通道执行 `mosh-server new -s -c 256 -l LANG=C.UTF-8`，只在内存中读取端口和会话密钥，密钥不写入配置、环境变量、命令行或日志。随后终端输入、窗口大小和画面通过 AES-128-OCB 加密 UDP 同步。远端默认从 UDP `60000–61000` 选择端口，防火墙和 NAT 必须允许对应端口；UDP 目的地址来自 SSH config 的 HostName，并优先匹配服务器报告的 SSH 接口地址或地址族。SSH 能连通并不代表 UDP 可达，ProxyJump 只转发 SSH，目标仍须可从客户端直接访问 UDP。
+
+协议核心参考 `mymosh/packages/MoshCore/Sources/MoshCoreSwift` 的报文、protobuf、分片和状态同步实现，使用 RustCrypto OCB 与 zlib；每个服务端状态保留独立屏幕快照，分支切换时重绘。未确认输入从最近确认状态重新发送，断网后继续等待，持续没有往返确认时每 10 秒尝试更换本地 UDP 端口，并短暂保留旧端口接收。超过 5 秒没有完整服务端消息时在底行显示状态；恢复后自动重绘。第一版没有本地预测回显、跨进程会话恢复或自定义 UDP 端口参数。退出远端 shell，或按 **Ctrl+^**（通常为 Ctrl+Shift+6）后按 **.** 退出客户端；前缀后按 **^** 发送字面 Ctrl+^。
+
+Mosh 会话期间保留启动时的 SSH 连接，图片上传通过同一已认证连接的新 SFTP 通道完成，**Open SSH Browser / Open SSH VNC** 也可复用该连接。终端 UDP 会话独立运行；网络切换后即使 Mosh 恢复，原 SSH 连接也可能已经失效，此时上传和浏览器需要重新建立会话。关闭客户端会尝试发送 Mosh 退出握手；直接关闭 tab / pane 会终止客户端进程，不保存恢复信息，远端清理由 mosh-server 自身策略决定。
+
 ### Windows 内置浏览器与 SSH SOCKS5
 
 Windows 的 **Tools → Open SSH Browser** 会从当前聚焦 pane 检测前台 SSH 进程，并通过该 YiTerm 内置 SSH wrapper 已认证的连接启动 WebView2。浏览器显示在当前 tab 内容的右侧，终端中的 HTTP/HTTPS 链接按住 **Ctrl** 点击默认也会在这里打开。浏览器工具栏可前进、后退、刷新和输入网址；没有协议的地址按 HTTPS 处理。点击 **Open in System Browser** 可在系统默认浏览器打开当前页面（仅 HTTP/HTTPS，空白页不可用）；系统浏览器使用自身的网络与登录状态，不会继承内置浏览器的 SSH SOCKS 连接或 Cookie。拖动终端与浏览器之间的竖向分隔条可左右调整宽度。浏览器顶部 **+** 新建空白标签页，点击标签切换，标签旁的 **×** 关闭该页；**Close** 关闭整个浏览器并恢复终端宽度，关闭最后一个浏览器标签页也会关闭浏览器。各浏览器标签页保留各自的页面、地址和导航历史，共享同一 SSH SOCKS 连接和临时浏览器配置目录（包括 Cookie / 登录状态）。同一 SSH 会话中再次通过菜单或 Ctrl 点击终端链接，会增加浏览器标签页；网页请求打开新窗口的 HTTP/HTTPS 链接也会转为标签页。切换到其他终端 tab 时，浏览器随所属 tab 隐藏；切回后继续显示。
@@ -203,7 +223,7 @@ SSH 远端程序可通过 OSC 52 的 `c` 目标把文本复制到主机剪贴板
 
 在 **About → Check for Updates** 手动检查正式版，发现新版本后可打开 **Release Notes** 查看发布说明，点击 **Download Update** 下载当前平台的完整发布包。检查、下载和校验在后台执行，不阻塞终端；网络错误或 GitHub API 限流会显示错误，可稍后重新检查。当前版本不做启动时自动检查。
 
-下载完成后点击 **Update and Restart** 安装。此操作会关闭所有标签页和分栏、断开本地 shell 与 SSH 会话；不会恢复原会话，请先保存工作。准备完成后由独立更新进程等待主程序退出，再替换文件并以原命令行参数和工作目录重启。Windows 同时更新 `yiterm.exe`、`bin/ssh.exe`、`conpty.dll`、`OpenConsole.exe` 及随包文档和许可证。配置文件与日志不在更新包内，保持原位。
+下载完成后点击 **Update and Restart** 安装。此操作会关闭所有标签页和分栏、断开本地 shell 与 SSH 会话；不会恢复原会话，请先保存工作。准备完成后由独立更新进程等待主程序退出，再替换文件并以原命令行参数和工作目录重启。Windows 同时更新 `yiterm.exe`、`bin/ssh.exe`、`bin/mosh.exe`、`conpty.dll`、`OpenConsole.exe` 及随包文档和许可证。配置文件与日志不在更新包内，保持原位。
 
 更新使用 Rust `self_update` 的 GitHub 后端、下载解压和 `MoveAll` 多文件替换，以及 `self-replace` 的更新进程清理能力；无需独立更新服务器或 GitHub Token。按 `Cargo.toml` 版本比较，只接受更高的稳定版本，并精确匹配现有 `yiterm-<版本>-<平台>` 发布包及其 `.sha256` 文件。下载后先校验 SHA-256，成功后才准备安装。该校验检查下载完整性，不是独立的发布签名验证。
 

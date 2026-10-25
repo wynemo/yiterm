@@ -18,7 +18,7 @@ Download and extract the package for your platform from [Releases](https://githu
 
 - Multiple tabs with independent sessions.
 - Horizontal and vertical split panes with draggable dividers.
-- Local shells and SSH sessions.
+- Local shells, SSH sessions, and a built-in Mosh client on Windows.
 - A directory-following file browser and Git sidebar with diffs, staging and commits.
 - Windows embedded WebView2 browser routed through the focused YiTerm SSH session.
 - Drag to select and copy text.

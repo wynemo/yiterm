@@ -52,6 +52,10 @@ impl Integration {
         Ok(command)
     }
 
+    pub fn direct_mosh(&self, _host: &str) -> Result<portable_pty::CommandBuilder> {
+        anyhow::bail!("Built-in Mosh is currently available on Windows")
+    }
+
     pub fn configure(&self, command: &mut portable_pty::CommandBuilder) -> Result<()> {
         // Do not propagate the former PATH-shim protocol into new shells.
         for key in [
@@ -156,6 +160,19 @@ impl Integration {
         self.configure(&mut command)?;
         Ok(command)
     }
+    pub fn direct_mosh(&self, host: &str) -> Result<portable_pty::CommandBuilder> {
+        ensure!(self.real_ssh.is_some(), "OpenSSH is not installed");
+        let executable = self.bin.join("mosh.exe");
+        ensure!(
+            executable.is_file(),
+            "Missing Mosh helper: extract the complete Windows release or run cargo build --locked --release --bins"
+        );
+        let mut command = portable_pty::CommandBuilder::new(executable);
+        command.args(["--", host]);
+        self.configure(&mut command)?;
+        Ok(command)
+    }
+
     pub fn configure(&self, command: &mut portable_pty::CommandBuilder) -> Result<()> {
         let bin = self.bin.clone();
         let mut paths = vec![bin];
@@ -315,7 +332,10 @@ impl Integration {
 #[cfg(windows)]
 impl DetectionContext {
     fn is_wrapper(&self, executable: Option<&Path>) -> bool {
-        executable.is_some_and(|path| same_file(path, &self.executable))
+        executable.is_some_and(|path| {
+            same_file(path, &self.executable)
+                || same_file(path, &self.executable.with_file_name("mosh.exe"))
+        })
     }
 }
 
@@ -598,7 +618,10 @@ fn detect_once(
         .iter()
         .filter_map(|(&pid, process)| {
             let name = process.name().to_string_lossy();
-            if !(name == "ssh" || name.eq_ignore_ascii_case("ssh.exe")) {
+            if !(name == "ssh"
+                || name.eq_ignore_ascii_case("ssh.exe")
+                || (cfg!(windows) && name.eq_ignore_ascii_case("mosh.exe")))
+            {
                 return None;
             }
             #[cfg(unix)]
@@ -713,4 +736,27 @@ pub fn target_is_alive(target: TargetIdentity, group: Option<i32>) -> bool {
     system
         .process(pid)
         .is_some_and(|process| process.start_time() == target.start_time)
+}
+
+/// Console entry point for the bundled native Mosh client.
+#[cfg(windows)]
+pub fn run_mosh_wrapper() -> Result<()> {
+    let args: Vec<_> = std::env::args_os().skip(1).collect();
+    if args.iter().any(|arg| arg == "--help" || arg == "-h") {
+        println!(
+            "YiTerm Mosh\nUsage: mosh [SSH options] [--] [user@]host\nOptions: -p SSH_PORT, -l USER, -i KEY, -F CONFIG, -J JUMP, -o OPTION\nRequires remote mosh-server and direct UDP access (default ports 60000-61000).\nQuit: Ctrl-^ followed by ."
+        );
+        return Ok(());
+    }
+    if args.iter().any(|arg| arg == "--version" || arg == "-V") {
+        println!("YiTerm Mosh {}", env!("CARGO_PKG_VERSION"));
+        return Ok(());
+    }
+    let real = std::env::var_os("YITERM_REAL_SSH")
+        .context("Start Mosh inside YiTerm so the OpenSSH path is available")?;
+    let directory = PathBuf::from(
+        std::env::var_os("YITERM_SSH_DIRECTORY").context("Missing YiTerm session directory")?,
+    );
+    let code = crate::native_ssh::run_mosh(Path::new(&real), &directory, args)?;
+    std::process::exit(code);
 }

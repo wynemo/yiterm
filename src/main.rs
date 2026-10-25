@@ -57,8 +57,11 @@ fn wake_ui() {}
 #[command(version, about = "A small native terminal with clipboard image paste")]
 struct Args {
     /// Connect directly to this OpenSSH host (remote shell must be POSIX).
-    #[arg(long)]
+    #[arg(long, conflicts_with = "mosh")]
     ssh: Option<String>,
+    /// Connect using the bundled native Mosh client (Windows only).
+    #[arg(long, conflicts_with_all = ["ssh", "shell"])]
+    mosh: Option<String>,
     /// Configuration TOML file.
     #[arg(long)]
     config: Option<std::path::PathBuf>,
@@ -143,13 +146,13 @@ impl TerminalSession {
         );
         tracing::info!(
             session_id = %log_id,
-            session_kind = if args.ssh.is_some() { "ssh" } else { "local" },
+            session_kind = if args.mosh.is_some() { "mosh" } else if args.ssh.is_some() { "ssh" } else { "local" },
             "Starting terminal session"
         );
         let integration = ssh::Integration::new(&std::env::current_exe()?)?;
         #[cfg(windows)]
         let clipboard_requests = integration.listen_for_osc52()?;
-        if let Some(host) = &args.ssh {
+        if let Some(host) = args.ssh.as_ref().or(args.mosh.as_ref()) {
             ssh::parse(std::slice::from_ref(host))?;
         }
         #[cfg(windows)]
@@ -163,6 +166,8 @@ impl TerminalSession {
         let mut directory_token = None;
         let mut command = if let Some(host) = &args.ssh {
             integration.direct(host)?
+        } else if let Some(host) = &args.mosh {
+            integration.direct_mosh(host)?
         } else {
             let shell = if let Some(shell) = &args.shell {
                 shell.clone()
@@ -227,7 +232,11 @@ impl TerminalSession {
         Ok(Self {
             log_id,
             output_revision: 0,
-            title: args.ssh.clone().unwrap_or_else(|| "Terminal".into()),
+            title: args
+                .ssh
+                .clone()
+                .or_else(|| args.mosh.clone())
+                .unwrap_or_else(|| "Terminal".into()),
             term,
             parser: Processor::new(),
             mouse_modes: mouse::MouseModes::default(),
@@ -821,7 +830,10 @@ impl TerminalApp {
         if visible && !self.tabs.is_empty() {
             let tab = &mut self.tabs[self.active];
             tab.files.ensure_loaded();
-            if self.files_settings.follow_terminal && self.args.ssh.is_none() {
+            if self.files_settings.follow_terminal
+                && self.args.ssh.is_none()
+                && self.args.mosh.is_none()
+            {
                 let pane = tab.focused();
                 if let Some(directory) = pane.reported_directory.clone() {
                     // A prompt report is authoritative for PowerShell's logical
@@ -882,7 +894,7 @@ impl TerminalApp {
     }
     fn new_session(&self) -> Result<TerminalSession> {
         let mut args = self.args.clone();
-        if args.ssh.is_none() {
+        if args.ssh.is_none() && args.mosh.is_none() {
             args.shell = Some(self.shell_settings.executable(args.shell.as_deref())?);
         }
         TerminalSession::new(&args, self.warning.as_deref())

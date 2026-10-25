@@ -19,7 +19,7 @@ from urllib.parse import urlencode
 import zipfile
 
 PLATFORMS = {
-    "windows-x64": ("Windows x64", ".zip", ("yiterm.exe", "bin/ssh.exe", "conpty.dll", "OpenConsole.exe")),
+    "windows-x64": ("Windows x64", ".zip", ("yiterm.exe", "bin/ssh.exe", "bin/mosh.exe", "conpty.dll", "OpenConsole.exe")),
     "linux-x64": ("Linux x64", ".tar.gz", ("yiterm",)),
 }
 

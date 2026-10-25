@@ -8,6 +8,8 @@ pub mod transfer;
 #[cfg(windows)]
 mod windows;
 #[cfg(windows)]
+pub use windows::run_mosh;
+#[cfg(windows)]
 pub use windows::{ClipboardRequests, SocksTunnel, run, upload};
 
 use anyhow::{Context, Result, bail};

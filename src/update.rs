@@ -337,7 +337,13 @@ fn payload_files(root: &Path) -> Result<Vec<PathBuf>> {
 
 fn validate_payload(root: &Path, files: &[PathBuf]) -> Result<()> {
     let required: &[&str] = if cfg!(windows) {
-        &["yiterm.exe", "bin/ssh.exe", "conpty.dll", "OpenConsole.exe"]
+        &[
+            "yiterm.exe",
+            "bin/ssh.exe",
+            "bin/mosh.exe",
+            "conpty.dll",
+            "OpenConsole.exe",
+        ]
     } else {
         &["yiterm"]
     };

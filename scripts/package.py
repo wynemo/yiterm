@@ -164,9 +164,10 @@ def main() -> None:
         # portable-pty loads an app-local conpty.dll and its OpenConsole.exe.
         # The system ConPTY can swallow native console mouse-mode changes;
         # ship the same runtime family used by Windows Terminal instead.
-        helper = binary.parent / "ssh.exe"
-        verify_binary(helper.read_bytes(), args.target, subsystem=3)
-        files.append((helper, f"{name}/bin/ssh.exe"))
+        for helper_name in ("ssh.exe", "mosh.exe"):
+            helper = binary.parent / helper_name
+            verify_binary(helper.read_bytes(), args.target, subsystem=3)
+            files.append((helper, f"{name}/bin/{helper_name}"))
         runtime = download_conpty()
         files.append((ROOT / "licenses/conpty-LICENSE", f"{name}/licenses/conpty-LICENSE"))
         archive = output / f"{name}.zip"
