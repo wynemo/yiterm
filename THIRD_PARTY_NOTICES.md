@@ -12,5 +12,6 @@ YiTerm includes these components under their respective licenses:
 - self_update: MIT, https://github.com/jaemk/self_update
 - self-replace: Apache-2.0, https://github.com/mitsuhiko/self-replace
 - Windows ConPTY: see licenses/conpty-LICENSE
+- PowerShell prompt integration adapted from ELYTerminal: MIT, see licenses/elyterminal-MIT.txt and https://github.com/ELY-Open-Source/ELYTerminal
 
 Other Rust dependencies retain the licenses declared in their Cargo manifests.

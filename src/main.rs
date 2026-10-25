@@ -14,7 +14,7 @@ mod ui;
 use portable_pty::{MasterPty, PtySize};
 use yiterm::settings::{self, CursorSettings, CursorShape};
 use yiterm::theme::ThemeMode;
-use yiterm::{logging, mouse, paste, ssh};
+use yiterm::{logging, mouse, paste, shell_directory, ssh};
 #[cfg(windows)]
 mod conpty;
 use alacritty_terminal::{
@@ -99,6 +99,10 @@ struct PasteResult {
     target: Option<ssh::TargetIdentity>,
     image_group: Option<Option<i32>>,
 }
+struct TerminalOutput {
+    bytes: Vec<u8>,
+    directory: Option<Option<std::path::PathBuf>>,
+}
 struct TerminalSession {
     log_id: uuid::Uuid,
     output_revision: u64,
@@ -107,7 +111,8 @@ struct TerminalSession {
     parser: Processor,
     mouse_modes: mouse::MouseModes,
     mouse_wheel: mouse::Wheel,
-    output: mpsc::Receiver<Vec<u8>>,
+    output: mpsc::Receiver<TerminalOutput>,
+    reported_directory: Option<Option<std::path::PathBuf>>,
     repaint: Arc<Repaint>,
     events: mpsc::Receiver<Event>,
     writer: Box<dyn Write + Send>,
@@ -155,6 +160,7 @@ impl TerminalSession {
             pixel_width: 0,
             pixel_height: 0,
         })?;
+        let mut directory_token = None;
         let mut command = if let Some(host) = &args.ssh {
             integration.direct(host)?
         } else {
@@ -168,7 +174,8 @@ impl TerminalSession {
                     .unwrap_or_else(logging::config_path)?;
                 settings::load_shell(&path)?.executable(None)?
             };
-            integration.shell(&shell)?
+            directory_token = shell_directory::token_for(&shell);
+            integration.shell_with_directory(&shell, directory_token.as_deref())?
         };
         command.env("TERM", "xterm-256color");
         let child = pair
@@ -182,6 +189,7 @@ impl TerminalSession {
         let repaint = Arc::new(Repaint::new());
         let output_repaint = repaint.clone();
         std::thread::spawn(move || {
+            let mut directories = shell_directory::Reports::new(directory_token);
             let mut buffer = [0; 16384];
             loop {
                 match reader.read(&mut buffer) {
@@ -195,7 +203,11 @@ impl TerminalSession {
                     }
                     Ok(n) => {
                         profiling::pty_read(n);
-                        if tx.send(buffer[..n].to_vec()).is_err() {
+                        let output = TerminalOutput {
+                            bytes: buffer[..n].to_vec(),
+                            directory: directories.observe(&buffer[..n]),
+                        };
+                        if tx.send(output).is_err() {
                             break;
                         }
                         output_repaint.store(true, Ordering::Release);
@@ -221,6 +233,7 @@ impl TerminalSession {
             mouse_modes: mouse::MouseModes::default(),
             mouse_wheel: mouse::Wheel::default(),
             output,
+            reported_directory: None,
             repaint,
             events,
             writer,
@@ -455,9 +468,13 @@ fn terminal_colors(cell: &Cell, theme: ThemeMode) -> (Rgba, Rgba) {
 impl TerminalSession {
     fn poll(&mut self) -> bool {
         for batch in 0..128 {
-            let Ok(bytes) = self.output.try_recv() else {
+            let Ok(output) = self.output.try_recv() else {
                 break;
             };
+            if let Some(directory) = output.directory {
+                self.reported_directory = Some(directory);
+            }
+            let bytes = output.bytes;
             self.output_revision = self.output_revision.wrapping_add(1);
             let previous_mode = *self.term.mode();
             let requests = self.mouse_modes.observe(&bytes);
@@ -806,13 +823,25 @@ impl TerminalApp {
             tab.files.ensure_loaded();
             if self.files_settings.follow_terminal && self.args.ssh.is_none() {
                 let pane = tab.focused();
-                // Unix foreground groups cover nested local shells. These are
-                // always host PIDs, never paths reported by remote SSH/WSL shells.
-                let pid = pane
-                    .foreground_group()
-                    .and_then(|pid| u32::try_from(pid).ok())
-                    .or_else(|| pane.child.process_id());
-                tab.files.follow_directory(pid);
+                if let Some(directory) = pane.reported_directory.clone() {
+                    // A prompt report is authoritative for PowerShell's logical
+                    // location. Stop PID queries before applying it so a late
+                    // process-cwd reply cannot put the previous directory back.
+                    tab.files.pause_follow();
+                    if let Some(path) = directory {
+                        if path != tab.files.root {
+                            tab.files.set_root(path);
+                        }
+                    }
+                } else {
+                    // Unix foreground groups cover nested local shells. Other
+                    // local shells keep the existing host-process fallback.
+                    let pid = pane
+                        .foreground_group()
+                        .and_then(|pid| u32::try_from(pid).ok())
+                        .or_else(|| pane.child.process_id());
+                    tab.files.follow_directory(pid);
+                }
             } else {
                 tab.files.pause_follow();
             }

@@ -350,14 +350,24 @@ macOS / Windows 使用 **Folder…** 选择根目录；Linux 在路径输入框�
 
 单击目录展开或收起，单击普通文件进入 UTF-8 只读文本预览，**Back** 返回目录树。**Copy Path** 复制所选文件或目录的完整路径，**Open** 通过系统默认应用打开。文件面板内方向键导航，Enter 打开选中项；Esc 先退出预览，再返回终端焦点。macOS / Windows 的预览支持上下键和 Page Up / Page Down 滚动，也可使用鼠标滚轮。符号链接不作为目录展开，特殊文件不提供内嵌预览。错误和资源限制提示显示在面板内。
 
-Files 与 Git 默认开启 **Follow ✓**，跟随当前终端分栏的本地工作目录；切换标签页或分栏后跟随新的活动会话。点击 **Follow ✓** 可暂停，手动选择根目录或点击 **↑** 也会自动暂停，之后点击 Follow 恢复。Linux 使用 **Follow terminal directory** 复选框。跟随只读取系统可获取的本地进程工作目录，不解析提示符、不注入命令、不修改 shell 配置；只由 shell 内部维护、没有反映到进程工作目录的逻辑路径暂不支持。Files 始终浏览本机文件系统，不把 SSH、WSL 或容器内部路径映射成本地文件；直接通过 `--ssh` 启动的会话暂停目录跟随。Windows 的 Files 与已有浏览器共用右栏，打开 Files 时隐藏浏览器，收起后恢复；通过 Tools 打开浏览器会收起 Files。浏览器最大化时隐藏 Files。
+Files 与 Git 默认开启 **Follow ✓**，跟随当前终端分栏的本地工作目录；切换标签页或分栏后跟随新的活动会话。点击 **Follow ✓** 可暂停，手动选择根目录或点击 **↑** 也会自动暂停，之后点击 Follow 恢复。Linux 使用 **Follow terminal directory** 复选框。macOS/Linux 及未集成的本地 shell 使用系统可获取的进程工作目录；Windows PowerShell / pwsh 使用本次会话提示符上报的真实文件系统路径。其他 shell 只在系统进程工作目录能反映当前位置时支持跟随。不解析提示符文本，不修改用户 shell 配置文件。Files 始终浏览本机文件系统，不把 SSH、WSL 或容器内部路径映射成本地文件；直接通过 `--ssh` 启动的会话暂停目录跟随。Windows 的 Files 与已有浏览器共用右栏，打开 Files 时隐藏浏览器，收起后恢复；通过 Tools 打开浏览器会收起 Files。浏览器最大化时隐藏 Files。
+
+### Windows PowerShell 目录跟随
+
+旧的进程目录查询无法可靠反映 PowerShell runspace 的当前位置。新建 `powershell.exe`（Windows PowerShell 5.1）或 `pwsh.exe` 会话时，启动命令在正常加载用户 profiles 后，为本次会话包装现有 `prompt`。每次提示符生成时读取 `$executionContext.SessionState.Path.CurrentLocation.ProviderPath`，通过 OSC 7 file URI 报告目录。保持 **Follow ✓** 开启后，`cd` / `Set-Location`、盘符切换、文件系统 PSDrive 和 UNC 路径均使用该报告更新 Files/Git 的共同根目录。
+
+包装调用原有 prompt 并保留其输出，不写入 `$PROFILE`，不重复加载 profiles，也不修改执行策略。脚本位于 `assets/shell-integration/powershell.ps1`，只内嵌到新建 Windows PowerShell/pwsh 的启动命令；macOS/Linux 启动方式保持原样。升级后需要新建或重建 PowerShell 标签页/分栏，已有进程不会自动安装目录报告。手动选目录会暂停 Follow，需点击 Follow 恢复。
+
+`src/shell_directory.rs` 在 PTY 读取线程解析报告，支持跨读取边界的 BEL/ST 终止序列，只缓存 OSC 7，单条报告最多 16 KiB；原始输出仍交给终端解析器。每个会话使用独立标记放在 URI fragment 中，标记不导出到子进程环境。只接受匹配该会话标记的 file URI；解码、校验后去掉 fragment，再转换为 Windows 盘符或 UNC 路径，其他程序和 SSH 子会话的普通 OSC 7 不会覆盖本地目录。注册表等非 FileSystem provider 暂停目录更新并保留最后一个文件目录，不回退到过期的 Win32 进程目录。
+
+此修复的本机验证只包含 macOS Release 构建；Windows PowerShell 5.1、PowerShell 7 及 ConPTY 中的实际 `cd`、盘符、UNC 和第三方提示符行为仍需 Windows 环境人工验证，Windows 编译交给现有 CI runner。
 
 ### 性能与实现
 
 - `src/files.rs` 提供两个界面后端共用的目录读取、缓存、可见行索引和文本预览；`src/ui/files.rs` 提供 GPUI 面板，Linux 面板位于 `src/ui_egui.rs`。
 - 只有首次打开、跟随目录变化、展开目录或手动刷新时才读取目录，每次只读一层；不递归扫描、不跟随符号链接遍历、不轮询或监听文件系统，也不读取缩略图。Git 状态由下述独立后台层统一读取，文件树不逐文件运行 Git。全局两个后台工作线程共享容量为 32 的有界队列，与 PTY 工作独立。队列满时显示提示，可刷新重试。
 - 每次目录枚举最多检查 10,000 项（包含被隐藏开关过滤掉的项），目录优先、名称排序；截断时显示提示。每个标签页缓存最多 20,000 个条目、256 个目录，收起目录会释放该子树缓存。达到上限时显示提示，可收起目录后刷新。
-- 跟随启用且面板打开时，复用界面现有事件泵，最多每 500ms 在有界后台队列查询一次当前分栏的本地进程工作目录（Unix 优先前台进程组，Windows 使用会话启动进程）。只请求指定 PID 的目录，不主动遍历进程树；只有目录变化才重载文件树，查询失败保留原目录。暂停跟随、面板关闭或标签页在后台时不发起该查询，不新增计时器。
+- 跟随启用且面板打开时，优先使用该 pane 的提示符目录报告；收到报告后停止 PID 目录查询，丢弃晚到的进程目录结果。没有报告时复用界面现有事件泵，最多每 500ms 在有界后台队列查询一次当前分栏的本地进程工作目录（Unix 优先前台进程组，Windows 使用会话启动进程）。只请求指定 PID 的目录，不主动遍历进程树；只有目录变化才重载文件树，查询失败保留原目录。暂停跟随、面板关闭或标签页在后台时不发起该查询，不新增计时器。
 - GPUI 使用固定行高虚拟列表，Linux 使用 egui 可见行绘制；目录数据或展开状态变化时才重建扁平可见行索引。UI 绘制不执行文件系统读取，也不持有终端锁等待磁盘。切换根目录、刷新、关闭面板或标签页时使旧请求失效；已经进入系统 I/O 的读取不能强行中断，但结果会被丢弃。面板关闭后不发起新读取，不增加定时唤醒。
 - 文本最多读取 1 MiB，展示最多 50,000 行，每行最多 4,096 个字符，超限提示截断。支持 UTF-8 及 UTF-8 BOM，二进制或不支持的编码显示说明并可通过系统应用打开。不做语法高亮、自动换行、编辑或递归内容搜索。
 
@@ -389,7 +399,7 @@ GPUI Git 界面位于 `src/ui/git.rs`，列表与 diff 都采用固定行高虚�
 
 ### To be done
 
-- [ ] 补充 OSC 7 目录通知支持，用于系统进程工作目录无法反映的 shell 逻辑目录；接收时校验本地主机和路径。
+- [ ] 扩展其他 shell 的可选目录上报（当前自动集成 Windows PowerShell/pwsh），补齐 Git Bash / WSL 的路径适配。
 - [ ] 远程文件浏览：独立设计 SSH / SFTP 目录与文件预览。
 - [ ] Git 扩展操作：丢弃修改、amend 和分支切换另行设计。
 - [ ] 最近提交列表、macOS Unicode 路径规范化和 WSL 仓库支持。

@@ -75,6 +75,14 @@ impl Integration {
         Ok(())
     }
 
+    pub fn shell_with_directory(
+        &self,
+        shell: &str,
+        _token: Option<&str>,
+    ) -> Result<portable_pty::CommandBuilder> {
+        self.shell(shell)
+    }
+
     pub fn shell(&self, shell: &str) -> Result<portable_pty::CommandBuilder> {
         // Let the selected shell load its normal startup files itself.
         // No --rcfile, ZDOTDIR override, aliases, functions or PATH rewriting.
@@ -171,6 +179,13 @@ impl Integration {
         )?)
     }
     pub fn shell(&self, shell: &str) -> Result<portable_pty::CommandBuilder> {
+        self.shell_with_directory(shell, None)
+    }
+    pub fn shell_with_directory(
+        &self,
+        shell: &str,
+        directory_token: Option<&str>,
+    ) -> Result<portable_pty::CommandBuilder> {
         let resolved = crate::settings::resolve_windows_shell(shell)?;
         let shell = resolved
             .to_str()
@@ -235,10 +250,13 @@ impl Integration {
             }
             "powershell" | "pwsh" => {
                 let quoted = crate::paste::quote_powershell(&format!("{bin};"));
+                let report = directory_token
+                    .map(crate::shell_directory::powershell_init)
+                    .unwrap_or_default();
                 command.args([
                     "-NoExit",
                     "-Command",
-                    &format!("$env:PATH = {quoted} + $env:PATH"),
+                    &format!("$env:PATH = {quoted} + $env:PATH;\n{report}"),
                 ]);
             }
             _ => {}

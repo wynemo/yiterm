@@ -4,6 +4,7 @@ pub mod mouse;
 pub mod native_ssh;
 pub mod paste;
 pub mod settings;
+pub mod shell_directory;
 pub mod ssh;
 pub mod theme;
 pub mod update;
