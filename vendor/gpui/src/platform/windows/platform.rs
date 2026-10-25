@@ -312,6 +312,14 @@ impl Platform for WindowsPlatform {
         let mut msg = MSG::default();
         unsafe {
             while GetMessageW(&mut msg, None, 0, 0).as_bool() {
+                // GPUI translates unhandled keys in its own window procedure,
+                // after shortcut dispatch. Native child windows such as WebView2
+                // need the normal message-loop translation to receive characters.
+                // Only look up registered GPUI handles: other windows' user data
+                // does not contain a WindowsWindowInner.
+                if self.window_from_hwnd(msg.hwnd).is_none() {
+                    let _ = TranslateMessage(&msg);
+                }
                 DispatchMessageW(&msg);
             }
         }

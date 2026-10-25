@@ -448,6 +448,15 @@ impl WindowsWindowInner {
         button: MouseButton,
         lparam: LPARAM,
     ) -> Option<isize> {
+        // A native child (for example WebView2) can retain keyboard focus while
+        // this top-level window stays active. GPUI's logical focus alone cannot
+        // return keyboard input to the terminal or other GPUI text controls.
+        // SetFocus sends synchronous messages, so do this before borrowing state.
+        unsafe {
+            if GetFocus() != handle {
+                SetFocus(Some(handle)).log_err();
+            }
+        }
         unsafe { SetCapture(handle) };
         let mut lock = self.state.borrow_mut();
         let Some(mut func) = lock.callbacks.input.take() else {
