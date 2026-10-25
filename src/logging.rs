@@ -70,6 +70,8 @@ struct Config {
     _browser: crate::settings::BrowserSettings,
     #[serde(rename = "shell")]
     _shell: crate::settings::ShellSettings,
+    #[serde(rename = "files")]
+    _files: crate::settings::FilesSettings,
 }
 
 pub struct Logging {

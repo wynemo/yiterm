@@ -1,4 +1,6 @@
 #![cfg_attr(windows, windows_subsystem = "windows")]
+mod files;
+mod git;
 #[cfg(not(target_os = "linux"))]
 mod profiling;
 #[cfg(target_os = "linux")]
@@ -99,6 +101,7 @@ struct PasteResult {
 }
 struct TerminalSession {
     log_id: uuid::Uuid,
+    output_revision: u64,
     title: String,
     term: Term<Listener>,
     parser: Processor,
@@ -211,6 +214,7 @@ impl TerminalSession {
         tracing::info!(session_id = %log_id, child_pid = ?child.process_id(), "Terminal session started");
         Ok(Self {
             log_id,
+            output_revision: 0,
             title: args.ssh.clone().unwrap_or_else(|| "Terminal".into()),
             term,
             parser: Processor::new(),
@@ -454,6 +458,7 @@ impl TerminalSession {
             let Ok(bytes) = self.output.try_recv() else {
                 break;
             };
+            self.output_revision = self.output_revision.wrapping_add(1);
             let previous_mode = *self.term.mode();
             let requests = self.mouse_modes.observe(&bytes);
             self.parser.advance(&mut self.term, &bytes);
@@ -623,6 +628,7 @@ impl PaneLayout {
     }
 }
 struct TerminalTab {
+    files: files::FileState,
     #[cfg(windows)]
     id: u64,
     panes: Vec<TerminalSession>,
@@ -639,6 +645,7 @@ impl TerminalTab {
         Self {
             #[cfg(windows)]
             id: NEXT_ID.fetch_add(1, Ordering::Relaxed),
+            files: Default::default(),
             panes: vec![session],
             layout: PaneLayout::Leaf(0),
             active: 0,
@@ -710,6 +717,10 @@ struct TerminalApp {
     font_settings: settings::FontSettings,
     browser_settings: settings::BrowserSettings,
     shell_settings: settings::ShellSettings,
+    files_settings: settings::FilesSettings,
+    git: git::Controller,
+    #[cfg(target_os = "linux")]
+    files_focused: bool,
 }
 
 impl TerminalApp {
@@ -742,9 +753,104 @@ impl TerminalApp {
             font_settings: settings::load_font(&path)?,
             browser_settings: settings::load_browser(&path)?,
             shell_settings: settings::load_shell(&path)?,
+            files_settings: settings::load_files(&path)?,
+            git: Default::default(),
+            #[cfg(target_os = "linux")]
+            files_focused: false,
         })
     }
 
+    fn save_files_settings(&mut self) {
+        let result = self
+            .args
+            .config
+            .clone()
+            .map(Ok)
+            .unwrap_or_else(logging::config_path)
+            .and_then(|path| settings::save_files(&path, self.files_settings));
+        if let Err(error) = result {
+            self.error = Some(format!("Cannot save file panel settings: {error:#}"));
+        }
+    }
+    fn toggle_files(&mut self) {
+        self.files_settings.visible = !self.files_settings.visible;
+        if self.files_settings.visible {
+            self.tabs[self.active].files.ensure_loaded();
+        } else {
+            for tab in &mut self.tabs {
+                tab.files.cancel();
+            }
+            self.git.sync(None, None);
+        }
+        self.save_files_settings();
+    }
+    fn set_files_follow(&mut self, follow: bool) {
+        self.files_settings.follow_terminal = follow;
+        for tab in &mut self.tabs {
+            tab.files.pause_follow();
+        }
+        self.save_files_settings();
+    }
+    fn poll_files(&mut self, presented: bool) -> bool {
+        let visible =
+            self.files_settings.visible && presented && !self.settings_open && !self.about_open;
+        // Update the target before accepting replies, so a late reply from the
+        // previously focused pane cannot replace the newly focused pane's root.
+        for (index, tab) in self.tabs.iter_mut().enumerate() {
+            if index != self.active || !visible {
+                tab.files.pause_follow();
+            }
+        }
+        if visible && !self.tabs.is_empty() {
+            let tab = &mut self.tabs[self.active];
+            tab.files.ensure_loaded();
+            if self.files_settings.follow_terminal && self.args.ssh.is_none() {
+                let pane = tab.focused();
+                // Unix foreground groups cover nested local shells. These are
+                // always host PIDs, never paths reported by remote SSH/WSL shells.
+                let pid = pane
+                    .foreground_group()
+                    .and_then(|pid| u32::try_from(pid).ok())
+                    .or_else(|| pane.child.process_id());
+                tab.files.follow_directory(pid);
+            } else {
+                tab.files.pause_follow();
+            }
+        }
+        let mut changed = false;
+        for tab in &mut self.tabs {
+            changed |= tab.files.poll();
+        }
+        let active = visible && !self.tabs.is_empty();
+        let folder = active.then(|| self.tabs[self.active].files.root.clone());
+        let activity = active.then(|| {
+            let pane = self.tabs[self.active].focused();
+            (pane.log_id, pane.output_revision)
+        });
+        changed |= self.git.sync(folder.as_deref(), activity);
+        let acted = self.git.take_acted();
+        if !acted.is_empty() {
+            for (index, tab) in self.tabs.iter_mut().enumerate() {
+                if acted.iter().any(|root| tab.files.root.starts_with(root)) {
+                    if visible && index == self.active {
+                        tab.files.refresh();
+                    } else {
+                        tab.files.invalidate();
+                    }
+                }
+            }
+        }
+        changed
+    }
+    fn refresh_sidebar(&mut self) {
+        self.tabs[self.active].files.refresh();
+        self.git.refresh();
+    }
+    fn set_sidebar_mode(&mut self, mode: settings::FilesPanelMode) {
+        self.files_settings.mode = mode;
+        self.git.back();
+        self.save_files_settings();
+    }
     fn new_session(&self) -> Result<TerminalSession> {
         let mut args = self.args.clone();
         if args.ssh.is_none() {

@@ -503,3 +503,74 @@ pub(crate) fn resolve_windows_shell(program: &str) -> Result<std::path::PathBuf>
             )
         })
 }
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FilesPanelMode {
+    #[default]
+    Files,
+    Git,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct FilesSettings {
+    pub mode: FilesPanelMode,
+    pub visible: bool,
+    pub follow_terminal: bool,
+    pub width: f32,
+}
+impl Default for FilesSettings {
+    fn default() -> Self {
+        Self {
+            mode: FilesPanelMode::Files,
+            visible: false,
+            follow_terminal: true,
+            width: 320.,
+        }
+    }
+}
+pub fn load_files(path: &Path) -> Result<FilesSettings> {
+    let text = match std::fs::read_to_string(path) {
+        Ok(text) => text,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Default::default()),
+        Err(error) => return Err(error.into()),
+    };
+    let table: toml::Value = toml::from_str(&text)?;
+    let mut settings = table
+        .get("files")
+        .cloned()
+        .map(|v| v.try_into::<FilesSettings>())
+        .transpose()
+        .context("Invalid files settings")?
+        .unwrap_or_default();
+    settings.width = if settings.width.is_finite() {
+        settings.width.clamp(240., 800.)
+    } else {
+        320.
+    };
+    Ok(settings)
+}
+pub fn save_files(path: &Path, settings: FilesSettings) -> Result<()> {
+    let mut table = match std::fs::read_to_string(path) {
+        Ok(text) => toml::from_str::<toml::Value>(&text)?,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            toml::Value::Table(Default::default())
+        }
+        Err(error) => return Err(error.into()),
+    };
+    table
+        .as_table_mut()
+        .context("Expected configuration table")?
+        .insert("files".into(), toml::Value::try_from(settings)?);
+    let directory = path
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
+    std::fs::create_dir_all(directory)?;
+    let mut file = tempfile::NamedTempFile::new_in(directory)?;
+    use std::io::Write;
+    file.write_all(toml::to_string_pretty(&table)?.as_bytes())?;
+    file.persist(path).map_err(|e| e.error)?;
+    Ok(())
+}

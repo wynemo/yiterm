@@ -646,7 +646,7 @@ impl PaneLayout {
 }
 
 impl TerminalTab {
-    fn show(&mut self, ctx: &egui::Context, ui: &mut egui::Ui) {
+    fn show(&mut self, ctx: &egui::Context, ui: &mut egui::Ui, keyboard_enabled: bool) {
         let mut rectangles = Vec::new();
         self.layout.rectangles(
             ui,
@@ -673,7 +673,7 @@ impl TerminalTab {
                     .max_rect(terminal_rect),
             );
             pane_ui.set_clip_rect(terminal_rect.intersect(ui.clip_rect()));
-            self.panes[index].show(ctx, &mut pane_ui, index == self.active);
+            self.panes[index].show(ctx, &mut pane_ui, index == self.active && keyboard_enabled);
             ui.painter().rect_stroke(
                 rect.shrink(0.5),
                 0.0,
@@ -776,7 +776,7 @@ impl eframe::App for TerminalApp {
         }
         let profile_start = self.profile.as_ref().map(|_| Instant::now());
         ctx.set_visuals(self.theme.visuals());
-        if !self.settings_open {
+        if !self.settings_open && !self.files_focused {
             reserve_terminal_keyboard(ctx);
         }
         let poll_start = self.profile.as_ref().map(|_| Instant::now());
@@ -792,6 +792,7 @@ impl eframe::App for TerminalApp {
                 self.close_tab(index);
             }
         }
+        self.poll_files(true);
         let profile_poll = poll_start.map(|start| start.elapsed());
         #[cfg(windows)]
         let clipboard_owner = windows_clipboard_owner(_frame).map_err(|error| format!("{error:#}"));
@@ -883,6 +884,13 @@ impl eframe::App for TerminalApp {
                         ui.close();
                     }
                 });
+                if ui
+                    .selectable_label(self.files_settings.visible, "Files")
+                    .clicked()
+                {
+                    self.toggle_files();
+                    self.files_focused = self.files_settings.visible;
+                }
                 if ui.button("About").clicked() {
                     self.about_open = true;
                     self.about_licenses = false;
@@ -1039,10 +1047,21 @@ impl eframe::App for TerminalApp {
                 ui.label(&session.status);
             });
         });
+        if self.files_settings.visible && !self.settings_open && !self.about_open {
+            self.show_files(ctx);
+        }
         egui::CentralPanel::default()
             .frame(egui::Frame::NONE.fill(self.theme.background()))
             .show(ctx, |ui| {
-                self.tabs[self.active].show(ctx, ui);
+                if ctx.input(|i| i.pointer.any_pressed())
+                    && ui.rect_contains_pointer(ui.available_rect_before_wrap())
+                {
+                    self.files_focused = false;
+                    if let Some(id) = ctx.memory(|m| m.focused()) {
+                        ctx.memory_mut(|m| m.surrender_focus(id));
+                    }
+                }
+                self.tabs[self.active].show(ctx, ui, !self.files_focused);
             });
         // PTY output wakes the UI directly. Keep a low-frequency fallback for
         // child exit, asynchronous paste results and Windows clipboard IPC.
@@ -2052,4 +2071,499 @@ fn configure_fonts_for(ctx: &egui::Context, family: &str) {
         }
     }
     ctx.set_fonts(fonts);
+}
+
+impl TerminalApp {
+    fn show_files(&mut self, ctx: &egui::Context) {
+        let mut close = false;
+        let mut manual_root = false;
+        let mut follow_changed = false;
+        let mut scroll_selected = false;
+        let mut mode_changed = false;
+        if self.files_settings.mode == settings::FilesPanelMode::Git {
+            self.git_navigation_egui(ctx);
+        }
+        if self.files_settings.mode == settings::FilesPanelMode::Files
+            && self.files_focused
+            && !ctx.wants_keyboard_input()
+        {
+            let state = &mut self.tabs[self.active].files;
+            if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, Key::Escape)) {
+                if state.preview_path.is_some() {
+                    state.back();
+                } else {
+                    self.files_focused = false;
+                }
+            }
+            if state.preview_path.is_none() && !state.rows.is_empty() {
+                let up = ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, Key::ArrowUp));
+                let down = ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, Key::ArrowDown));
+                if up || down {
+                    state.selected = Some(match state.selected {
+                        Some(i) if up => i.saturating_sub(1),
+                        Some(i) => (i + 1).min(state.rows.len() - 1),
+                        None => 0,
+                    });
+                    scroll_selected = true;
+                }
+                let activate = ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, Key::Enter));
+                let right =
+                    ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, Key::ArrowRight));
+                let left = ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, Key::ArrowLeft));
+                if let Some(index) = state.selected {
+                    let expanded = state.expanded.contains(&state.rows[index].entry.path);
+                    if activate || (right && !expanded) || (left && expanded) {
+                        state.activate(index);
+                    }
+                }
+            }
+        }
+        let panel = egui::SidePanel::right("files-panel")
+            .default_width(self.files_settings.width)
+            .width_range(240.0..=800.0)
+            .resizable(true)
+            .show(ctx, |ui| {
+                if ctx.input(|i| i.pointer.any_pressed()) && ui.rect_contains_pointer(ui.max_rect())
+                {
+                    self.files_focused = true;
+                }
+                ui.horizontal(|ui| {
+                    for (mode, label) in [
+                        (settings::FilesPanelMode::Files, "Files"),
+                        (settings::FilesPanelMode::Git, "Git"),
+                    ] {
+                        if ui
+                            .selectable_label(self.files_settings.mode == mode, label)
+                            .clicked()
+                        {
+                            self.files_settings.mode = mode;
+                            self.git.back();
+                            mode_changed = true;
+                        }
+                    }
+                    if ui.button("×").clicked() {
+                        close = true;
+                    }
+                });
+                if self.files_settings.mode == settings::FilesPanelMode::Git {
+                    self.show_git_body(ui, ctx);
+                    return;
+                }
+                follow_changed = ui
+                    .checkbox(
+                        &mut self.files_settings.follow_terminal,
+                        "Follow terminal directory",
+                    )
+                    .changed();
+                let state = &mut self.tabs[self.active].files;
+                ui.horizontal(|ui| {
+                    if ui.button("↑").clicked() {
+                        if let Some(path) = state.root.parent().map(|p| p.to_owned()) {
+                            state.set_root(path);
+                            manual_root = true;
+                        }
+                    }
+                    if ui.button("Refresh").clicked() {
+                        self.git.refresh();
+                        state.refresh();
+                    }
+                    if ui.checkbox(&mut state.hidden, "Dotfiles").changed() {
+                        state.refresh();
+                    }
+                });
+                ui.horizontal(|ui| {
+                    let response = ui.add(
+                        egui::TextEdit::singleline(&mut state.draft)
+                            .desired_width((ui.available_width() - 45.).max(40.)),
+                    );
+                    if ui.button("Go").clicked()
+                        || (response.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter)))
+                    {
+                        state.set_root(std::path::PathBuf::from(&state.draft));
+                        manual_root = true;
+                    }
+                });
+                ui.horizontal(|ui| {
+                    if state.preview_path.is_some() && ui.button("Back").clicked() {
+                        state.back();
+                    }
+                    if ui.button("Copy Path").clicked() {
+                        ctx.copy_text(state.selected_path().to_string_lossy().into_owned());
+                    }
+                    if ui.button("Open").clicked() {
+                        state.open();
+                    }
+                });
+                ui.label(state.selected_path().to_string_lossy());
+                let notice = state.notice();
+                if !notice.is_empty() {
+                    ui.label(notice);
+                }
+                if let Some(preview) = &state.preview {
+                    egui::ScrollArea::vertical()
+                        .id_salt(("file-preview", state.identity(), &preview.path))
+                        .show_rows(ui, 20., preview.lines.len(), |ui, range| {
+                            for index in range {
+                                ui.add(
+                                    egui::Label::new(
+                                        egui::RichText::new(&preview.lines[index]).monospace(),
+                                    )
+                                    .truncate(),
+                                );
+                            }
+                        });
+                } else if state.preview_path.is_none() {
+                    let mut activate = None;
+                    let mut area = egui::ScrollArea::vertical().id_salt((
+                        "file-tree",
+                        state.identity(),
+                        &state.root,
+                    ));
+                    if scroll_selected {
+                        area =
+                            area.vertical_scroll_offset(state.selected.unwrap_or(0) as f32 * 24.);
+                    }
+                    area.show_rows(ui, 24., state.rows.len(), |ui, range| {
+                        for index in range {
+                            let row = &state.rows[index];
+                            let marker = if row.entry.directory {
+                                if state.expanded.contains(&row.entry.path) {
+                                    "▾"
+                                } else {
+                                    "▸"
+                                }
+                            } else if row.entry.regular {
+                                "·"
+                            } else {
+                                "↗"
+                            };
+                            ui.horizontal(|ui| {
+                                ui.add_space(row.depth.min(40) as f32 * 14.);
+                                let response = ui.add_sized(
+                                    [ui.available_width(), 24.],
+                                    egui::Button::selectable(
+                                        state.selected == Some(index),
+                                        format!(
+                                            "{marker} {}  {}",
+                                            row.entry.name,
+                                            self.git.badge(&row.entry.path).unwrap_or("")
+                                        ),
+                                    )
+                                    .truncate(),
+                                );
+                                if response.clicked() {
+                                    activate = Some(index);
+                                }
+                            });
+                        }
+                    });
+                    if let Some(index) = activate {
+                        state.activate(index);
+                    }
+                }
+            });
+        if mode_changed {
+            self.save_files_settings();
+        }
+        if manual_root {
+            self.set_files_follow(false);
+        } else if follow_changed {
+            self.set_files_follow(self.files_settings.follow_terminal);
+        }
+        let width = panel.response.rect.width().clamp(240., 800.);
+        if (self.files_settings.width - width).abs() > 1. && !ctx.input(|i| i.pointer.any_down()) {
+            self.files_settings.width = width;
+            self.save_files_settings();
+        }
+        if close {
+            self.toggle_files();
+            self.files_focused = false;
+        }
+    }
+}
+
+impl TerminalApp {
+    fn git_navigation_egui(&mut self, ctx: &egui::Context) {
+        if !self.files_focused || ctx.wants_keyboard_input() {
+            return;
+        }
+        if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, Key::Escape)) {
+            if self.git.selected.is_some() {
+                self.git.back();
+            } else {
+                self.files_focused = false;
+            }
+        }
+        if self.git.selected.is_none() {
+            let up = ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, Key::ArrowUp));
+            let down = ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, Key::ArrowDown));
+            if let Some(snapshot) = &self.git.snapshot {
+                let rows = &snapshot.rows;
+                let next = if up {
+                    (0..self.git.cursor.unwrap_or(rows.len()))
+                        .rev()
+                        .find(|i| matches!(rows[*i], git::ListRow::Change(_)))
+                } else if down {
+                    (self.git.cursor.map_or(0, |i| i + 1)..rows.len())
+                        .find(|i| matches!(rows[*i], git::ListRow::Change(_)))
+                } else {
+                    None
+                };
+                if let Some(index) = next {
+                    self.git.cursor = Some(index);
+                }
+                if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, Key::Enter)) {
+                    let change = self
+                        .git
+                        .cursor
+                        .and_then(|i| rows.get(i))
+                        .and_then(|r| match r {
+                            git::ListRow::Change(i) => snapshot.changes.get(*i),
+                            _ => None,
+                        })
+                        .cloned();
+                    if let Some(change) = change {
+                        self.git.open(change);
+                        self.git.poll();
+                    }
+                }
+            }
+        }
+    }
+    fn show_git_body(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
+        let mut file_action = None;
+        let mut section_action = None;
+        ui.horizontal(|ui| {
+            if ui.button("Refresh").clicked() {
+                self.git.refresh();
+                self.git.poll();
+            }
+            if ui
+                .checkbox(&mut self.files_settings.follow_terminal, "Follow")
+                .changed()
+            {
+                self.set_files_follow(self.files_settings.follow_terminal);
+            }
+        });
+        if let Some(snapshot) = &self.git.snapshot {
+            ui.label(&snapshot.branch);
+            ui.add(egui::Label::new(git::shown(&snapshot.root)).truncate());
+        }
+        let message = self.git.message();
+        if !message.is_empty() {
+            ui.label(message);
+        }
+        if let Some(selected) = &self.git.selected {
+            ui.add(
+                egui::Label::new(format!(
+                    "{} · {}",
+                    selected.section.label(),
+                    git::shown(&selected.path)
+                ))
+                .truncate(),
+            );
+            let mut back = false;
+            ui.horizontal(|ui| {
+                let enabled = self.git.can_act() && selected.section != git::Section::Conflicted;
+                if ui
+                    .add_enabled(
+                        enabled,
+                        egui::Button::new(if selected.section == git::Section::Staged {
+                            "Unstage"
+                        } else {
+                            "Stage"
+                        }),
+                    )
+                    .clicked()
+                {
+                    file_action = Some(selected.clone());
+                }
+                if ui.button("Back").clicked() {
+                    back = true;
+                }
+                if ui.button("Copy Path").clicked() {
+                    if let Some(snapshot) = &self.git.snapshot {
+                        ctx.copy_text(
+                            snapshot
+                                .root
+                                .join(&selected.path)
+                                .to_string_lossy()
+                                .into_owned(),
+                        );
+                    }
+                }
+            });
+            if back {
+                self.git.back();
+                return;
+            }
+            match &self.git.diff {
+                Some(Ok(diff)) => {
+                    if let Some(notice) = &diff.notice {
+                        ui.label(notice);
+                    }
+                    egui::ScrollArea::vertical()
+                        .max_height((ui.available_height() - 160.).max(80.))
+                        .id_salt((
+                            "git-diff",
+                            git::shown(&selected.path),
+                            selected.section.label(),
+                        ))
+                        .show_rows(ui, 20., diff.lines.len(), |ui, range| {
+                            for index in range {
+                                let line = &diff.lines[index];
+                                let color = match line.kind {
+                                    git::LineKind::Addition => self.theme.palette(2),
+                                    git::LineKind::Deletion => self.theme.palette(1),
+                                    git::LineKind::Hunk => self.theme.palette(4),
+                                    git::LineKind::Header => self.theme.palette(3),
+                                    git::LineKind::Context => self.theme.foreground(),
+                                };
+                                ui.add_sized(
+                                    [ui.available_width(), 20.],
+                                    egui::Label::new(
+                                        egui::RichText::new(&line.text).monospace().color(color),
+                                    )
+                                    .truncate(),
+                                );
+                            }
+                        });
+                }
+                Some(Err(error)) => {
+                    ui.label(error);
+                }
+                None => {
+                    ui.label("Reading diff…");
+                }
+            }
+        } else if let Some(snapshot) = &self.git.snapshot {
+            if snapshot.rows.is_empty() {
+                ui.label("Working tree clean");
+            }
+            let mut activate = None;
+            egui::ScrollArea::vertical()
+                .max_height((ui.available_height() - 160.).max(80.))
+                .id_salt(("git-changes", &snapshot.root))
+                .show_rows(ui, 26., snapshot.rows.len(), |ui, range| {
+                    for index in range {
+                        match &snapshot.rows[index] {
+                            git::ListRow::Header(section, count) => {
+                                ui.horizontal(|ui| {
+                                    ui.add_sized(
+                                        [(ui.available_width() - 92.).max(20.), 26.],
+                                        egui::Label::new(
+                                            egui::RichText::new(format!(
+                                                "{} ({count})",
+                                                section.label()
+                                            ))
+                                            .strong(),
+                                        ),
+                                    );
+                                    if *section != git::Section::Conflicted
+                                        && ui
+                                            .add_enabled(
+                                                self.git.can_act(),
+                                                egui::Button::new(
+                                                    if *section == git::Section::Staged {
+                                                        "Unstage all"
+                                                    } else {
+                                                        "Stage all"
+                                                    },
+                                                ),
+                                            )
+                                            .clicked()
+                                    {
+                                        section_action = Some(*section);
+                                    }
+                                });
+                            }
+                            git::ListRow::Change(change_index) => {
+                                let change = &snapshot.changes[*change_index];
+                                ui.horizontal(|ui| {
+                                    let response = ui.add_sized(
+                                        [(ui.available_width() - 70.).max(20.), 26.],
+                                        egui::Button::selectable(
+                                            self.git.cursor == Some(index),
+                                            format!(
+                                                "{}  {}",
+                                                change.mark.label(),
+                                                git::shown(&change.path)
+                                            ),
+                                        )
+                                        .truncate(),
+                                    );
+                                    if self.git.cursor == Some(index)
+                                        && ctx.input(|i| {
+                                            i.key_pressed(Key::ArrowUp)
+                                                || i.key_pressed(Key::ArrowDown)
+                                        })
+                                    {
+                                        response.scroll_to_me(None);
+                                    }
+                                    if response.clicked() {
+                                        activate = Some((index, change.clone()));
+                                    }
+                                    if change.section != git::Section::Conflicted
+                                        && ui
+                                            .add_enabled(
+                                                self.git.can_act(),
+                                                egui::Button::new(
+                                                    if change.section == git::Section::Staged {
+                                                        "Unstage"
+                                                    } else {
+                                                        "Stage"
+                                                    },
+                                                ),
+                                            )
+                                            .clicked()
+                                    {
+                                        file_action = Some(change.clone());
+                                    }
+                                });
+                            }
+                        }
+                    }
+                });
+            if let Some((index, change)) = activate {
+                self.git.cursor = Some(index);
+                self.git.open(change);
+                self.git.poll();
+            }
+        }
+        if let Some(change) = file_action {
+            self.git.act_on(change);
+        }
+        if let Some(section) = section_action {
+            self.git.act_section(section);
+        }
+        if let Some(snapshot) = &self.git.snapshot {
+            let staged = snapshot.count(git::Section::Staged);
+            let key = self.git.draft_key().cloned();
+            ui.separator();
+            ui.label(
+                self.git
+                    .action_label()
+                    .map(|label| format!("{label}…"))
+                    .unwrap_or_else(|| format!("Commit {staged} staged file(s)")),
+            );
+            ui.add(
+                egui::TextEdit::multiline(&mut self.git.commit_message)
+                    .id_salt(("git-message", key))
+                    .desired_rows(3)
+                    .desired_width(ui.available_width())
+                    .hint_text("Commit summary, then optional description…"),
+            );
+            if ui
+                .add_enabled(self.git.can_commit(), egui::Button::new("Commit staged"))
+                .clicked()
+            {
+                self.git.commit();
+            }
+            if let Some(error) = self.git.action_error() {
+                ui.colored_label(self.theme.palette(1), error);
+            }
+        } else if let Some(label) = self.git.action_label() {
+            ui.label(format!("{label}…"));
+        }
+    }
 }

@@ -1,6 +1,8 @@
 //! GPUI window, terminal canvas, input routing, and application controls.
 #[cfg(windows)]
 pub(crate) mod browser;
+mod files;
+mod git;
 
 use super::*;
 #[cfg(windows)]
@@ -235,6 +237,10 @@ enum Menu {
 pub(super) struct TerminalUi {
     app: TerminalApp,
     focus: FocusHandle,
+    files_focus: FocusHandle,
+    git_message: gpui::Entity<InputState>,
+    git_message_repo: Option<crate::git::RepoKey>,
+    files_split: gpui::Entity<gpui_component::resizable::ResizableState>,
     panes: Vec<PaneGeometry>,
     dividers: Vec<Divider>,
     dragging: Option<Divider>,
@@ -274,6 +280,9 @@ impl TerminalUi {
         let redraw = cx.observe_in(&cx.entity(), window, |_, _, window, _| window.refresh());
         let activation = cx.observe_window_activation(window, |this, window, cx| {
             this.focused = window.is_window_active();
+            if this.focused {
+                this.app.git.refresh();
+            }
             if !this.app.tabs.is_empty() {
                 let pane = this.session();
                 pane.ime_preedit.clear();
@@ -323,7 +332,13 @@ impl TerminalUi {
         let shell_program = cx.new(|cx| {
             InputState::new(window, cx).default_value(app.shell_settings.program.clone())
         });
-        let settings_subscriptions = vec![
+        let git_message = cx.new(|cx| {
+            InputState::new(window, cx)
+                .multi_line(true)
+                .rows(3)
+                .placeholder("Commit summary, then optional description…")
+        });
+        let mut settings_subscriptions = vec![
             cx.subscribe_in(&font_select, window, Self::on_font_selected),
             cx.subscribe_in(&font_size, window, |this, input, event, window, cx| {
                 let text = input.read(cx).value();
@@ -411,7 +426,21 @@ impl TerminalUi {
                 }
             }),
         ];
+        settings_subscriptions.push(cx.subscribe(&git_message, |this, input, event, cx| {
+            if matches!(event, InputEvent::Change)
+                && this.git_message_repo.as_ref() == this.app.git.draft_key()
+            {
+                this.app.git.commit_message = input.read(cx).value().to_string();
+                cx.notify();
+            }
+        }));
+        let files_focus = cx.focus_handle();
+        let files_split = cx.new(|_| gpui_component::resizable::ResizableState::default());
         Self {
+            git_message,
+            git_message_repo: None,
+            files_focus,
+            files_split,
             app,
             focus,
             panes: vec![],
@@ -461,6 +490,16 @@ impl TerminalUi {
                 changed = true;
             }
         }
+        #[cfg(windows)]
+        let presented = !self
+            .app
+            .tabs
+            .get(self.app.active)
+            .and_then(|tab| tab.browser.as_ref())
+            .is_some_and(|browser| browser.read(cx).maximized());
+        #[cfg(not(windows))]
+        let presented = true;
+        changed |= self.app.poll_files(presented);
         for tab in &mut self.app.tabs {
             for pane in &mut tab.panes {
                 changed |= pane.pending_clipboard.is_some();
@@ -617,7 +656,10 @@ impl TerminalUi {
         self.apply_settings();
         cx.notify();
     }
-    fn complete(&mut self, previous: bool, cx: &mut ViewContext<Self>) {
+    fn complete(&mut self, previous: bool, window: &mut Window, cx: &mut ViewContext<Self>) {
+        if !self.focus.is_focused(window) {
+            return;
+        }
         let session = self.session();
         if session.ime_preedit.is_empty() {
             session.term.scroll_display(Scroll::Bottom);
@@ -635,6 +677,9 @@ impl TerminalUi {
             .is_some_and(|browser| browser.read(cx).maximized())
         {
             // The hidden terminal must not receive browser or VNC keystrokes.
+            return;
+        }
+        if self.files_focus.is_focused(window) {
             return;
         }
         let key = event.keystroke.key.as_str();
@@ -1712,7 +1757,19 @@ impl Render for TerminalUi {
                     ),
             );
         }
-        tabs = tabs.child(self.button("new-tab", "+", cx, |this, _, cx| this.new_tab(cx)));
+        tabs = tabs
+            .child(self.button("new-tab", "+", cx, |this, _, cx| this.new_tab(cx)))
+            .child(
+                self.button("toggle-files", "Files / Git", cx, |this, window, cx| {
+                    this.app.toggle_files();
+                    if this.app.files_settings.visible {
+                        this.files_focus.focus(window);
+                    } else {
+                        this.focus.focus(window);
+                    }
+                    cx.notify();
+                }),
+            );
         let mut top = div()
             .flex()
             .flex_col()
@@ -1809,9 +1866,13 @@ impl Render for TerminalUi {
                 .size_full(),
             );
 
-        let content = div().flex().flex_1().min_h_0();
+        let files_visible = self.app.files_settings.visible
+            && !self.app.settings_open
+            && !self.app.about_open
+            && !browser_maximized;
+        let content = div().flex().flex_1().min_h_0().min_w_0();
         #[cfg(windows)]
-        let show_browser = !self.app.settings_open && !self.app.about_open;
+        let show_browser = !self.app.settings_open && !self.app.about_open && !files_visible;
         #[cfg(windows)]
         if !show_browser && let Some(browser) = &browser {
             let _ = browser.update(cx, |browser, cx| browser.set_visible(false, cx));
@@ -1848,6 +1909,36 @@ impl Render for TerminalUi {
         #[cfg(not(windows))]
         let content = content.child(terminal);
 
+        let content = if files_visible {
+            use gpui_component::resizable::{h_resizable, resizable_panel};
+            let panel = self.files_panel(window, cx);
+            let weak = cx.entity().downgrade();
+            h_resizable("files-split")
+                .with_state(&self.files_split)
+                .child(
+                    resizable_panel()
+                        .size_range(px(120.)..Pixels::MAX)
+                        .child(content),
+                )
+                .child(
+                    resizable_panel()
+                        .size(px(self.app.files_settings.width))
+                        .size_range(px(240.)..px(800.))
+                        .child(panel),
+                )
+                .on_resize(move |state, _, cx| {
+                    let width = state.read(cx).sizes().last().copied().map(f32::from);
+                    if let Some(width) = width {
+                        let _ = weak.update(cx, |this, _| {
+                            this.app.files_settings.width = width.clamp(240., 800.);
+                            this.app.save_files_settings();
+                        });
+                    }
+                })
+                .into_any_element()
+        } else {
+            content.into_any_element()
+        };
         let status = self.app.tabs[self.app.active].focused().status.clone();
         let footer = div()
             .flex()
@@ -1875,13 +1966,13 @@ impl Render for TerminalUi {
             .track_focus(&self.focus)
             .on_key_down(cx.listener(Self::key))
             // Override Root's Tab focus navigation only while the terminal is active.
-            .when(!blocked, |root| {
+            .when(!blocked && self.focus.is_focused(window), |root| {
                 root.key_context("Terminal")
-                    .on_action(cx.listener(|this, _: &Complete, _, cx| {
-                        this.complete(false, cx);
+                    .on_action(cx.listener(|this, _: &Complete, window, cx| {
+                        this.complete(false, window, cx);
                     }))
-                    .on_action(cx.listener(|this, _: &CompletePrevious, _, cx| {
-                        this.complete(true, cx);
+                    .on_action(cx.listener(|this, _: &CompletePrevious, window, cx| {
+                        this.complete(true, window, cx);
                     }))
             })
             .when(!browser_maximized, |root| root.child(top))
@@ -2119,6 +2210,9 @@ impl TerminalUi {
         window: &mut Window,
         cx: &mut ViewContext<Self>,
     ) {
+        if self.app.files_settings.visible {
+            self.app.toggle_files();
+        }
         let pane = self.session();
         let root = pane.child.process_id();
         let group = pane.foreground_group();
