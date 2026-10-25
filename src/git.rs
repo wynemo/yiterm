@@ -17,6 +17,8 @@ use std::{
 };
 const STATUS_BYTES: usize = 4 * 1024 * 1024;
 const DIFF_BYTES: usize = 2 * 1024 * 1024;
+const RECENT_COMMITS: usize = 50;
+const HISTORY_BYTES: usize = 1024 * 1024;
 const MAX_CHANGES: usize = 20_000;
 const MAX_LINES: usize = 50_000;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -75,6 +77,29 @@ pub enum ListRow {
     Header(Section, usize),
     Change(usize),
 }
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Commit {
+    pub id: String,
+    pub subject: String,
+    pub author: String,
+    pub when: String,
+    pub refs: Vec<String>,
+}
+impl Commit {
+    pub fn short_id(&self) -> &str {
+        &self.id[..self.id.len().min(7)]
+    }
+    pub fn details(&self) -> String {
+        format!(
+            "{}\n{} · {}\n{}\n{}",
+            self.subject,
+            self.author,
+            self.when,
+            self.id,
+            self.refs.join(", ")
+        )
+    }
+}
 #[derive(Debug, PartialEq, Eq)]
 pub struct Snapshot {
     pub root: PathBuf,
@@ -85,6 +110,8 @@ pub struct Snapshot {
     pub upstream: Option<String>,
     pub rows: Vec<ListRow>,
     pub changes: Vec<Change>,
+    pub commits: Vec<Commit>,
+    pub history_error: Option<String>,
     pub marks: HashMap<PathBuf, Mark>,
     pub dirty: HashSet<PathBuf>,
 }
@@ -183,6 +210,8 @@ fn snapshot(root: PathBuf, git_dir: PathBuf, bytes: &[u8]) -> Result<Snapshot, S
         branch: "HEAD".into(),
         upstream: None,
         changes: vec![],
+        commits: vec![],
+        history_error: None,
         rows: vec![],
         marks: HashMap::new(),
         dirty: HashSet::new(),
@@ -513,6 +542,84 @@ fn read_status(
     }
     snapshot(root, git_dir, &bytes).map(Some)
 }
+// Keep history failures separate from status so staging remains available.
+fn read_snapshot(
+    folder: &Path,
+    generation: &AtomicU64,
+    expected: u64,
+) -> Result<Option<Snapshot>, String> {
+    let Some(mut snapshot) = read_status(folder, generation, expected)? else {
+        return Ok(None);
+    };
+    if let Some(head) = &snapshot.head {
+        match read_history(&snapshot.root, head, generation, expected) {
+            Ok(commits) => snapshot.commits = commits,
+            Err(error) => snapshot.history_error = Some(error),
+        }
+    }
+    Ok(Some(snapshot))
+}
+fn read_history(
+    root: &Path,
+    head: &str,
+    generation: &AtomicU64,
+    expected: u64,
+) -> Result<Vec<Commit>, String> {
+    let (ok, bytes, error) = run(
+        root,
+        &args(&[
+            "log",
+            "-z",
+            "--no-color",
+            "--no-show-signature",
+            "--decorate=short",
+            "--encoding=UTF-8",
+            &format!("--max-count={RECENT_COMMITS}"),
+            "--format=%H%x00%s%x00%an%x00%ar%x00%D",
+            head,
+            "--",
+        ]),
+        HISTORY_BYTES,
+        generation,
+        expected,
+    )?;
+    if !ok {
+        return Err(error);
+    }
+    let mut fields: Vec<_> = bytes.split(|b| *b == 0).collect();
+    if fields.last() == Some(&&b""[..]) {
+        fields.pop();
+    }
+    if fields.len() % 5 != 0 || fields.len() / 5 > RECENT_COMMITS {
+        return Err("Malformed Git history.".into());
+    }
+    fields
+        .chunks_exact(5)
+        .map(|fields| {
+            if !matches!(fields[0].len(), 40 | 64) || !fields[0].iter().all(u8::is_ascii_hexdigit) {
+                return Err("Invalid Git commit ID.".into());
+            }
+            let text = |bytes: &[u8]| {
+                String::from_utf8_lossy(bytes)
+                    .chars()
+                    .map(|c| if c.is_control() { ' ' } else { c })
+                    .take(4096)
+                    .collect::<String>()
+            };
+            Ok(Commit {
+                id: text(fields[0]),
+                subject: text(fields[1]),
+                author: text(fields[2]),
+                when: text(fields[3]),
+                refs: text(fields[4])
+                    .split(", ")
+                    .filter(|r| !r.is_empty())
+                    .map(str::to_owned)
+                    .collect(),
+            })
+        })
+        .collect()
+}
 fn read_diff(
     root: &Path,
     change: &Change,
@@ -761,6 +868,8 @@ pub struct Controller {
     pub scroll: gpui::UniformListScrollHandle,
     #[cfg(not(target_os = "linux"))]
     pub diff_scroll: gpui::UniformListScrollHandle,
+    #[cfg(not(target_os = "linux"))]
+    pub history_scroll: gpui::UniformListScrollHandle,
 }
 impl Default for Controller {
     fn default() -> Self {
@@ -796,6 +905,8 @@ impl Default for Controller {
             scroll: Default::default(),
             #[cfg(not(target_os = "linux"))]
             diff_scroll: Default::default(),
+            #[cfg(not(target_os = "linux"))]
+            history_scroll: Default::default(),
         }
     }
 }
@@ -825,7 +936,7 @@ impl Controller {
                             }
                             Work::Status(folder) => Reply::Status(
                                 job.expected,
-                                read_status(&folder, &job.generation, job.expected),
+                                read_snapshot(&folder, &job.generation, job.expected),
                             ),
                             Work::Diff(root, change) => Reply::Diff(
                                 job.expected,
@@ -867,6 +978,7 @@ impl Controller {
             #[cfg(not(target_os = "linux"))]
             {
                 self.scroll = Default::default();
+                self.history_scroll = Default::default();
             }
         } else if self.activity != activity {
             self.activity = activity;

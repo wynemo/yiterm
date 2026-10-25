@@ -189,6 +189,121 @@ impl TerminalUi {
             })
             .into_any_element()
     }
+    fn git_history(&self, cx: &mut ViewContext<Self>) -> gpui::AnyElement {
+        let theme = self.app.theme;
+        let snapshot = self.app.git.snapshot.as_ref().unwrap();
+        let mut panel = div()
+            .w_full()
+            .min_w_0()
+            .min_h_0()
+            .flex_1()
+            .flex()
+            .flex_col()
+            .border_t_1()
+            .border_color(theme.border())
+            .child(div().px(px(6.)).py(px(4.)).child("Commits"));
+        if let Some(error) = &snapshot.history_error {
+            panel = panel.child(
+                div()
+                    .p(px(6.))
+                    .child(format!("History unavailable: {error}")),
+            );
+        } else if snapshot.commits.is_empty() {
+            panel = panel.child(div().p(px(6.)).child("No commits yet"));
+        } else {
+            panel = panel.child(
+                gpui::uniform_list(
+                    "git-commits",
+                    snapshot.commits.len(),
+                    cx.processor(move |this, range: Range<usize>, _, _| {
+                        let Some(snapshot) = &this.app.git.snapshot else {
+                            return vec![];
+                        };
+                        let wide = this.app.files_settings.width >= 480.;
+                        range
+                            .filter_map(|index| {
+                                let commit = snapshot.commits.get(index)?;
+                                let details = commit.details();
+                                Some(
+                                    div()
+                                        .id(("git-commit-row", index))
+                                        .h(px(30.))
+                                        .px(px(6.))
+                                        .flex()
+                                        .items_center()
+                                        .gap(px(6.))
+                                        .overflow_hidden()
+                                        .whitespace_nowrap()
+                                        .child(
+                                            div()
+                                                .flex_shrink_0()
+                                                .w(px(20.))
+                                                .h(px(20.))
+                                                .rounded(px(10.))
+                                                .text_center()
+                                                .bg(theme.border())
+                                                .child(
+                                                    commit
+                                                        .author
+                                                        .chars()
+                                                        .next()
+                                                        .unwrap_or('?')
+                                                        .to_uppercase()
+                                                        .to_string(),
+                                                ),
+                                        )
+                                        .when(!commit.refs.is_empty(), |d| {
+                                            d.child(
+                                                div()
+                                                    .max_w(px(if wide { 130. } else { 80. }))
+                                                    .truncate()
+                                                    .px(px(4.))
+                                                    .rounded(px(3.))
+                                                    .bg(theme.border())
+                                                    .text_color(theme.palette(4))
+                                                    .child(commit.refs.join(", ")),
+                                            )
+                                        })
+                                        .child(
+                                            div()
+                                                .flex_1()
+                                                .min_w_0()
+                                                .truncate()
+                                                .child(commit.subject.clone()),
+                                        )
+                                        .when(wide, |d| {
+                                            d.child(
+                                                div()
+                                                    .w(px(80.))
+                                                    .flex_shrink_0()
+                                                    .truncate()
+                                                    .child(commit.author.clone()),
+                                            )
+                                        })
+                                        .child(
+                                            div()
+                                                .flex_shrink_0()
+                                                .font_family("Lilex")
+                                                .child(commit.short_id().to_owned()),
+                                        )
+                                        .tooltip(move |window, cx| {
+                                            Tooltip::new(details.clone())
+                                                .max_w(px(600.))
+                                                .whitespace_normal()
+                                                .build(window, cx)
+                                        }),
+                                )
+                            })
+                            .collect::<Vec<_>>()
+                    }),
+                )
+                .track_scroll(self.app.git.history_scroll.clone())
+                .flex_1()
+                .min_h_0(),
+            );
+        }
+        panel.into_any_element()
+    }
     pub(super) fn git_panel(
         &mut self,
         window: &mut Window,
@@ -482,6 +597,9 @@ impl TerminalUi {
         }
         if self.app.git.snapshot.is_some() {
             content = content.child(self.git_commit_form(window, cx));
+            if self.app.git.selected.is_none() {
+                content = content.child(self.git_history(cx));
+            }
         } else {
             if let Some(label) = self.app.git.action_label() {
                 content = content.child(div().p(px(6.)).child(format!("{label}…")));

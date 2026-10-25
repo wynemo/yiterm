@@ -2403,7 +2403,7 @@ impl TerminalApp {
                         ui.label(notice);
                     }
                     egui::ScrollArea::vertical()
-                        .max_height((ui.available_height() - 160.).max(80.))
+                        .max_height(((ui.available_height() - 160.) * 0.5).max(40.))
                         .id_salt((
                             "git-diff",
                             git::shown(&selected.path),
@@ -2561,6 +2561,57 @@ impl TerminalApp {
             }
             if let Some(error) = self.git.action_error() {
                 ui.colored_label(self.theme.palette(1), error);
+            }
+            if self.git.selected.is_none() {
+                if let Some(snapshot) = &self.git.snapshot {
+                    ui.separator();
+                    ui.label("Commits");
+                    if let Some(error) = &snapshot.history_error {
+                        ui.colored_label(
+                            self.theme.palette(1),
+                            format!("History unavailable: {error}"),
+                        );
+                    } else if snapshot.commits.is_empty() {
+                        ui.label("No commits yet");
+                    } else {
+                        egui::ScrollArea::vertical()
+                            .id_salt(("git-commits", &snapshot.root))
+                            .show_rows(ui, 30., snapshot.commits.len(), |ui, range| {
+                                for index in range {
+                                    let commit = &snapshot.commits[index];
+                                    let wide = ui.available_width() >= 480.;
+                                    ui.horizontal(|ui| {
+                                        if !commit.refs.is_empty() {
+                                            ui.add_sized(
+                                                [if wide { 130. } else { 80. }, 26.],
+                                                egui::Label::new(
+                                                    egui::RichText::new(commit.refs.join(", "))
+                                                        .color(self.theme.palette(4)),
+                                                )
+                                                .truncate(),
+                                            )
+                                            .on_hover_text(commit.details());
+                                        }
+                                        let width = (ui.available_width()
+                                            - if wide { 125. } else { 60. })
+                                        .max(30.);
+                                        ui.add_sized(
+                                            [width, 26.],
+                                            egui::Label::new(&commit.subject).truncate(),
+                                        )
+                                        .on_hover_text(commit.details());
+                                        if wide {
+                                            ui.add_sized(
+                                                [65., 26.],
+                                                egui::Label::new(&commit.author).truncate(),
+                                            );
+                                        }
+                                        ui.monospace(commit.short_id());
+                                    });
+                                }
+                            });
+                    }
+                }
             }
         } else if let Some(label) = self.git.action_label() {
             ui.label(format!("{label}…"));
