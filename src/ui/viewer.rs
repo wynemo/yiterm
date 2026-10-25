@@ -526,7 +526,7 @@ impl TerminalUi {
                 } else {
                     data.rows.len()
                 };
-                let list = gpui::uniform_list(
+                let mut list = gpui::uniform_list(
                     if side == Some(true) {
                         "viewer-new-lines"
                     } else {
@@ -558,22 +558,26 @@ impl TerminalUi {
                 .w(px(width))
                 .h_full()
                 .track_scroll(self.viewer_scroll.clone());
-                body = body.child(
-                    div()
-                        .id(if side == Some(true) {
-                            "viewer-new-horizontal"
-                        } else {
-                            "viewer-horizontal"
-                        })
-                        .w(px(viewport))
-                        .min_w_0()
-                        .h_full()
-                        .overflow_x_scroll()
-                        .when(split && side == Some(false), |d| {
-                            d.border_r_1().border_color(theme.border())
-                        })
-                        .child(list),
-                );
+                // Nested scroll containers must not translate wheel input from
+                // the other axis: a vertical wheel used to move both the list
+                // down and the surrounding horizontal viewport sideways.
+                list.style().restrict_scroll_to_axis = Some(true);
+                let mut pane = div()
+                    .id(if side == Some(true) {
+                        "viewer-new-horizontal"
+                    } else {
+                        "viewer-horizontal"
+                    })
+                    .w(px(viewport))
+                    .min_w_0()
+                    .h_full()
+                    .overflow_x_scroll()
+                    .when(split && side == Some(false), |d| {
+                        d.border_r_1().border_color(theme.border())
+                    })
+                    .child(list);
+                pane.style().restrict_scroll_to_axis = Some(true);
+                body = body.child(pane);
             }
             panel = panel.child(body);
         } else {
