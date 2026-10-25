@@ -810,6 +810,7 @@ impl TerminalApp {
         }
         self.save_files_settings();
     }
+    #[cfg(target_os = "linux")]
     fn set_files_follow(&mut self, follow: bool) {
         self.files_settings.follow_terminal = follow;
         for tab in &mut self.tabs {
@@ -830,7 +831,9 @@ impl TerminalApp {
         if visible && !self.tabs.is_empty() {
             let tab = &mut self.tabs[self.active];
             tab.files.ensure_loaded();
-            if self.files_settings.follow_terminal
+            // Native sidebars always follow the active local terminal; legacy
+            // follow_terminal preferences only control the Linux toolbar.
+            if (cfg!(not(target_os = "linux")) || self.files_settings.follow_terminal)
                 && self.args.ssh.is_none()
                 && self.args.mosh.is_none()
             {
@@ -882,10 +885,6 @@ impl TerminalApp {
             }
         }
         changed
-    }
-    fn refresh_sidebar(&mut self) {
-        self.tabs[self.active].files.refresh();
-        self.git.refresh();
     }
     fn set_sidebar_mode(&mut self, mode: settings::FilesPanelMode) {
         self.files_settings.mode = mode;

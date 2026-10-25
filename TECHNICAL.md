@@ -368,19 +368,22 @@ Cargo 按目标平台声明依赖：Linux 不编译 GPUI；Windows / macOS 不�
 
 ## 文件与 Git 侧栏
 
-点击标签栏的 **Files / Git** 打开或收起右侧面板，在面板顶部的 **Files / Git** 标签之间切换，拖动面板分隔线调整宽度。面板显示状态、选中的标签及宽度保存在当前配置文件（支持 `--config`）。每个终端标签页分别保留根目录、目录展开状态、选择和滚动位置；这些目录状态只在本次运行中保留。
+macOS / Windows 点击窗口右上角的侧栏图标（悬停提示 **Show Git and Files / Hide Git and Files**）打开或收起右侧面板；Linux 使用标签栏的 **Files**。在面板顶部的 **Git / Files** 标签之间切换，拖动面板分隔线调整宽度。面板显示状态、选中的标签及宽度保存在当前配置文件（支持 `--config`）。每个终端标签页分别保留根目录、目录展开状态、选择和滚动位置；这些目录状态只在本次运行中保留。
 
-macOS / Windows 使用 **Folder…** 选择根目录；Linux 在路径输入框中填写目录并点击 **Go** 或按 Enter。默认使用 YiTerm 进程的启动目录，无法取得时回退到用户主目录。**↑** 返回上级，**Refresh** 重新读取目录，**Dotfiles** 切换以点开头的隐藏文件。首版不额外查询 Windows 的隐藏属性。
+macOS / Windows 侧栏采用居中的 **Git / Files** 分段切换、细线文件/文件夹图标和状态着色；浅色主题使用暖白背景，深色主题保留深色背景。不显示额外的文件工具栏或跟随开关。根目录显示名称，悬停查看完整路径；文件行使用缩进、悬停和选中背景区分层级与当前项。Linux 保留现有文字工具栏。
 
-单击目录展开或收起，单击普通文件进入 UTF-8 只读文本预览，**Back** 返回目录树。**Copy Path** 复制所选文件或目录的完整路径，**Open** 通过系统默认应用打开。文件面板内方向键导航，Enter 打开选中项；Esc 先退出预览，再返回终端焦点。macOS / Windows 的预览支持上下键和 Page Up / Page Down 滚动，也可使用鼠标滚轮。符号链接不作为目录展开，特殊文件不提供内嵌预览。错误和资源限制提示显示在面板内。
 
-Files 与 Git 默认开启 **Follow ✓**，跟随当前终端分栏的本地工作目录；切换标签页或分栏后跟随新的活动会话。点击 **Follow ✓** 可暂停，手动选择根目录或点击 **↑** 也会自动暂停，之后点击 Follow 恢复。Linux 使用 **Follow terminal directory** 复选框。macOS/Linux 及未集成的本地 shell 使用系统可获取的进程工作目录；Windows PowerShell / pwsh 使用本次会话提示符上报的真实文件系统路径。其他 shell 只在系统进程工作目录能反映当前位置时支持跟随。不解析提示符文本，不修改用户 shell 配置文件。Files 始终浏览本机文件系统，不把 SSH、WSL 或容器内部路径映射成本地文件；直接通过 `--ssh` 启动的会话暂停目录跟随。Windows 的 Files 与已有浏览器共用右栏，打开 Files 时隐藏浏览器，收起后恢复；通过 Tools 打开浏览器会收起 Files。浏览器最大化时隐藏 Files。
+macOS / Windows 的根目录自动跟随当前终端目录；Linux 在路径输入框中填写目录并点击 **Go** 或按 Enter。默认使用 YiTerm 进程的启动目录，无法取得时回退到用户主目录。Linux 的 **↑** 返回上级，**Refresh** 重新读取目录，**Dotfiles** 切换以点开头的隐藏文件。首版不额外查询 Windows 的隐藏属性。
+
+单击目录展开或收起，单击普通文件进入 UTF-8 只读文本预览，点击预览顶部文件名左侧的后退图标或按 Esc 返回目录树。Linux 另提供 **Back / Copy Path / Open** 按钮，分别返回目录树、复制完整路径和通过系统默认应用打开。文件面板内方向键导航，Enter 打开选中项；Esc 先退出预览，再返回终端焦点。macOS / Windows 的预览支持上下键和 Page Up / Page Down 滚动，也可使用鼠标滚轮。符号链接不作为目录展开，特殊文件不提供内嵌预览。错误和资源限制提示显示在面板内。
+
+macOS / Windows 的 Files 与 Git 始终跟随当前终端分栏的本地工作目录；切换标签页或分栏后自动跟随新的活动会话，不受旧配置中 `follow_terminal = false` 影响。Linux 保留 **Follow terminal directory** 复选框，手动选择根目录或点击 **↑** 会暂停跟随。macOS/Linux 及未集成的本地 shell 使用系统可获取的进程工作目录；Windows PowerShell / pwsh 使用本次会话提示符上报的真实文件系统路径。其他 shell 只在系统进程工作目录能反映当前位置时支持跟随。不解析提示符文本，不修改用户 shell 配置文件。Files 始终浏览本机文件系统，不把 SSH、WSL 或容器内部路径映射成本地文件；直接通过 `--ssh` 启动的会话暂停目录跟随。Windows 的 Files 与已有浏览器共用右栏，打开 Files 时隐藏浏览器，收起后恢复；通过 Tools 打开浏览器会收起 Files。浏览器最大化时隐藏 Files。
 
 ### Windows PowerShell 目录跟随
 
-旧的进程目录查询无法可靠反映 PowerShell runspace 的当前位置。新建 `powershell.exe`（Windows PowerShell 5.1）或 `pwsh.exe` 会话时，启动命令在正常加载用户 profiles 后，为本次会话包装现有 `prompt`。每次提示符生成时读取 `$executionContext.SessionState.Path.CurrentLocation.ProviderPath`，通过 OSC 7 file URI 报告目录。保持 **Follow ✓** 开启后，`cd` / `Set-Location`、盘符切换、文件系统 PSDrive 和 UNC 路径均使用该报告更新 Files/Git 的共同根目录。
+旧的进程目录查询无法可靠反映 PowerShell runspace 的当前位置。新建 `powershell.exe`（Windows PowerShell 5.1）或 `pwsh.exe` 会话时，启动命令在正常加载用户 profiles 后，为本次会话包装现有 `prompt`。每次提示符生成时读取 `$executionContext.SessionState.Path.CurrentLocation.ProviderPath`，通过 OSC 7 file URI 报告目录。侧栏打开时，`cd` / `Set-Location`、盘符切换、文件系统 PSDrive 和 UNC 路径均使用该报告更新 Files/Git 的共同根目录。
 
-包装调用原有 prompt 并保留其输出，不写入 `$PROFILE`，不重复加载 profiles，也不修改执行策略。脚本位于 `assets/shell-integration/powershell.ps1`，只内嵌到新建 Windows PowerShell/pwsh 的启动命令；macOS/Linux 启动方式保持原样。升级后需要新建或重建 PowerShell 标签页/分栏，已有进程不会自动安装目录报告。手动选目录会暂停 Follow，需点击 Follow 恢复。
+包装调用原有 prompt 并保留其输出，不写入 `$PROFILE`，不重复加载 profiles，也不修改执行策略。脚本位于 `assets/shell-integration/powershell.ps1`，只内嵌到新建 Windows PowerShell/pwsh 的启动命令；macOS/Linux 启动方式保持原样。升级后需要新建或重建 PowerShell 标签页/分栏，已有进程不会自动安装目录报告。
 
 `src/shell_directory.rs` 在 PTY 读取线程解析报告，支持跨读取边界的 BEL/ST 终止序列，只缓存 OSC 7，单条报告最多 16 KiB；原始输出仍交给终端解析器。每个会话使用独立标记放在 URI fragment 中，标记不导出到子进程环境。只接受匹配该会话标记的 file URI；解码、校验后去掉 fragment，再转换为 Windows 盘符或 UNC 路径，其他程序和 SSH 子会话的普通 OSC 7 不会覆盖本地目录。注册表等非 FileSystem provider 暂停目录更新并保留最后一个文件目录，不回退到过期的 Win32 进程目录。
 
@@ -399,7 +402,7 @@ Files 与 Git 默认开启 **Follow ✓**，跟随当前终端分栏的本地工
 [files]
 mode = "files" # 或 "git"
 visible = false
-follow_terminal = true
+follow_terminal = true # 仅 Linux 可关闭；macOS / Windows 始终跟随
 width = 320.0
 ```
 
@@ -411,7 +414,7 @@ width = 320.0
 
 Files 与 Git 共用 `src/git.rs` 的当前仓库快照，保留工作区根目录和独立 Git 目录身份，支持普通仓库及 worktree。文件树显示 `M/A/D/R/U/!` 标记和父目录变更圆点；同一路径同时有已暂存与未暂存修改时在 Git 中分别列出。面板切换不重复发起状态查询。非仓库、Git 未安装、查询失败或超过资源限制时在 Git 标签中显示原因。
 
-首次打开、根目录变化、窗口重新激活和手动 **Refresh** 时读取状态；活动终端的新输出安静 500ms 后合并触发一次读取。该策略用于尚未接入 Shell Integration 的命令完成刷新，不精确识别命令结束；持续输出期间不会不断刷新 Git。外部文件变化但没有终端输出或窗口激活时，可手动刷新。不轮询仓库、不监听整个目录树；侧栏关闭时取消待处理查询，并停止主动刷新。
+首次打开、根目录变化、窗口重新激活和 Linux 手动 **Refresh** 时读取状态；活动终端的新输出安静 500ms 后合并触发一次读取。该策略用于尚未接入 Shell Integration 的命令完成刷新，不精确识别命令结束；持续输出期间不会不断刷新 Git。外部文件变化后可切回窗口触发刷新；Linux 也可手动刷新。不轮询仓库、不监听整个目录树；侧栏关闭时取消待处理查询，并停止主动刷新。
 
 Git 使用独立的单个后台工作线程和容量为 1 的队列，与文件 I/O、目录跟随及 PTY 分离。状态通过 `git status --porcelain=v2 --branch -z` 读取，NUL 分隔路径，保留 Unix 路径原始字节；路径作为独立参数传递，禁用路径通配解释。只读命令关闭 optional locks 和 fsmonitor，diff 关闭外部 diff 与 textconv。只读 Git 命令限制 5 秒，状态输出最多 4 MiB、20,000 个分组变更项，diff 最多 2 MiB；显示最多 50,000 行、每行最多 4,096 字符。超时、取消或超限会停止命令；切换目录后丢弃旧结果。Git 读取不修改暂存区或提交历史。
 

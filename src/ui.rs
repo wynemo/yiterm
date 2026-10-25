@@ -15,7 +15,7 @@ use gpui::{
     canvas, div, fill, point, prelude::*, px, size,
 };
 use gpui_component::{
-    IndexPath, Root, Selectable, Sizable,
+    Icon, IconName, IndexPath, Root, Selectable, Sizable,
     button::{Button, ButtonVariants},
     input::{Input, InputEvent, InputState, NumberInput, NumberInputEvent, StepAction},
     select::{SearchableVec, Select, SelectEvent, SelectItem, SelectState},
@@ -1664,9 +1664,9 @@ impl Render for TerminalUi {
         let menu = div()
             .flex()
             .items_center()
-            .h(px(23.))
+            .h(px(28.))
             .gap(px(4.))
-            .px(px(4.))
+            .px(px(6.))
             .child(
                 self.menu_button("settings", "Settings", cx, |this, window, cx| {
                     this.app.settings_open = true;
@@ -1693,6 +1693,39 @@ impl Render for TerminalUi {
                 this.app.about_licenses = false;
                 this.menu = None;
             }));
+        let sidebar_visible = self.app.files_settings.visible;
+        let menu = menu.child(div().flex_1()).child(
+            div()
+                .id("toggle-files")
+                .size(px(24.))
+                .flex_shrink_0()
+                .flex()
+                .items_center()
+                .justify_center()
+                .rounded(px(6.))
+                .cursor_pointer()
+                .text_color(theme.foreground())
+                .hover(|d| d.bg(gpui::Hsla::from(theme.border()).opacity(0.4)))
+                .child(Icon::new(IconName::PanelRight).size(px(16.)))
+                .tooltip(move |window, cx| {
+                    Tooltip::new(if sidebar_visible {
+                        "Hide Git and Files"
+                    } else {
+                        "Show Git and Files"
+                    })
+                    .build(window, cx)
+                })
+                .on_click(cx.listener(|this, _, window, cx| {
+                    this.app.toggle_files();
+                    if this.app.files_settings.visible {
+                        this.files_focus.focus(window);
+                    } else {
+                        this.focus.focus(window);
+                    }
+                    cx.stop_propagation();
+                    cx.notify();
+                })),
+        );
         let mut tabs = div()
             .id("tabs")
             .flex()
@@ -1757,19 +1790,7 @@ impl Render for TerminalUi {
                     ),
             );
         }
-        tabs = tabs
-            .child(self.button("new-tab", "+", cx, |this, _, cx| this.new_tab(cx)))
-            .child(
-                self.button("toggle-files", "Files / Git", cx, |this, window, cx| {
-                    this.app.toggle_files();
-                    if this.app.files_settings.visible {
-                        this.files_focus.focus(window);
-                    } else {
-                        this.focus.focus(window);
-                    }
-                    cx.notify();
-                }),
-            );
+        tabs = tabs.child(self.button("new-tab", "+", cx, |this, _, cx| this.new_tab(cx)));
         let mut top = div()
             .flex()
             .flex_col()

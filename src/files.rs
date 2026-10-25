@@ -213,6 +213,7 @@ fn read_preview(path: &Path) -> Result<Preview, String> {
     })
 }
 pub struct FileState {
+    #[cfg(target_os = "linux")]
     id: u64,
     pub root: PathBuf,
     pub draft: String,
@@ -240,6 +241,7 @@ pub struct FileState {
 }
 impl Default for FileState {
     fn default() -> Self {
+        #[cfg(target_os = "linux")]
         static NEXT_ID: AtomicU64 = AtomicU64::new(1);
         let root = std::env::current_dir()
             .ok()
@@ -247,6 +249,7 @@ impl Default for FileState {
             .unwrap_or_else(|| PathBuf::from("/"));
         let (tx, rx) = mpsc::channel();
         Self {
+            #[cfg(target_os = "linux")]
             id: NEXT_ID.fetch_add(1, Ordering::Relaxed),
             draft: root.to_string_lossy().into_owned(),
             root,
@@ -280,6 +283,7 @@ impl Drop for FileState {
     }
 }
 impl FileState {
+    #[cfg(target_os = "linux")]
     pub fn identity(&self) -> u64 {
         self.id
     }
@@ -516,6 +520,7 @@ impl FileState {
         self.selected =
             selected.and_then(|path| self.rows.iter().position(|r| r.entry.path == path));
     }
+    #[cfg(target_os = "linux")]
     pub fn open(&mut self) {
         let program = if cfg!(target_os = "macos") {
             "open"

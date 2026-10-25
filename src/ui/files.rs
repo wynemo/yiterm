@@ -1,43 +1,23 @@
 use super::*;
 impl TerminalUi {
-    fn browse_files(&mut self, window: &mut Window, cx: &mut ViewContext<Self>) {
-        let paths = cx.prompt_for_paths(gpui::PathPromptOptions {
-            files: false,
-            directories: true,
-            multiple: false,
-            prompt: Some("Select Folder".into()),
-        });
-        // Keep the picker attached to its original tab, even if tabs change while it is open.
-        let tab_index = self.app.active;
-        let identity = self.app.tabs[tab_index].files.identity();
-        cx.spawn_in(window, async move |this, cx| {
-            let result = paths.await;
-            let _ = this.update_in(cx, |this, _, cx| {
-                let mut selected = false;
-                match result {
-                    Ok(Ok(Some(paths))) => {
-                        if let Some(path) = paths.first() {
-                            if let Some(tab) = this
-                                .app
-                                .tabs
-                                .iter_mut()
-                                .find(|tab| tab.files.identity() == identity)
-                            {
-                                tab.files.set_root(path.clone());
-                                selected = true;
-                            }
-                        }
-                    }
-                    Ok(Ok(None)) => {}
-                    other => this.app.error = Some(format!("Cannot select folder: {other:?}")),
-                }
-                if selected {
-                    this.app.set_files_follow(false);
-                }
-                cx.notify();
-            });
-        })
-        .detach();
+    pub(super) fn sidebar_surface(&self) -> Rgba {
+        if self.app.theme == ThemeMode::Light {
+            rgb(0xFAF9F6)
+        } else {
+            rgb(0x202228)
+        }
+    }
+    pub(super) fn sidebar_header(&self, cx: &ViewContext<Self>) -> gpui::AnyElement {
+        div()
+            .flex()
+            .items_center()
+            .justify_center()
+            .flex_shrink_0()
+            .px(px(12.))
+            .pt(px(8.))
+            .pb(px(2.))
+            .child(self.sidebar_tabs(cx))
+            .into_any_element()
     }
     pub(super) fn files_key(
         &mut self,
@@ -130,93 +110,7 @@ impl TerminalUi {
             .root
             .to_string_lossy()
             .into_owned();
-        let header = div()
-            .flex()
-            .items_center()
-            .justify_between()
-            .p(px(4.))
-            .child(self.sidebar_tabs(cx))
-            .child(
-                div()
-                    .flex()
-                    .gap(px(3.))
-                    .child(
-                        self.button("files-select", "Folder…", cx, |this, window, cx| {
-                            this.browse_files(window, cx)
-                        }),
-                    )
-                    .child(self.button("files-close", "×", cx, |this, window, cx| {
-                        this.app.toggle_files();
-                        this.focus.focus(window);
-                        cx.notify();
-                    })),
-            );
-        let toolbar = div()
-            .flex()
-            .gap(px(3.))
-            .px(px(4.))
-            .child(self.button("files-up", "↑", cx, |this, _, cx| {
-                this.app.set_files_follow(false);
-                let state = &mut this.app.tabs[this.app.active].files;
-                if let Some(path) = state.root.parent().map(|p| p.to_owned()) {
-                    state.set_root(path);
-                }
-                cx.notify();
-            }))
-            .child(self.button("files-refresh", "Refresh", cx, |this, _, cx| {
-                this.app.refresh_sidebar();
-                cx.notify();
-            }))
-            .child(self.button(
-                "files-hidden",
-                if self.app.tabs[self.app.active].files.hidden {
-                    "Hide dotfiles"
-                } else {
-                    "Dotfiles"
-                },
-                cx,
-                |this, _, cx| {
-                    let state = &mut this.app.tabs[this.app.active].files;
-                    state.hidden = !state.hidden;
-                    state.refresh();
-                    cx.notify();
-                },
-            ));
-        let follow = self.app.files_settings.follow_terminal;
-        let follow_control = self.button(
-            "files-follow",
-            if follow { "Follow ✓" } else { "Follow" },
-            cx,
-            |this, _, cx| {
-                this.app
-                    .set_files_follow(!this.app.files_settings.follow_terminal);
-                this.app.poll_files(true);
-                cx.notify();
-            },
-        );
-        let actions = div()
-            .flex()
-            .gap(px(3.))
-            .px(px(4.))
-            .when(preview, |d| {
-                d.child(self.button("files-back", "Back", cx, |this, _, cx| {
-                    this.app.tabs[this.app.active].files.back();
-                    cx.notify();
-                }))
-            })
-            .child(self.button("files-copy", "Copy Path", cx, |this, _, cx| {
-                cx.write_to_clipboard(gpui::ClipboardItem::new_string(
-                    this.app.tabs[this.app.active]
-                        .files
-                        .selected_path()
-                        .to_string_lossy()
-                        .into_owned(),
-                ));
-            }))
-            .child(self.button("files-open", "Open", cx, |this, _, cx| {
-                this.app.tabs[this.app.active].files.open();
-                cx.notify();
-            }));
+        let header = self.sidebar_header(cx);
         let state = &self.app.tabs[self.app.active].files;
         let notice = state.notice();
         let label = if let Some(preview) = &state.preview {
@@ -265,16 +159,13 @@ impl TerminalUi {
                     range
                         .filter_map(|index| {
                             let row = state.rows.get(index)?;
-                            let marker = if row.entry.directory {
-                                if state.expanded.contains(&row.entry.path) {
-                                    "▾"
-                                } else {
-                                    "▸"
-                                }
+                            let expanded = state.expanded.contains(&row.entry.path);
+                            let icon = if row.entry.directory {
+                                IconName::Folder
                             } else if row.entry.regular {
-                                "·"
+                                IconName::File
                             } else {
-                                "↗"
+                                IconName::ExternalLink
                             };
                             let badge = this.app.git.badge(&row.entry.path);
                             let name: String = row
@@ -288,16 +179,20 @@ impl TerminalUi {
                                     .id(("file-row", index))
                                     .w_full()
                                     .min_w_0()
-                                    .h(px(24.))
-                                    .pl(px(6. + row.depth.min(40) as f32 * 14.))
-                                    .pr(px(4.))
+                                    .h(px(30.))
+                                    .pl(px(26. + row.depth.min(40) as f32 * 18.))
+                                    .pr(px(12.))
                                     .overflow_hidden()
                                     .whitespace_nowrap()
                                     .cursor_pointer()
                                     .flex()
                                     .items_center()
-                                    .gap(px(4.))
-                                    .when(state.selected == Some(index), |d| d.bg(theme.border()))
+                                    .gap(px(7.))
+                                    .rounded(px(4.))
+                                    .hover(|d| d.bg(gpui::Hsla::from(theme.border()).opacity(0.25)))
+                                    .when(state.selected == Some(index), |d| {
+                                        d.bg(gpui::Hsla::from(theme.selection()).opacity(0.6))
+                                    })
                                     .when(badge.is_some(), |d| {
                                         d.text_color(theme.palette(
                                             if badge == Some("!") || badge == Some("D") {
@@ -311,13 +206,26 @@ impl TerminalUi {
                                     })
                                     .child(
                                         div()
-                                            .flex_1()
-                                            .min_w_0()
-                                            .truncate()
-                                            .child(format!("{marker} {name}")),
+                                            .w(px(12.))
+                                            .flex_shrink_0()
+                                            .text_color(theme.palette(8))
+                                            .when(row.entry.directory, |d| {
+                                                d.child(
+                                                    Icon::new(if expanded {
+                                                        IconName::ChevronDown
+                                                    } else {
+                                                        IconName::ChevronRight
+                                                    })
+                                                    .size(px(12.)),
+                                                )
+                                            }),
                                     )
+                                    .child(
+                                        Icon::new(icon).size(px(16.)).text_color(theme.palette(8)),
+                                    )
+                                    .child(div().flex_1().min_w_0().truncate().child(name))
                                     .when_some(badge, |d, badge| {
-                                        d.child(div().flex_shrink_0().pr(px(4.)).child(badge))
+                                        d.child(div().flex_shrink_0().pr(px(12.)).child(badge))
                                     })
                                     .on_click(cx.listener(move |this, _, _, cx| {
                                         this.app.tabs[this.app.active].files.activate(index);
@@ -339,8 +247,8 @@ impl TerminalUi {
             .min_w_0()
             .flex()
             .flex_col()
-            .gap(px(4.))
-            .bg(theme.surface())
+            .gap(px(0.))
+            .bg(self.sidebar_surface())
             .border_l_1()
             .border_color(theme.border())
             .track_focus(&self.files_focus)
@@ -354,9 +262,76 @@ impl TerminalUi {
                 }),
             )
             .child(header)
-            .child(toolbar.child(follow_control))
-            .child(div().px(px(6.)).truncate().child(label))
-            .child(actions)
+            .child(
+                div()
+                    .id("files-root")
+                    .flex_shrink_0()
+                    .mx(px(12.))
+                    .h(px(30.))
+                    .flex()
+                    .items_center()
+                    .gap(px(7.))
+                    .when(preview, |d| {
+                        d.child(
+                            div()
+                                .id("files-preview-back")
+                                .size(px(24.))
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .rounded(px(5.))
+                                .cursor_pointer()
+                                .text_color(theme.palette(8))
+                                .hover(|d| d.bg(gpui::Hsla::from(theme.border()).opacity(0.4)))
+                                .child(Icon::new(IconName::ArrowLeft).size(px(16.)))
+                                .tooltip(|window, cx| {
+                                    Tooltip::new("Back to files (Esc)").build(window, cx)
+                                })
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    this.app.tabs[this.app.active].files.back();
+                                    this.files_focus.focus(window);
+                                    cx.stop_propagation();
+                                    cx.notify();
+                                })),
+                        )
+                    })
+                    .when(!preview, |d| {
+                        d.child(
+                            Icon::new(IconName::ChevronDown)
+                                .size(px(12.))
+                                .text_color(theme.palette(8)),
+                        )
+                    })
+                    .child(
+                        Icon::new(if preview {
+                            IconName::File
+                        } else {
+                            IconName::FolderOpen
+                        })
+                        .size(px(16.))
+                        .text_color(theme.palette(8)),
+                    )
+                    .child(
+                        div().flex_1().min_w_0().truncate().child(
+                            std::path::Path::new(&label)
+                                .file_name()
+                                .map(|n| n.to_string_lossy().into_owned())
+                                .unwrap_or_else(|| label.clone()),
+                        ),
+                    )
+                    .when_some(self.app.git.badge(&state.root), |d, badge| {
+                        d.child(
+                            div()
+                                .text_color(theme.palette(if matches!(badge, "U" | "A") {
+                                    2
+                                } else {
+                                    3
+                                }))
+                                .child(badge),
+                        )
+                    })
+                    .tooltip(move |window, cx| Tooltip::new(label.clone()).build(window, cx)),
+            )
             .child(list)
             .when(!notice.is_empty(), |d| {
                 d.child(div().p(px(6.)).text_size(px(12.)).child(notice))

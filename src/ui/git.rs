@@ -5,21 +5,33 @@ impl TerminalUi {
     pub(super) fn sidebar_tabs(&self, cx: &ViewContext<Self>) -> gpui::AnyElement {
         let active = self.app.files_settings.mode;
         let theme = self.app.theme;
-        let mut tabs = div().flex().gap(px(2.));
+        let mut tabs = div()
+            .flex()
+            .gap(px(2.))
+            .p(px(3.))
+            .rounded(px(9.))
+            .border_1()
+            .border_color(theme.border());
         for (id, label, mode) in [
-            ("sidebar-files", "Files", settings::FilesPanelMode::Files),
             ("sidebar-git", "Git", settings::FilesPanelMode::Git),
+            ("sidebar-files", "Files", settings::FilesPanelMode::Files),
         ] {
             tabs = tabs.child(
                 div()
                     .id(id)
-                    .px(px(7.))
-                    .h(px(24.))
+                    .px(px(14.))
+                    .h(px(32.))
                     .flex()
                     .items_center()
-                    .rounded(px(3.))
+                    .rounded(px(6.))
                     .cursor_pointer()
-                    .when(active == mode, |d| d.bg(theme.border()))
+                    .text_color(theme.palette(8))
+                    .hover(|d| d.text_color(theme.foreground()))
+                    .when(active == mode, |d| {
+                        d.bg(theme.background())
+                            .text_color(theme.foreground())
+                            .shadow_sm()
+                    })
                     .child(label)
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.app.set_sidebar_mode(mode);
@@ -115,6 +127,8 @@ impl TerminalUi {
         Button::new(id)
             .label(label)
             .small()
+            .when(label == "Commit staged", |b| b.primary())
+            .when(label != "Commit staged", |b| b.ghost())
             .disabled(!enabled)
             .on_click(cx.listener(move |this, _, window, cx| {
                 action(this, window, cx);
@@ -157,7 +171,7 @@ impl TerminalUi {
             .flex()
             .flex_col()
             .gap(px(4.))
-            .p(px(6.))
+            .p(px(12.))
             .border_t_1()
             .border_color(self.app.theme.border())
             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
@@ -310,38 +324,7 @@ impl TerminalUi {
         cx: &mut ViewContext<Self>,
     ) -> gpui::AnyElement {
         let theme = self.app.theme;
-        let header = div()
-            .flex()
-            .items_center()
-            .justify_between()
-            .p(px(4.))
-            .child(self.sidebar_tabs(cx))
-            .child(self.button("git-close", "×", cx, |this, window, cx| {
-                this.app.toggle_files();
-                this.focus.focus(window);
-                cx.notify();
-            }));
-        let follow = self.app.files_settings.follow_terminal;
-        let toolbar = div()
-            .flex()
-            .gap(px(4.))
-            .px(px(4.))
-            .child(self.button("git-refresh", "Refresh", cx, |this, _, cx| {
-                this.app.git.refresh();
-                this.app.git.poll();
-                cx.notify();
-            }))
-            .child(self.button(
-                "git-follow",
-                if follow { "Follow ✓" } else { "Follow" },
-                cx,
-                |this, _, cx| {
-                    this.app
-                        .set_files_follow(!this.app.files_settings.follow_terminal);
-                    this.app.poll_files(true);
-                    cx.notify();
-                },
-            ));
+        let header = self.sidebar_header(cx);
         let message = self.app.git.message();
         let branch = self
             .app
@@ -367,7 +350,7 @@ impl TerminalUi {
             .flex()
             .flex_col()
             .gap(px(4.))
-            .bg(theme.surface())
+            .bg(self.sidebar_surface())
             .border_l_1()
             .border_color(theme.border())
             .track_focus(&self.files_focus)
@@ -381,9 +364,15 @@ impl TerminalUi {
                 }),
             )
             .child(header)
-            .child(toolbar)
-            .child(div().px(px(6.)).truncate().child(branch))
-            .child(div().px(px(6.)).truncate().child(directory));
+            .child(div().px(px(16.)).py(px(6.)).truncate().child(branch))
+            .child(
+                div()
+                    .px(px(16.))
+                    .text_size(px(11.))
+                    .text_color(theme.palette(8))
+                    .truncate()
+                    .child(directory),
+            );
         if let Some(selected) = &self.app.git.selected {
             let label = format!(
                 "{} · {}",
@@ -515,7 +504,7 @@ impl TerminalUi {
                                         };
                                         div()
                                             .id(("git-section", index))
-                                            .h(px(26.))
+                                            .h(px(32.))
                                             .px(px(6.))
                                             .flex()
                                             .items_center()
@@ -550,7 +539,7 @@ impl TerminalUi {
                                         );
                                         div()
                                             .id(("git-change", index))
-                                            .h(px(26.))
+                                            .h(px(32.))
                                             .px(px(8.))
                                             .flex()
                                             .items_center()
@@ -558,8 +547,11 @@ impl TerminalUi {
                                             .overflow_hidden()
                                             .whitespace_nowrap()
                                             .cursor_pointer()
+                                            .hover(|d| {
+                                                d.bg(gpui::Hsla::from(theme.border()).opacity(0.25))
+                                            })
                                             .when(this.app.git.cursor == Some(index), |d| {
-                                                d.bg(theme.border())
+                                                d.bg(theme.selection())
                                             })
                                             .child(div().flex_1().min_w_0().truncate().child(label))
                                             .when(section != Section::Conflicted, |d| {
