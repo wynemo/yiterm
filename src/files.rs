@@ -33,6 +33,7 @@ pub struct Directory {
     pub notice: Option<String>,
 }
 pub struct Preview {
+    pub id: uuid::Uuid,
     pub path: PathBuf,
     pub lines: Vec<String>,
     pub notice: Option<String>,
@@ -207,6 +208,7 @@ fn read_preview(path: &Path) -> Result<Preview, String> {
         }
     };
     Ok(Preview {
+        id: uuid::Uuid::new_v4(),
         path: path.to_owned(),
         lines,
         notice,

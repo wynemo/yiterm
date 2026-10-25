@@ -1,5 +1,5 @@
 use super::*;
-use crate::git::{LineKind, ListRow, Section};
+use crate::git::{ListRow, Section};
 use gpui_component::Disableable;
 impl TerminalUi {
     pub(super) fn sidebar_tabs(&self, cx: &ViewContext<Self>) -> gpui::AnyElement {
@@ -136,6 +136,74 @@ impl TerminalUi {
                 cx.notify();
             }))
             .into_any_element()
+    }
+    fn git_row_button(
+        &self,
+        id: impl Into<gpui::ElementId>,
+        icon: IconName,
+        tooltip: &'static str,
+        enabled: bool,
+        cx: &ViewContext<Self>,
+        action: impl Fn(&mut Self, &mut Window, &mut ViewContext<Self>) + 'static,
+    ) -> gpui::AnyElement {
+        Button::new(id)
+            .icon(icon)
+            .tooltip(tooltip)
+            .small()
+            .w(px(26.))
+            .h(px(26.))
+            .flex_shrink_0()
+            .ghost()
+            .disabled(!enabled)
+            .on_click(cx.listener(move |this, _, window, cx| {
+                action(this, window, cx);
+                cx.stop_propagation();
+                cx.notify();
+            }))
+            .into_any_element()
+    }
+    fn confirm_git_discard(
+        &mut self,
+        change: crate::git::Change,
+        window: &mut Window,
+        cx: &mut ViewContext<Self>,
+    ) {
+        if !self.app.git.can_act() {
+            return;
+        }
+        let Some(snapshot) = self.app.git.snapshot.clone() else {
+            return;
+        };
+        let title = format!("Discard {}?", crate::git::shown(&change.path));
+        let detail = if change.section == Section::Untracked {
+            "This deletes the untracked file or directory and its untracked contents. This cannot be undone. Ignored files and nested repositories are preserved."
+        } else if matches!(
+            change.mark,
+            crate::git::Mark::Added | crate::git::Mark::Renamed
+        ) {
+            "This deletes the added or renamed file and removes its index entry. This cannot be undone."
+        } else {
+            "This restores the working file from the index. Its unstaged changes will be lost. This cannot be undone."
+        };
+        let answer = window.prompt(
+            gpui::PromptLevel::Warning,
+            &title,
+            Some(detail),
+            &[
+                gpui::PromptButton::cancel("Cancel"),
+                gpui::PromptButton::ok("Discard"),
+            ],
+            cx,
+        );
+        cx.spawn_in(window, async move |this, cx| {
+            if answer.await.ok() == Some(1) {
+                let _ = this.update_in(cx, |this, _, cx| {
+                    this.app.git.discard(&snapshot, change);
+                    cx.notify();
+                });
+            }
+        })
+        .detach();
     }
     fn git_commit_form(
         &mut self,
@@ -331,10 +399,7 @@ impl TerminalUi {
             .git
             .snapshot
             .as_ref()
-            .map(|s| match &s.upstream {
-                Some(upstream) => format!("{} → {upstream}", s.branch),
-                None => s.branch.clone(),
-            })
+            .map(|s| s.branch.clone())
             .unwrap_or_else(|| "Git · Local".into());
         let directory = self
             .app
@@ -364,117 +429,24 @@ impl TerminalUi {
                 }),
             )
             .child(header)
-            .child(div().px(px(16.)).py(px(6.)).truncate().child(branch))
             .child(
                 div()
+                    .id("git-branch")
+                    .h(px(34.))
                     .px(px(16.))
-                    .text_size(px(11.))
-                    .text_color(theme.palette(8))
-                    .truncate()
-                    .child(directory),
-            );
-        if let Some(selected) = &self.app.git.selected {
-            let label = format!(
-                "{} · {}",
-                selected.section.label(),
-                crate::git::shown(&selected.path)
-            );
-            let change = selected.clone();
-            let action_label = match change.section {
-                Section::Staged => "Unstage",
-                _ => "Stage",
-            };
-            let action_enabled = self.app.git.can_act() && change.section != Section::Conflicted;
-            content = content
-                .child(
-                    div()
-                        .flex()
-                        .gap(px(4.))
-                        .px(px(4.))
-                        .child(self.git_action_button(
-                            "git-diff-action",
-                            action_label,
-                            action_enabled,
-                            cx,
-                            move |this, _, _| this.app.git.act_on(change.clone()),
-                        ))
-                        .child(self.button("git-back", "Back", cx, |this, _, cx| {
-                            this.app.git.back();
-                            cx.notify();
-                        }))
-                        .child(
-                            self.button("git-copy-path", "Copy Path", cx, |this, _, cx| {
-                                if let (Some(snapshot), Some(change)) =
-                                    (&this.app.git.snapshot, &this.app.git.selected)
-                                {
-                                    cx.write_to_clipboard(gpui::ClipboardItem::new_string(
-                                        snapshot
-                                            .root
-                                            .join(&change.path)
-                                            .to_string_lossy()
-                                            .into_owned(),
-                                    ));
-                                }
-                            }),
-                        ),
-                )
-                .child(div().px(px(6.)).truncate().child(label));
-            match &self.app.git.diff {
-                Some(Ok(diff)) => {
-                    let notice = diff.notice.clone();
-                    let list = gpui::uniform_list(
-                        "git-diff",
-                        diff.lines.len(),
-                        cx.processor(move |this, range: Range<usize>, _, _| {
-                            range
-                                .filter_map(|index| {
-                                    let line = this
-                                        .app
-                                        .git
-                                        .diff
-                                        .as_ref()?
-                                        .as_ref()
-                                        .ok()?
-                                        .lines
-                                        .get(index)?;
-                                    let color = match line.kind {
-                                        LineKind::Addition => theme.palette(2),
-                                        LineKind::Deletion => theme.palette(1),
-                                        LineKind::Hunk => theme.palette(4),
-                                        LineKind::Header => theme.palette(3),
-                                        LineKind::Context => theme.foreground(),
-                                    };
-                                    Some(
-                                        div()
-                                            .h(px(20.))
-                                            .px(px(6.))
-                                            .overflow_hidden()
-                                            .whitespace_nowrap()
-                                            .font_family("Lilex")
-                                            .text_color(color)
-                                            .child(line.text.clone()),
-                                    )
-                                })
-                                .collect::<Vec<_>>()
-                        }),
+                    .flex()
+                    .items_center()
+                    .gap(px(10.))
+                    .child(
+                        gpui::svg()
+                            .path("icons/git-branch.svg")
+                            .size(px(18.))
+                            .text_color(theme.palette(8)),
                     )
-                    .track_scroll(self.app.git.diff_scroll.clone())
-                    .flex_1()
-                    .min_h_0();
-                    content = content.child(list);
-                    if let Some(notice) = notice {
-                        content = content.child(div().p(px(6.)).child(notice));
-                    }
-                }
-                Some(Err(error)) => {
-                    content = content.child(div().flex_1().min_h_0().p(px(6.)).child(error.clone()))
-                }
-                None => {
-                    content =
-                        content.child(div().flex_1().min_h_0().p(px(6.)).child("Reading diff…"))
-                }
-            }
-        } else if let Some(snapshot) = &self.app.git.snapshot {
+                    .child(div().flex_1().min_w_0().truncate().child(branch))
+                    .tooltip(move |window, cx| Tooltip::new(directory.clone()).build(window, cx)),
+            );
+        if let Some(snapshot) = &self.app.git.snapshot {
             if snapshot.rows.is_empty() {
                 content = content.child(
                     div()
@@ -504,21 +476,31 @@ impl TerminalUi {
                                         };
                                         div()
                                             .id(("git-section", index))
-                                            .h(px(32.))
-                                            .px(px(6.))
+                                            .w_full()
+                                            .h(px(34.))
+                                            .px(px(10.))
                                             .flex()
                                             .items_center()
                                             .gap(px(4.))
                                             .overflow_hidden()
-                                            .child(
-                                                div().flex_1().min_w_0().truncate().child(format!(
-                                                    "{} ({count})",
+                                            .text_size(px(12.))
+                                            .text_color(theme.palette(8))
+                                            .child(div().flex_1().min_w_0().truncate().child(
+                                                if section == Section::Unstaged {
+                                                    "Changes"
+                                                } else {
                                                     section.label()
-                                                )),
-                                            )
+                                                },
+                                            ))
+                                            .child(div().flex_shrink_0().child(count.to_string()))
                                             .when(section != Section::Conflicted, |d| {
-                                                d.child(this.git_action_button(
+                                                d.child(this.git_row_button(
                                                     ("git-section-action", index),
+                                                    if section == Section::Staged {
+                                                        IconName::Minus
+                                                    } else {
+                                                        IconName::Plus
+                                                    },
                                                     label,
                                                     this.app.git.can_act(),
                                                     cx,
@@ -531,16 +513,34 @@ impl TerminalUi {
                                     ListRow::Change(change_index) => {
                                         let change = snapshot.changes[*change_index].clone();
                                         let stage_change = change.clone();
+                                        let diff_change = change.clone();
+                                        let discard_change = change.clone();
                                         let section = change.section;
-                                        let label = format!(
-                                            "{}  {}",
-                                            change.mark.label(),
-                                            crate::git::shown(&change.path)
-                                        );
+                                        let name = change
+                                            .path
+                                            .file_name()
+                                            .map(|n| crate::git::shown(std::path::Path::new(n)))
+                                            .unwrap_or_else(|| crate::git::shown(&change.path));
+                                        let parent = change
+                                            .path
+                                            .parent()
+                                            .filter(|p| !p.as_os_str().is_empty())
+                                            .map(crate::git::shown);
+                                        let color = theme.palette(match change.mark {
+                                            crate::git::Mark::Added
+                                            | crate::git::Mark::Untracked => 2,
+                                            crate::git::Mark::Deleted
+                                            | crate::git::Mark::Conflicted => 1,
+                                            _ => 3,
+                                        });
                                         div()
                                             .id(("git-change", index))
-                                            .h(px(32.))
+                                            .w_full()
+                                            .h(px(34.))
                                             .px(px(8.))
+                                            .border_1()
+                                            .border_color(gpui::transparent_black())
+                                            .rounded(px(4.))
                                             .flex()
                                             .items_center()
                                             .gap(px(4.))
@@ -551,24 +551,103 @@ impl TerminalUi {
                                                 d.bg(gpui::Hsla::from(theme.border()).opacity(0.25))
                                             })
                                             .when(this.app.git.cursor == Some(index), |d| {
-                                                d.bg(theme.selection())
+                                                d.border_color(theme.accent())
                                             })
-                                            .child(div().flex_1().min_w_0().truncate().child(label))
-                                            .when(section != Section::Conflicted, |d| {
-                                                d.child(this.git_action_button(
-                                                    ("git-row-action", index),
-                                                    if section == Section::Staged {
-                                                        "Unstage"
-                                                    } else {
-                                                        "Stage"
-                                                    },
-                                                    this.app.git.can_act(),
-                                                    cx,
-                                                    move |this, _, _| {
-                                                        this.app.git.act_on(stage_change.clone())
-                                                    },
-                                                ))
-                                            })
+                                            .child(
+                                                div()
+                                                    .size(px(22.))
+                                                    .flex_shrink_0()
+                                                    .flex()
+                                                    .items_center()
+                                                    .justify_center()
+                                                    .rounded(px(3.))
+                                                    .text_size(px(11.))
+                                                    .text_color(color)
+                                                    .bg(gpui::Hsla::from(color).opacity(0.1))
+                                                    .child(change.mark.label()),
+                                            )
+                                            .child(
+                                                div()
+                                                    .flex_1()
+                                                    .min_w_0()
+                                                    .flex()
+                                                    .items_center()
+                                                    .gap(px(7.))
+                                                    .child(
+                                                        div()
+                                                            .min_w_0()
+                                                            .max_w(px(
+                                                                if this.app.files_settings.width
+                                                                    < 400.
+                                                                {
+                                                                    130.
+                                                                } else {
+                                                                    300.
+                                                                },
+                                                            ))
+                                                            .truncate()
+                                                            .child(name),
+                                                    )
+                                                    .when_some(parent, |d, parent| {
+                                                        d.child(
+                                                            div()
+                                                                .min_w_0()
+                                                                .truncate()
+                                                                .text_color(theme.palette(8))
+                                                                .child(parent),
+                                                        )
+                                                    }),
+                                            )
+                                            .child(this.git_row_button(
+                                                ("git-row-diff", index),
+                                                IconName::File,
+                                                "View diff",
+                                                true,
+                                                cx,
+                                                move |this, _, cx| {
+                                                    this.app.git.cursor = Some(index);
+                                                    this.app.git.open(diff_change.clone());
+                                                    this.app.git.poll();
+                                                    cx.notify();
+                                                },
+                                            ))
+                                            .child(this.git_row_button(
+                                                ("git-row-discard", index),
+                                                IconName::Undo2,
+                                                "Discard changes",
+                                                this.app.git.can_act()
+                                                    && matches!(
+                                                        section,
+                                                        Section::Unstaged | Section::Untracked
+                                                    ),
+                                                cx,
+                                                move |this, window, cx| {
+                                                    this.confirm_git_discard(
+                                                        discard_change.clone(),
+                                                        window,
+                                                        cx,
+                                                    )
+                                                },
+                                            ))
+                                            .child(this.git_row_button(
+                                                ("git-row-action", index),
+                                                if section == Section::Staged {
+                                                    IconName::Minus
+                                                } else {
+                                                    IconName::Plus
+                                                },
+                                                if section == Section::Staged {
+                                                    "Unstage"
+                                                } else {
+                                                    "Stage"
+                                                },
+                                                this.app.git.can_act()
+                                                    && section != Section::Conflicted,
+                                                cx,
+                                                move |this, _, _| {
+                                                    this.app.git.act_on(stage_change.clone())
+                                                },
+                                            ))
                                             .on_click(cx.listener(move |this, _, _, cx| {
                                                 this.app.git.cursor = Some(index);
                                                 this.app.git.open(change.clone());
@@ -582,6 +661,8 @@ impl TerminalUi {
                     }),
                 )
                 .track_scroll(self.app.git.scroll.clone())
+                .w_full()
+                .px(px(8.))
                 .flex_1()
                 .min_h_0();
                 content = content.child(list);
@@ -589,9 +670,7 @@ impl TerminalUi {
         }
         if self.app.git.snapshot.is_some() {
             content = content.child(self.git_commit_form(window, cx));
-            if self.app.git.selected.is_none() {
-                content = content.child(self.git_history(cx));
-            }
+            content = content.child(self.git_history(cx));
         } else {
             if let Some(label) = self.app.git.action_label() {
                 content = content.child(div().p(px(6.)).child(format!("{label}…")));

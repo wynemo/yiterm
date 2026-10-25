@@ -3,6 +3,7 @@
 pub(crate) mod browser;
 mod files;
 mod git;
+mod viewer;
 
 use super::*;
 #[cfg(windows)]
@@ -240,6 +241,10 @@ pub(super) struct TerminalUi {
     files_focus: FocusHandle,
     git_message: gpui::Entity<InputState>,
     git_message_repo: Option<crate::git::RepoKey>,
+    viewer_request: Option<uuid::Uuid>,
+    viewer_data: Option<std::sync::Arc<viewer::ViewerData>>,
+    viewer_split: bool,
+    viewer_scroll: gpui::UniformListScrollHandle,
     files_split: gpui::Entity<gpui_component::resizable::ResizableState>,
     panes: Vec<PaneGeometry>,
     dividers: Vec<Divider>,
@@ -439,6 +444,10 @@ impl TerminalUi {
         Self {
             git_message,
             git_message_repo: None,
+            viewer_request: None,
+            viewer_data: None,
+            viewer_split: false,
+            viewer_scroll: Default::default(),
             files_focus,
             files_split,
             app,
@@ -540,7 +549,11 @@ impl TerminalUi {
         }
     }
     fn blocked(&self) -> bool {
-        self.app.settings_open || self.app.about_open || self.context_menu || self.menu.is_some()
+        self.app.settings_open
+            || self.app.about_open
+            || self.context_menu
+            || self.menu.is_some()
+            || self.viewer_open()
     }
     fn session(&mut self) -> &mut TerminalSession {
         self.app.tabs[self.app.active].focused_mut()
@@ -1893,7 +1906,10 @@ impl Render for TerminalUi {
             && !browser_maximized;
         let content = div().flex().flex_1().min_h_0().min_w_0();
         #[cfg(windows)]
-        let show_browser = !self.app.settings_open && !self.app.about_open && !files_visible;
+        let show_browser = !self.app.settings_open
+            && !self.app.about_open
+            && !files_visible
+            && !self.viewer_open();
         #[cfg(windows)]
         if !show_browser && let Some(browser) = &browser {
             let _ = browser.update(cx, |browser, cx| browser.set_visible(false, cx));
@@ -2166,6 +2182,9 @@ impl Render for TerminalUi {
                     .on_mouse_down(MouseButton::Middle, cx.listener(dismiss))
                     .child(items),
             );
+        }
+        if self.viewer_open() && !self.app.settings_open && !self.app.about_open {
+            root = root.child(self.code_viewer(window, cx));
         }
         if self.app.settings_open || self.app.about_open {
             let panel = if self.app.settings_open {
@@ -2950,11 +2969,30 @@ fn apply_component_theme(theme: ThemeMode, window: Option<&mut Window>, cx: &mut
     theme.font_size = px(13.);
 }
 
+struct UiAssets;
+impl gpui::AssetSource for UiAssets {
+    fn load(&self, path: &str) -> Result<Option<Cow<'static, [u8]>>> {
+        if path == "icons/git-branch.svg" {
+            return Ok(Some(Cow::Borrowed(include_bytes!(
+                "../assets/icons/git-branch.svg"
+            ))));
+        }
+        gpui::AssetSource::load(&gpui_component_assets::Assets, path)
+    }
+    fn list(&self, path: &str) -> Result<Vec<SharedString>> {
+        let mut assets = gpui::AssetSource::list(&gpui_component_assets::Assets, path)?;
+        if "icons/git-branch.svg".starts_with(path) {
+            assets.push("icons/git-branch.svg".into());
+        }
+        Ok(assets)
+    }
+}
+
 pub(super) fn run(app: TerminalApp) -> Result<()> {
     let result = std::rc::Rc::new(std::cell::RefCell::new(Ok(())));
     let outcome = result.clone();
     Application::new()
-        .with_assets(gpui_component_assets::Assets)
+        .with_assets(UiAssets)
         .run(move |cx: &mut App| {
             gpui_component::init(cx);
             cx.bind_keys(terminal_key_bindings());

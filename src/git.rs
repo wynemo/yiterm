@@ -153,11 +153,13 @@ pub enum LineKind {
     Header,
     Hunk,
 }
+#[derive(Clone)]
 pub struct DiffLine {
     pub text: String,
     pub kind: LineKind,
 }
 pub struct Diff {
+    pub id: uuid::Uuid,
     pub lines: Vec<DiffLine>,
     pub notice: Option<String>,
 }
@@ -667,18 +669,23 @@ fn read_diff(
         .map_err(|_| "Text diff is not UTF-8. Use Git in the terminal.".to_string())?;
     let mut shortened = false;
     let mut source = text.lines();
+    let mut in_hunk = false;
     let lines = source
         .by_ref()
         .take(MAX_LINES)
         .map(|line| {
             let kind = if change.section == Section::Untracked {
                 LineKind::Addition
+            } else if line.starts_with("diff ") {
+                in_hunk = false;
+                LineKind::Header
             } else if line.starts_with("@@") {
+                in_hunk = true;
                 LineKind::Hunk
-            } else if line.starts_with("+++")
-                || line.starts_with("---")
-                || line.starts_with("diff ")
-                || line.starts_with("index ")
+            } else if !in_hunk
+                && (line.starts_with("+++")
+                    || line.starts_with("---")
+                    || line.starts_with("index "))
             {
                 LineKind::Header
             } else if line.starts_with('+') {
@@ -709,12 +716,17 @@ fn read_diff(
     } else {
         None
     };
-    Ok(Diff { lines, notice })
+    Ok(Diff {
+        id: uuid::Uuid::new_v4(),
+        lines,
+        notice,
+    })
 }
 #[derive(Clone)]
 enum Action {
     Stage(Vec<Change>),
     Unstage(Vec<Change>),
+    Discard(Change),
     Commit(String),
 }
 impl Action {
@@ -722,6 +734,7 @@ impl Action {
         match self {
             Self::Stage(_) => "Staging",
             Self::Unstage(_) => "Unstaging",
+            Self::Discard(_) => "Discarding",
             Self::Commit(_) => "Committing",
         }
     }
@@ -783,6 +796,38 @@ fn apply_action(request: &ActionRequest) -> Result<(), String> {
             arguments.push("--pathspec-file-nul".into());
             arguments
         }
+        Action::Discard(change) => {
+            if !matches!(change.section, Section::Unstaged | Section::Untracked)
+                || !fresh.changes.contains(change)
+                || fresh.index_fingerprint != expected.index_fingerprint
+            {
+                return Err(
+                    "The change or index changed. Review it before discarding again.".into(),
+                );
+            }
+            if change.section == Section::Untracked {
+                // One literal path only. Respect ignored files and nested repositories.
+                let mut arguments = args(&["clean", "-f", "-d", "--"]);
+                arguments.push(change.path.as_os_str().to_owned());
+                arguments
+            } else {
+                for path in std::iter::once(&change.path).chain(change.from.iter()) {
+                    file.write_all(path.as_os_str().as_encoded_bytes())
+                        .and_then(|_| file.write_all(&[0]))
+                        .map_err(|e| e.to_string())?;
+                }
+                let mut arguments = if matches!(change.mark, Mark::Added | Mark::Renamed) {
+                    args(&["rm", "-f", "-q"])
+                } else {
+                    args(&["restore", "--worktree"])
+                };
+                let mut pathspec = OsString::from("--pathspec-from-file=");
+                pathspec.push(file.path());
+                arguments.push(pathspec);
+                arguments.push("--pathspec-file-nul".into());
+                arguments
+            }
+        }
         Action::Commit(message) => {
             if message.trim().is_empty() || message.len() > 64 * 1024 || message.contains('\0') {
                 return Err(
@@ -803,8 +848,8 @@ fn apply_action(request: &ActionRequest) -> Result<(), String> {
         }
     };
     file.flush().map_err(|e| e.to_string())?;
-    // No shell interpolation, --amend, worktree restore, clean, or branch changes.
-    let (ok, _, error) = run_with_timeout(
+    // No shell interpolation; every write is limited to the captured repository.
+    let (ok, output, error) = run_with_timeout(
         &expected.root,
         &std::mem::take(&mut arguments),
         STATUS_BYTES,
@@ -813,6 +858,11 @@ fn apply_action(request: &ActionRequest) -> Result<(), String> {
         Duration::from_secs(120),
     )?;
     if ok {
+        if matches!(&request.action, Action::Discard(change) if change.section == Section::Untracked)
+            && output.is_empty()
+        {
+            return Err("Git did not remove this untracked item; it may contain ignored files or a nested repository.".into());
+        }
         Ok(())
     } else {
         Err(if error.is_empty() {
@@ -1210,6 +1260,27 @@ impl Controller {
             Section::Conflicted => return,
         };
         self.enqueue(action);
+    }
+    #[cfg(not(target_os = "linux"))]
+    pub fn discard(&mut self, expected: &Snapshot, change: Change) {
+        if !self.can_act() {
+            return;
+        }
+        let current = self.snapshot.as_ref().unwrap();
+        if current.key() != expected.key()
+            || current.head != expected.head
+            || current.index_fingerprint != expected.index_fingerprint
+            || !current.changes.contains(&change)
+        {
+            self.action_error = Some((
+                expected.key(),
+                "Repository changed while confirming. Review before discarding again.".into(),
+            ));
+            return;
+        }
+        if matches!(change.section, Section::Unstaged | Section::Untracked) {
+            self.enqueue(Action::Discard(change));
+        }
     }
     pub fn act_section(&mut self, section: Section) {
         let Some(snapshot) = &self.snapshot else {
