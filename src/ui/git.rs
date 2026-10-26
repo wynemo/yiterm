@@ -692,9 +692,20 @@ impl TerminalUi {
                 content = content.child(div().p(px(6.)).child(format!("{label}…")));
             }
         }
+        // Keep the status line allocated while a repository is displayed.
+        // Background refreshes toggle "Refreshing…"; inserting/removing this
+        // footer would resize both lists and move the commit form each time.
         content
-            .when(!message.is_empty(), |d| {
-                d.child(div().p(px(6.)).text_size(px(12.)).child(message))
+            .when(self.app.git.snapshot.is_some() || !message.is_empty(), |d| {
+                d.child(
+                    div()
+                        .min_h(px(30.))
+                        .flex_shrink_0()
+                        .p(px(6.))
+                        .text_size(px(12.))
+                        .line_height(px(18.))
+                        .child(message),
+                )
             })
             .into_any_element()
     }
