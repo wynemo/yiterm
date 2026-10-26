@@ -241,6 +241,7 @@ pub(super) struct TerminalUi {
     files_focus: FocusHandle,
     git_message: gpui::Entity<InputState>,
     git_message_repo: Option<crate::git::RepoKey>,
+    git_message_synced: String,
     viewer_request: Option<uuid::Uuid>,
     viewer_data: Option<std::sync::Arc<viewer::ViewerData>>,
     viewer_split: bool,
@@ -436,6 +437,7 @@ impl TerminalUi {
                 && this.git_message_repo.as_ref() == this.app.git.draft_key()
             {
                 this.app.git.commit_message = input.read(cx).value().to_string();
+                this.git_message_synced = this.app.git.commit_message.clone();
                 cx.notify();
             }
         }));
@@ -444,6 +446,7 @@ impl TerminalUi {
         Self {
             git_message,
             git_message_repo: None,
+            git_message_synced: String::new(),
             viewer_request: None,
             viewer_data: None,
             viewer_split: false,

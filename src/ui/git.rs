@@ -212,10 +212,12 @@ impl TerminalUi {
     ) -> gpui::AnyElement {
         let key = self.app.git.draft_key().cloned();
         let message = self.app.git.commit_message.clone();
-        if self.git_message_repo != key
-            || self.git_message.read(cx).value().as_ref() != message.as_str()
-        {
+        // IME preedit changes the widget without emitting InputEvent::Change.
+        // Compare with the last synced draft so redraws preserve composition
+        // and selection instead of resetting the multiline input's cursor.
+        if self.git_message_repo != key || self.git_message_synced != message {
             self.git_message_repo = key;
+            self.git_message_synced = message.clone();
             self.git_message
                 .update(cx, |input, cx| input.set_value(message, window, cx));
         }
