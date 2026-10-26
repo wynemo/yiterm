@@ -1,4 +1,8 @@
 //! Shared Git snapshots and serialized actions. Commands never run on the UI thread.
+#[cfg(unix)]
+mod executable;
+#[cfg(unix)]
+pub use executable::Session;
 use sha2::{Digest, Sha256};
 use std::{
     collections::{HashMap, HashSet, VecDeque},
@@ -343,6 +347,7 @@ fn snapshot(root: PathBuf, git_dir: PathBuf, bytes: &[u8]) -> Result<Snapshot, S
     Ok(result)
 }
 fn run(
+    #[cfg(unix)] git: &Path,
     folder: &Path,
     args: &[OsString],
     limit: usize,
@@ -350,6 +355,8 @@ fn run(
     expected: u64,
 ) -> Result<(bool, Vec<u8>, String), String> {
     run_with_timeout(
+        #[cfg(unix)]
+        git,
         folder,
         args,
         limit,
@@ -359,6 +366,7 @@ fn run(
     )
 }
 fn run_with_timeout(
+    #[cfg(unix)] git: &Path,
     folder: &Path,
     args: &[OsString],
     limit: usize,
@@ -369,6 +377,9 @@ fn run_with_timeout(
     if generation.load(Ordering::Acquire) != expected {
         return Err("Cancelled".into());
     }
+    #[cfg(unix)]
+    let mut command = Command::new(git);
+    #[cfg(windows)]
     let mut command = Command::new("git");
     command
         .args([
@@ -382,7 +393,17 @@ fn run_with_timeout(
         .arg(folder)
         .args(args)
         .env("LC_ALL", "C")
-        .env("GIT_TERMINAL_PROMPT", "0")
+        .env("GIT_TERMINAL_PROMPT", "0");
+    capture(command, limit, generation, expected, timeout)
+}
+fn capture(
+    mut command: Command,
+    limit: usize,
+    generation: &AtomicU64,
+    expected: u64,
+    timeout: Duration,
+) -> Result<(bool, Vec<u8>, String), String> {
+    command
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
@@ -494,11 +515,14 @@ fn args(values: &[&str]) -> Vec<OsString> {
     values.iter().map(OsString::from).collect()
 }
 fn read_status(
+    #[cfg(unix)] git: &Path,
     folder: &Path,
     generation: &AtomicU64,
     expected: u64,
 ) -> Result<Option<Snapshot>, String> {
     let (ok, root, error) = run(
+        #[cfg(unix)]
+        git,
         folder,
         &args(&["rev-parse", "--show-toplevel"]),
         64 * 1024,
@@ -516,6 +540,8 @@ fn read_status(
     }
     let root = path_from_bytes(root.strip_suffix(b"\n").unwrap_or(&root))?;
     let (ok, git_dir, error) = run(
+        #[cfg(unix)]
+        git,
         &root,
         &args(&["rev-parse", "--absolute-git-dir"]),
         64 * 1024,
@@ -527,6 +553,8 @@ fn read_status(
     }
     let git_dir = path_from_bytes(git_dir.strip_suffix(b"\n").unwrap_or(&git_dir))?;
     let (ok, bytes, error) = run(
+        #[cfg(unix)]
+        git,
         &root,
         &args(&[
             "status",
@@ -546,15 +574,30 @@ fn read_status(
 }
 // Keep history failures separate from status so staging remains available.
 fn read_snapshot(
+    #[cfg(unix)] git: &Path,
     folder: &Path,
     generation: &AtomicU64,
     expected: u64,
 ) -> Result<Option<Snapshot>, String> {
-    let Some(mut snapshot) = read_status(folder, generation, expected)? else {
+    let Some(mut snapshot) = read_status(
+        #[cfg(unix)]
+        git,
+        folder,
+        generation,
+        expected,
+    )?
+    else {
         return Ok(None);
     };
     if let Some(head) = &snapshot.head {
-        match read_history(&snapshot.root, head, generation, expected) {
+        match read_history(
+            #[cfg(unix)]
+            git,
+            &snapshot.root,
+            head,
+            generation,
+            expected,
+        ) {
             Ok(commits) => snapshot.commits = commits,
             Err(error) => snapshot.history_error = Some(error),
         }
@@ -562,12 +605,15 @@ fn read_snapshot(
     Ok(Some(snapshot))
 }
 fn read_history(
+    #[cfg(unix)] git: &Path,
     root: &Path,
     head: &str,
     generation: &AtomicU64,
     expected: u64,
 ) -> Result<Vec<Commit>, String> {
     let (ok, bytes, error) = run(
+        #[cfg(unix)]
+        git,
         root,
         &args(&[
             "log",
@@ -623,6 +669,7 @@ fn read_history(
         .collect()
 }
 fn read_diff(
+    #[cfg(unix)] git: &Path,
     root: &Path,
     change: &Change,
     generation: &AtomicU64,
@@ -656,7 +703,15 @@ fn read_diff(
         if let Some(from) = &change.from {
             arguments.push(from.as_os_str().into());
         }
-        let (ok, bytes, error) = run(root, &arguments, DIFF_BYTES, generation, expected)?;
+        let (ok, bytes, error) = run(
+            #[cfg(unix)]
+            git,
+            root,
+            &arguments,
+            DIFF_BYTES,
+            generation,
+            expected,
+        )?;
         if !ok {
             return Err(error);
         }
@@ -740,17 +795,25 @@ impl Action {
     }
 }
 struct ActionRequest {
+    #[cfg(unix)]
+    session: Arc<Session>,
     id: uuid::Uuid,
     snapshot: Arc<Snapshot>,
     action: Action,
 }
-fn apply_action(request: &ActionRequest) -> Result<(), String> {
+fn apply_action(#[cfg(unix)] git: &Path, request: &ActionRequest) -> Result<(), String> {
     // A view disappearing never cancels a write. This private token stays valid
     // for validation and the command, whose target was captured at click time.
     let token = AtomicU64::new(0);
     let expected = &request.snapshot;
-    let fresh = read_status(&expected.root, &token, 0)?
-        .ok_or("The repository no longer exists. Refresh before retrying.")?;
+    let fresh = read_status(
+        #[cfg(unix)]
+        git,
+        &expected.root,
+        &token,
+        0,
+    )?
+    .ok_or("The repository no longer exists. Refresh before retrying.")?;
     if fresh.key() != expected.key()
         || fresh.head != expected.head
         || fresh.branch != expected.branch
@@ -850,6 +913,8 @@ fn apply_action(request: &ActionRequest) -> Result<(), String> {
     file.flush().map_err(|e| e.to_string())?;
     // No shell interpolation; every write is limited to the captured repository.
     let (ok, output, error) = run_with_timeout(
+        #[cfg(unix)]
+        git,
         &expected.root,
         &std::mem::take(&mut arguments),
         STATUS_BYTES,
@@ -878,6 +943,8 @@ enum Work {
     Diff(PathBuf, Change),
 }
 struct Job {
+    #[cfg(unix)]
+    session: Arc<Session>,
     work: Work,
     generation: Arc<AtomicU64>,
     expected: u64,
@@ -887,7 +954,42 @@ enum Reply {
     Status(u64, Result<Option<Snapshot>, String>),
     Diff(u64, Result<Diff, String>),
 }
+fn process_job(#[cfg(unix)] git: &Path, job: Job) -> Reply {
+    match job.work {
+        Work::Action(request) => Reply::Action(
+            request.id,
+            apply_action(
+                #[cfg(unix)]
+                git,
+                &request,
+            ),
+        ),
+        Work::Status(folder) => Reply::Status(
+            job.expected,
+            read_snapshot(
+                #[cfg(unix)]
+                git,
+                &folder,
+                &job.generation,
+                job.expected,
+            ),
+        ),
+        Work::Diff(root, change) => Reply::Diff(
+            job.expected,
+            read_diff(
+                #[cfg(unix)]
+                git,
+                &root,
+                &change,
+                &job.generation,
+                job.expected,
+            ),
+        ),
+    }
+}
 pub struct Controller {
+    #[cfg(unix)]
+    session: Option<Arc<Session>>,
     pub snapshot: Option<Arc<Snapshot>>,
     pub error: Option<String>,
     pub outside: bool,
@@ -925,6 +1027,8 @@ impl Default for Controller {
     fn default() -> Self {
         let (tx, rx) = mpsc::channel();
         Self {
+            #[cfg(unix)]
+            session: None,
             snapshot: None,
             error: None,
             outside: false,
@@ -980,19 +1084,23 @@ impl Controller {
                         {
                             continue;
                         }
-                        let reply = match job.work {
-                            Work::Action(request) => {
-                                Reply::Action(request.id, apply_action(&request))
+                        #[cfg(unix)]
+                        let reply = {
+                            let folder = match &job.work {
+                                Work::Action(request) => &request.snapshot.root,
+                                Work::Status(folder) | Work::Diff(folder, _) => folder,
+                            };
+                            match job.session.resolve(folder, &job.generation, job.expected) {
+                                Ok(git) => process_job(&git, job),
+                                Err(error) => match job.work {
+                                    Work::Action(request) => Reply::Action(request.id, Err(error)),
+                                    Work::Status(_) => Reply::Status(job.expected, Err(error)),
+                                    Work::Diff(_, _) => Reply::Diff(job.expected, Err(error)),
+                                },
                             }
-                            Work::Status(folder) => Reply::Status(
-                                job.expected,
-                                read_snapshot(&folder, &job.generation, job.expected),
-                            ),
-                            Work::Diff(root, change) => Reply::Diff(
-                                job.expected,
-                                read_diff(&root, &change, &job.generation, job.expected),
-                            ),
                         };
+                        #[cfg(windows)]
+                        let reply = process_job(job);
                         if replies.send(reply).is_err() {
                             break;
                         }
@@ -1004,9 +1112,26 @@ impl Controller {
         }
         self.tx.as_ref().unwrap()
     }
-    pub fn sync(&mut self, folder: Option<&Path>, activity: Option<(uuid::Uuid, u64)>) -> bool {
+    pub fn sync(
+        &mut self,
+        folder: Option<&Path>,
+        activity: Option<(uuid::Uuid, u64)>,
+        #[cfg(unix)] session: Option<&Arc<Session>>,
+    ) -> bool {
         let mut changed = false;
-        if self.folder.as_deref() != folder {
+        #[cfg(unix)]
+        let session_changed = match (&self.session, session) {
+            (Some(old), Some(new)) => !Arc::ptr_eq(old, new),
+            (None, None) => false,
+            _ => true,
+        };
+        #[cfg(windows)]
+        let session_changed = false;
+        if self.folder.as_deref() != folder || session_changed {
+            #[cfg(unix)]
+            {
+                self.session = session.cloned();
+            }
             self.status_generation.fetch_add(1, Ordering::AcqRel);
             self.loading = false;
             self.back();
@@ -1014,10 +1139,11 @@ impl Controller {
             self.read_folder = None;
             self.error = None;
             self.outside = false;
-            if !self
-                .snapshot
-                .as_ref()
-                .is_some_and(|s| folder.is_some_and(|p| p.starts_with(&s.root)))
+            if session_changed
+                || !self
+                    .snapshot
+                    .as_ref()
+                    .is_some_and(|s| folder.is_some_and(|p| p.starts_with(&s.root)))
             {
                 self.snapshot = None;
             }
@@ -1038,6 +1164,23 @@ impl Controller {
             self.due = Instant::now() + Duration::from_millis(500);
         }
         changed | self.poll()
+    }
+    #[cfg(unix)]
+    pub fn redetect(&mut self) {
+        if self.busy() {
+            return;
+        }
+        if let Some(session) = &self.session {
+            session.invalidate();
+        }
+        self.status_generation.fetch_add(1, Ordering::AcqRel);
+        self.loading = false;
+        self.read_folder = None;
+        self.snapshot = None;
+        self.error = None;
+        self.outside = false;
+        self.back();
+        self.refresh();
     }
     pub fn refresh(&mut self) {
         if self.selected.is_some() {
@@ -1134,6 +1277,8 @@ impl Controller {
         if let Some(request) = &self.action {
             if !self.action_queued {
                 let job = Job {
+                    #[cfg(unix)]
+                    session: request.session.clone(),
                     work: Work::Action(request.clone()),
                     generation: Arc::new(AtomicU64::new(0)),
                     expected: 0,
@@ -1148,9 +1293,15 @@ impl Controller {
         if self.folder.is_none() {
             return changed;
         }
+        #[cfg(unix)]
+        if self.session.is_none() {
+            return changed;
+        }
         if self.diff_pending && !self.diff_queued {
             if let (Some(snapshot), Some(change)) = (&self.snapshot, &self.selected) {
                 let job = Job {
+                    #[cfg(unix)]
+                    session: self.session.as_ref().unwrap().clone(),
                     work: Work::Diff(snapshot.root.clone(), change.clone()),
                     generation: self.diff_generation.clone(),
                     expected: self.diff_generation.load(Ordering::Acquire),
@@ -1163,6 +1314,8 @@ impl Controller {
         }
         if self.dirty && !self.loading && Instant::now() >= self.due {
             let job = Job {
+                #[cfg(unix)]
+                session: self.session.as_ref().unwrap().clone(),
                 work: Work::Status(self.folder.clone().unwrap()),
                 generation: self.status_generation.clone(),
                 expected: self.status_generation.load(Ordering::Acquire),
@@ -1247,6 +1400,8 @@ impl Controller {
         self.back();
         self.action = Some(Arc::new(ActionRequest {
             id: uuid::Uuid::new_v4(),
+            #[cfg(unix)]
+            session: self.session.as_ref().unwrap().clone(),
             snapshot,
             action,
         }));

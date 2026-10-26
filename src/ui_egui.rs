@@ -2473,6 +2473,13 @@ impl TerminalApp {
         }
     }
     fn show_git_body(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
+        if ui
+            .add_enabled(!self.git.busy(), egui::Button::new("Detect Git again"))
+            .clicked()
+        {
+            self.git.redetect();
+            self.git.poll();
+        }
         let mut file_action = None;
         let mut section_action = None;
         if let Some(snapshot) = &self.git.snapshot {

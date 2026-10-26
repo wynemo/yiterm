@@ -107,6 +107,8 @@ struct TerminalOutput {
     directory: Option<Option<std::path::PathBuf>>,
 }
 struct TerminalSession {
+    #[cfg(unix)]
+    git_session: Arc<git::Session>,
     log_id: uuid::Uuid,
     output_revision: u64,
     title: String,
@@ -164,6 +166,8 @@ impl TerminalSession {
             pixel_height: 0,
         })?;
         let mut directory_token = None;
+        #[cfg(unix)]
+        let mut session_shell = settings::default_shell();
         let mut command = if let Some(host) = &args.ssh {
             integration.direct(host)?
         } else if let Some(host) = &args.mosh {
@@ -179,6 +183,10 @@ impl TerminalSession {
                     .unwrap_or_else(logging::config_path)?;
                 settings::load_shell(&path)?.executable(None)?
             };
+            #[cfg(unix)]
+            {
+                session_shell = shell.clone();
+            }
             directory_token = shell_directory::token_for(&shell);
             integration.shell_with_directory(&shell, directory_token.as_deref())?
         };
@@ -230,6 +238,8 @@ impl TerminalSession {
         let (paste_sender, paste_result) = mpsc::channel();
         tracing::info!(session_id = %log_id, child_pid = ?child.process_id(), "Terminal session started");
         Ok(Self {
+            #[cfg(unix)]
+            git_session: Arc::new(git::Session::new(session_shell)),
             log_id,
             output_revision: 0,
             title: args
@@ -806,7 +816,12 @@ impl TerminalApp {
             for tab in &mut self.tabs {
                 tab.files.cancel();
             }
-            self.git.sync(None, None);
+            self.git.sync(
+                None,
+                None,
+                #[cfg(unix)]
+                None,
+            );
         }
         self.save_files_settings();
     }
@@ -860,7 +875,14 @@ impl TerminalApp {
             let pane = self.tabs[self.active].focused();
             (pane.log_id, pane.output_revision)
         });
-        changed |= self.git.sync(folder.as_deref(), activity);
+        #[cfg(unix)]
+        let session = active.then(|| &self.tabs[self.active].focused().git_session);
+        changed |= self.git.sync(
+            folder.as_deref(),
+            activity,
+            #[cfg(unix)]
+            session,
+        );
         let acted = self.git.take_acted();
         if !acted.is_empty() {
             for (index, tab) in self.tabs.iter_mut().enumerate() {

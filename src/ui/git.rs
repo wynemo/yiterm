@@ -428,24 +428,38 @@ impl TerminalUi {
                     cx.stop_propagation();
                 }),
             )
-            .child(header)
-            .child(
-                div()
-                    .id("git-branch")
-                    .h(px(34.))
-                    .px(px(16.))
-                    .flex()
-                    .items_center()
-                    .gap(px(10.))
-                    .child(
-                        gpui::svg()
-                            .path("icons/git-branch.svg")
-                            .size(px(18.))
-                            .text_color(theme.palette(8)),
-                    )
-                    .child(div().flex_1().min_w_0().truncate().child(branch))
-                    .tooltip(move |window, cx| Tooltip::new(directory.clone()).build(window, cx)),
+            .child(header);
+        #[cfg(unix)]
+        {
+            content = content.child(
+                Button::new("git-redetect")
+                    .label("Detect Git again")
+                    .small()
+                    .disabled(self.app.git.busy())
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.app.git.redetect();
+                        this.app.git.poll();
+                        cx.notify();
+                    })),
             );
+        }
+        content = content.child(
+            div()
+                .id("git-branch")
+                .h(px(34.))
+                .px(px(16.))
+                .flex()
+                .items_center()
+                .gap(px(10.))
+                .child(
+                    gpui::svg()
+                        .path("icons/git-branch.svg")
+                        .size(px(18.))
+                        .text_color(theme.palette(8)),
+                )
+                .child(div().flex_1().min_w_0().truncate().child(branch))
+                .tooltip(move |window, cx| Tooltip::new(directory.clone()).build(window, cx)),
+        );
         if let Some(snapshot) = &self.app.git.snapshot {
             if snapshot.rows.is_empty() {
                 content = content.child(
