@@ -218,7 +218,7 @@ impl Drop for SocksListener {
 
 async fn serve_socks_control(
     pipe_name: String,
-    connection: Arc<russh::client::Handle<super::auth::Handler>>,
+    connection: Arc<super::connection::Connection>,
 ) -> Result<()> {
     let mut pipe = create_pipe_server(&pipe_name, true)?;
     let mut socks: Option<SocksListener> = None;
@@ -665,7 +665,11 @@ fn run_client(real_ssh: &Path, directory: &Path, args: Vec<OsString>, mosh: bool
 }
 
 fn run_inner(real_ssh: &Path, directory: &Path, args: Vec<OsString>, mosh: bool) -> Result<i32> {
-    let config = config::resolve(real_ssh, &args)?;
+    let mut config = config::resolve(real_ssh, &args)?;
+    if mosh && config.keepalive.is_none() {
+        config.keepalive = Some(Duration::from_secs(30));
+        config.keepalive_max = 3;
+    }
     let udp_host = config.host.clone();
     let osc52_pipe = super::osc52_pipe_name(directory)?;
     let console = Console::enter()?;
@@ -673,21 +677,34 @@ fn run_inner(real_ssh: &Path, directory: &Path, args: Vec<OsString>, mosh: bool)
         .enable_all()
         .build()?;
     let result = runtime.block_on(async {
-        let prompt: Arc<dyn Prompt> = Arc::new(ConsolePrompt);
+        let session_prompt = mosh.then(|| Arc::new(super::auth::SessionPrompt::new(Arc::new(ConsolePrompt), &config)));
+        let prompt: Arc<dyn Prompt> = match &session_prompt {
+            Some(prompt) => prompt.clone(),
+            None => Arc::new(ConsolePrompt),
+        };
+        let reconnect = mosh.then(|| {
+            let mut config = config.clone();
+            config.attempts = 1;
+            (config, prompt.clone(), real_ssh.to_path_buf())
+        });
         let handle = Arc::new(if config.proxy_jump.is_some() {
             super::connect_via_proxyjump(config, prompt, real_ssh).await?
         } else {
             super::connect(config, prompt).await?
         });
+        if let Some(prompt) = &session_prompt {
+            prompt.seal();
+        }
         console.enable_terminal_input()?;
         let mut size = console.size()?;
         let endpoint = if mosh {
             Some(crate::mosh::bootstrap(&handle, &udp_host).await?)
         } else { None };
+        let auxiliary = Arc::new(super::connection::Connection::new(handle.clone(), reconnect));
         let name = super::pipe_name(directory, std::process::id())?;
         let pipe = create_pipe_server(&name, true)?;
         let upload_pipe_name = name.clone();
-        let connection = handle.clone();
+        let connection = auxiliary.clone();
         let uploads = tokio::spawn(async move {
             let mut pending_connection = tokio::spawn(async move {
                 pipe.connect().await?;
@@ -750,7 +767,7 @@ fn run_inner(real_ssh: &Path, directory: &Path, args: Vec<OsString>, mosh: bool)
             }
         });
         let socks_pipe = format!("{name}-socks");
-        let socks_connection = handle.clone();
+        let socks_connection = auxiliary.clone();
         let socks = tokio::spawn(async move {
             if let Err(error) = serve_socks_control(socks_pipe, socks_connection).await {
                 tracing::warn!(error = %format!("{error:#}"), "SSH SOCKS control pipe stopped");
@@ -860,7 +877,7 @@ fn run_inner(real_ssh: &Path, directory: &Path, args: Vec<OsString>, mosh: bool)
         let _ = uploads.await;
         socks.abort();
         let _ = socks.await;
-        let _ = tokio::time::timeout(Duration::from_secs(2), handle.disconnect(russh::Disconnect::ByApplication, "Session closed", "en")).await;
+        auxiliary.close().await;
         result
     });
     runtime.shutdown_timeout(Duration::from_secs(1));

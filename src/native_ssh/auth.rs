@@ -7,12 +7,66 @@ use russh::{
         ssh_key::known_hosts::{HostPatterns, KnownHosts, Marker},
     },
 };
-use std::sync::Arc;
+use std::sync::{
+    Arc, Mutex,
+    atomic::{AtomicBool, Ordering},
+};
 use zeroize::Zeroizing;
 
 /// Implementations read from the wrapper's console, never from terminal logs.
 pub trait Prompt: Send + Sync {
     fn ask(&self, message: &str, secret: bool) -> Result<String>;
+}
+
+/// Session-only credential replay. Once sealed, background requests never read
+/// the terminal, which is owned by Mosh. Secrets are wiped on process exit/drop.
+pub struct SessionPrompt {
+    inner: Arc<dyn Prompt>,
+    password_prompt: String,
+    answers: Mutex<std::collections::HashMap<String, Zeroizing<String>>>,
+    sealed: AtomicBool,
+}
+
+impl SessionPrompt {
+    pub fn new(inner: Arc<dyn Prompt>, config: &Config) -> Self {
+        Self {
+            inner,
+            password_prompt: format!("{}@{} password: ", config.user, config.host),
+            answers: Mutex::new(Default::default()),
+            sealed: AtomicBool::new(false),
+        }
+    }
+
+    pub fn seal(&self) {
+        self.sealed.store(true, Ordering::Release);
+    }
+}
+
+impl Prompt for SessionPrompt {
+    fn ask(&self, message: &str, secret: bool) -> Result<String> {
+        // Only reusable password/passphrase prompts, never arbitrary MFA answers.
+        let reusable = secret
+            && (message == self.password_prompt
+                || message.starts_with("Passphrase for key '")
+                || message
+                    .lines()
+                    .last()
+                    .is_some_and(|line| line.trim().eq_ignore_ascii_case("password:")));
+        if self.sealed.load(Ordering::Acquire) {
+            if reusable && let Some(answer) = self.answers.lock().unwrap().get(message) {
+                return Ok(answer.to_string());
+            }
+            bail!("SSH reconnect requires new authentication; reconnect the terminal session");
+        }
+        let answer = self.inner.ask(message, secret)?;
+        if reusable {
+            self.answers
+                .lock()
+                .unwrap()
+                .insert(message.to_owned(), Zeroizing::new(answer.clone()));
+        }
+        Ok(answer)
+    }
 }
 
 pub async fn ask(
@@ -31,6 +85,18 @@ pub struct Handler {
 }
 impl client::Handler for Handler {
     type Error = anyhow::Error;
+    async fn disconnected(&mut self, reason: client::DisconnectReason<Self::Error>) -> Result<()> {
+        match reason {
+            client::DisconnectReason::ReceivedDisconnect(info) => {
+                tracing::info!(reason = ?info.reason_code, message = %info.message, "SSH connection disconnected");
+                Ok(())
+            }
+            client::DisconnectReason::Error(error) => {
+                tracing::warn!(error = %format!("{error:#}"), "SSH connection ended");
+                Err(error)
+            }
+        }
+    }
     async fn check_server_key(&mut self, presented: &PublicKeyOrCertificate) -> Result<bool> {
         ensure!(
             presented.certificate().is_none(),

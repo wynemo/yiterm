@@ -9,7 +9,7 @@ use tokio::{
 
 pub async fn serve(
     listener: TcpListener,
-    connection: Arc<russh::client::Handle<super::auth::Handler>>,
+    connection: Arc<super::connection::Connection>,
 ) -> Result<()> {
     const MAX_CLIENTS: usize = 128;
     let mut clients = JoinSet::new();
@@ -35,7 +35,7 @@ pub async fn serve(
 
 async fn serve_socks_client(
     mut client: TcpStream,
-    connection: Arc<russh::client::Handle<super::auth::Handler>>,
+    connection: Arc<super::connection::Connection>,
 ) -> Result<()> {
     let version = client.read_u8().await?;
     let methods = client.read_u8().await? as usize;
@@ -83,15 +83,12 @@ async fn serve_socks_client(
     };
     let port = client.read_u16().await?;
     tracing::debug!(%host, port, "Opening SSH SOCKS TCP channel");
-    let channel = match connection
-        .channel_open_direct_tcpip(&host, u32::from(port), "127.0.0.1", 0)
-        .await
-    {
+    let channel = match connection.open_tcp(&host, port).await {
         Ok(channel) => channel,
         Err(error) => {
             write_socks_reply(&mut client, 1).await?;
-            tracing::warn!(%host, port, %error, "SSH server refused SOCKS TCP forwarding");
-            return Err(error).context("SSH server refused TCP forwarding");
+            tracing::warn!(%host, port, %error, "Could not open SSH SOCKS TCP forwarding");
+            return Err(error).context("Could not open SSH TCP forwarding");
         }
     };
     tracing::debug!(%host, port, "SSH SOCKS TCP channel opened");

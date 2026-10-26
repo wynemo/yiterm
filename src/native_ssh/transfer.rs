@@ -1,6 +1,5 @@
-use super::{auth::Handler, expect_success};
+use super::{connection::Connection, expect_success};
 use anyhow::{Context, Result, ensure};
-use russh::client;
 use russh_sftp::{
     client::SftpSession,
     protocol::{FileAttributes, OpenFlags},
@@ -94,8 +93,8 @@ async fn respond<S: AsyncWrite + Unpin>(stream: &mut S, result: &Result<String>)
     Ok(())
 }
 
-async fn sftp(handle: &client::Handle<Handler>) -> Result<SftpSession> {
-    let mut channel = handle.channel_open_session().await?;
+async fn sftp(handle: &Connection) -> Result<SftpSession> {
+    let mut channel = handle.open_session().await?;
     channel.request_subsystem(true, "sftp").await?;
     expect_success(&mut channel)
         .await
@@ -130,7 +129,7 @@ async fn write_image(
 
 pub async fn serve_one<S: AsyncRead + AsyncWrite + Unpin>(
     stream: &mut S,
-    handle: &client::Handle<Handler>,
+    handle: &Connection,
 ) -> Result<()> {
     let bytes = match tokio::time::timeout(Duration::from_secs(15), receive(stream)).await {
         Ok(Ok(bytes)) => bytes,

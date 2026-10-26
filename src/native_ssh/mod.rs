@@ -2,6 +2,7 @@
 //! image transfers use independent channels; credentials never cross GUI IPC.
 pub mod auth;
 pub mod config;
+pub mod connection;
 pub mod osc52;
 pub mod socks;
 pub mod transfer;
@@ -42,11 +43,24 @@ pub async fn connect_via_proxyjump(
     prompt: Arc<dyn Prompt>,
     real_ssh: &Path,
 ) -> Result<client::Handle<Handler>> {
+    connect_proxyjump(config, prompt, real_ssh, false).await
+}
+
+pub(crate) async fn connect_proxyjump(
+    config: Config,
+    prompt: Arc<dyn Prompt>,
+    real_ssh: &Path,
+    background: bool,
+) -> Result<client::Handle<Handler>> {
     let proxy_jump = config
         .proxy_jump
         .as_deref()
         .context("Missing ProxyJump configuration")?;
     let mut command = tokio::process::Command::new(real_ssh);
+    if background {
+        // A background reconnect must never prompt on the Mosh console.
+        command.args(["-o", "BatchMode=yes"]);
+    }
     command
         .args(proxyjump_args(&config.host, config.port, proxy_jump))
         .env_remove("YITERM_REAL_SSH")
