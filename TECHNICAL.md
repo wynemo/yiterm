@@ -17,6 +17,9 @@ Rust 原生终端，Windows / macOS 使用 GPUI 0.2.2，Linux 保留原有 egui 
 ```sh
 gh auth login
 python scripts/download_latest.py
+# 只下载指定平台
+python scripts/download_latest.py windows
+python scripts/download_latest.py linux
 ```
 
 首次运行前执行 `gh auth login`，脚本通过 `gh api` 复用登录状态，也支持 gh 的 `GH_TOKEN` / `GITHUB_TOKEN` 环境变量。脚本默认同时下载 Windows x64 和 Linux x64，分别选择默认分支最新有对应平台产物、未过期的 push 构建。校验 SHA-256 后，把 Windows 的 `yiterm.exe`、`bin/ssh.exe`、`bin/mosh.exe`、`conpty.dll`、`OpenConsole.exe` 和 Linux 的 `yiterm` 写入当前目录（覆盖同名文件），并为 Linux 程序设置可执行权限（`0755`）。所有请求的平台下载、校验完成后才开始替换现有文件。可用 `--branch main` 指定分支，或用 `--output 路径` 指定目录。

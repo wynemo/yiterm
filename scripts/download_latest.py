@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Download the latest available Windows and Linux builds into the current directory.
+"""Download the latest available Windows and/or Linux builds into the current directory.
 
 Requires GitHub CLI (gh). Run gh auth login before using this script.
 """
@@ -102,10 +102,13 @@ def unpack(data, platform):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("platform", nargs="?", choices=("windows", "linux"),
+                        help="只下载指定平台，默认同时下载 Windows 和 Linux")
     parser.add_argument("--repo", default="wynemo/yiterm", help="GitHub owner/repo")
     parser.add_argument("--branch", help="默认使用仓库默认分支")
     parser.add_argument("--output", type=Path, default=Path.cwd(), help="输出目录，默认当前目录")
     args = parser.parse_args()
+    platforms = (f"{args.platform}-x64",) if args.platform else PLATFORMS
     if len(args.repo.split("/")) != 2 or any(not p or p in (".", "..") for p in args.repo.split("/")):
         parser.error("--repo 必须是 owner/repo")
     if not shutil.which("gh"):
@@ -116,7 +119,7 @@ def main():
     # Stage and validate every requested platform before replacing existing files.
     with tempfile.TemporaryDirectory(prefix=".yiterm-download-", dir=args.output) as staging:
         filenames = []
-        for platform in PLATFORMS:
+        for platform in platforms:
             run, artifact = latest_artifact(api, branch, platform)
             print(f"下载 {artifact['name']}\n构建：{run['html_url']}", flush=True)
             data = api.get(f"/actions/artifacts/{artifact['id']}/zip")
