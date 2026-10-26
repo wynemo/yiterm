@@ -1,6 +1,20 @@
 # Prompt wrapping approach adapted from ELYTerminal (MIT); see licenses/elyterminal-MIT.txt.
 # Installed only in this new session, after the user's normal profiles have run.
 # Keep the existing prompt, including Starship/Oh My Posh, and its return value.
+# Older PSReadLine restores the console background between tokens, then its
+# stock default-token color changes only the foreground. Reset both channels
+# for plain arguments so they do not inherit a black console background.
+# Do this in the session, after profiles, without replacing custom token colors.
+try {
+    if (Get-Command Get-PSReadLineOption -ErrorAction Ignore) {
+        $yitermReadLineOptions = Get-PSReadLineOption
+        $yitermEscape = [string][char]27
+        if ($yitermReadLineOptions.DefaultTokenColor -eq ($yitermEscape + '[37m') -or
+            $yitermReadLineOptions.DefaultTokenColor -eq ($yitermEscape + '[97m')) {
+            Set-PSReadLineOption -Colors @{ Default = ($yitermEscape + '[39;49m') } -ErrorAction Stop
+        }
+    }
+} catch { }
 $global:YiTermDirectoryOriginalPrompt = $function:prompt
 $global:YiTermDirectoryToken = '__YITERM_DIRECTORY_TOKEN__'
 function global:prompt {
