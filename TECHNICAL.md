@@ -368,16 +368,16 @@ Cargo 按目标平台声明依赖：Linux 不编译 GPUI；Windows / macOS 不�
 
 ## 文件与 Git 侧栏
 
-macOS / Windows 点击窗口右上角的侧栏图标（悬停提示 **Show Git and Files / Hide Git and Files**）打开或收起右侧面板；Linux 使用标签栏的 **Files**。在面板顶部的 **Git / Files** 标签之间切换，拖动面板分隔线调整宽度。面板显示状态、选中的标签及宽度保存在当前配置文件（支持 `--config`）。每个终端标签页分别保留根目录、目录展开状态、选择和滚动位置；这些目录状态只在本次运行中保留。
+点击窗口右上角的侧栏图标（悬停提示 **Show Git and Files / Hide Git and Files**）打开或收起右侧面板。在面板顶部的 **Git / Files** 标签之间切换，拖动面板分隔线调整宽度。面板显示状态、选中的标签及宽度保存在当前配置文件（支持 `--config`）。每个终端标签页分别保留根目录、目录展开状态、选择和滚动位置；这些目录状态只在本次运行中保留。
 
-macOS / Windows 侧栏采用居中的 **Git / Files** 分段切换、细线文件/文件夹图标和状态着色；浅色主题使用暖白背景，深色主题保留深色背景。不显示额外的文件工具栏或跟随开关。根目录显示名称，悬停查看完整路径；文件行使用缩进、悬停和选中背景区分层级与当前项。Linux 保留现有文字工具栏。
+所有平台的侧栏采用居中的 **Git / Files** 分段切换、细线文件/文件夹图标和状态着色；浅色主题使用暖白背景，深色主题保留深色背景。不显示额外的文件工具栏或跟随开关。根目录显示名称，悬停查看完整路径；文件行使用缩进、悬停和选中背景区分层级与当前项。Linux 保留 egui / OpenGL 后端，侧栏同步使用相同的布局和配色。
 
 
-macOS / Windows 的根目录自动跟随当前终端目录；Linux 在路径输入框中填写目录并点击 **Go** 或按 Enter。默认使用 YiTerm 进程的启动目录，无法取得时回退到用户主目录。Linux 的 **↑** 返回上级，**Refresh** 重新读取目录，**Dotfiles** 切换以点开头的隐藏文件。首版不额外查询 Windows 的隐藏属性。
+根目录自动跟随当前终端目录。默认使用 YiTerm 进程的启动目录，无法取得时回退到用户主目录。Linux 右键点击根目录行可使用 **Refresh** 重新读取目录、**Dotfiles** 切换以点开头的隐藏文件，以及 **Copy Path / Open** 复制路径或通过系统默认应用打开。首版不额外查询 Windows 的隐藏属性。
 
-单击目录展开或收起，单击普通文件进入 UTF-8 只读文本预览，点击预览大面板右上角的关闭按钮或按 Esc 返回目录树。Linux 另提供 **Back / Copy Path / Open** 按钮，分别返回目录树、复制完整路径和通过系统默认应用打开。文件面板内方向键导航，Enter 打开选中项；Esc 先退出预览，再返回终端焦点。macOS / Windows 的预览支持上下键和 Page Up / Page Down 滚动，也可使用鼠标滚轮。符号链接不作为目录展开，特殊文件不提供内嵌预览。错误和资源限制提示显示在面板内。
+单击目录展开或收起，单击普通文件进入 UTF-8 只读文本预览，点击预览大面板右上角的关闭按钮或按 Esc 返回目录树。Linux 点击预览顶部带返回箭头的文件名或按 Esc 返回目录树。文件面板内方向键导航，Enter 打开选中项；Esc 先退出预览，再返回终端焦点。macOS / Windows 的预览支持上下键和 Page Up / Page Down 滚动，也可使用鼠标滚轮。符号链接不作为目录展开，特殊文件不提供内嵌预览。错误和资源限制提示显示在面板内。
 
-macOS / Windows 的 Files 与 Git 始终跟随当前终端分栏的本地工作目录；切换标签页或分栏后自动跟随新的活动会话，不受旧配置中 `follow_terminal = false` 影响。Linux 保留 **Follow terminal directory** 复选框，手动选择根目录或点击 **↑** 会暂停跟随。macOS/Linux 及未集成的本地 shell 使用系统可获取的进程工作目录；Windows PowerShell / pwsh 使用本次会话提示符上报的真实文件系统路径。其他 shell 只在系统进程工作目录能反映当前位置时支持跟随。不解析提示符文本，不修改用户 shell 配置文件。Files 始终浏览本机文件系统，不把 SSH、WSL 或容器内部路径映射成本地文件；直接通过 `--ssh` 启动的会话暂停目录跟随。Windows 的 Files 与已有浏览器共用右栏，打开 Files 时隐藏浏览器，收起后恢复；通过 Tools 打开浏览器会收起 Files。浏览器最大化时隐藏 Files。
+所有平台的 Files 与 Git 始终跟随当前终端分栏的本地工作目录；切换标签页或分栏后自动跟随新的活动会话，不受旧配置中 `follow_terminal = false` 影响。macOS/Linux 及未集成的本地 shell 使用系统可获取的进程工作目录；Windows PowerShell / pwsh 使用本次会话提示符上报的真实文件系统路径。其他 shell 只在系统进程工作目录能反映当前位置时支持跟随。不解析提示符文本，不修改用户 shell 配置文件。Files 始终浏览本机文件系统，不把 SSH、WSL 或容器内部路径映射成本地文件；直接通过 `--ssh` 启动的会话暂停目录跟随。Windows 的 Files 与已有浏览器共用右栏，打开 Files 时隐藏浏览器，收起后恢复；通过 Tools 打开浏览器会收起 Files。浏览器最大化时隐藏 Files。
 
 ### Windows PowerShell 目录跟随
 
@@ -402,7 +402,7 @@ macOS / Windows 的 Files 与 Git 始终跟随当前终端分栏的本地工作�
 [files]
 mode = "files" # 或 "git"
 visible = false
-follow_terminal = true # 仅 Linux 可关闭；macOS / Windows 始终跟随
+follow_terminal = true # 兼容旧配置保留；所有平台始终跟随
 width = 320.0
 ```
 

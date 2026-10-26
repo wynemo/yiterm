@@ -810,14 +810,6 @@ impl TerminalApp {
         }
         self.save_files_settings();
     }
-    #[cfg(target_os = "linux")]
-    fn set_files_follow(&mut self, follow: bool) {
-        self.files_settings.follow_terminal = follow;
-        for tab in &mut self.tabs {
-            tab.files.pause_follow();
-        }
-        self.save_files_settings();
-    }
     fn poll_files(&mut self, presented: bool) -> bool {
         let visible =
             self.files_settings.visible && presented && !self.settings_open && !self.about_open;
@@ -831,12 +823,9 @@ impl TerminalApp {
         if visible && !self.tabs.is_empty() {
             let tab = &mut self.tabs[self.active];
             tab.files.ensure_loaded();
-            // Native sidebars always follow the active local terminal; legacy
-            // follow_terminal preferences only control the Linux toolbar.
-            if (cfg!(not(target_os = "linux")) || self.files_settings.follow_terminal)
-                && self.args.ssh.is_none()
-                && self.args.mosh.is_none()
-            {
+            // All sidebars follow the active local terminal, including when
+            // upgrading a configuration with the legacy follow flag disabled.
+            if self.args.ssh.is_none() && self.args.mosh.is_none() {
                 let pane = tab.focused();
                 if let Some(directory) = pane.reported_directory.clone() {
                     // A prompt report is authoritative for PowerShell's logical

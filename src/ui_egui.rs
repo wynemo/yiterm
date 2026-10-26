@@ -1,4 +1,4 @@
-//! Original Linux egui/eframe interface, sharing the terminal model with GPUI.
+//! Linux egui/eframe interface, sharing the terminal model and sidebar design with GPUI.
 use super::*;
 use eframe::egui::{self, Color32, FontId, Key, Rect, Vec2};
 fn terminal_cell_rect(origin: egui::Pos2, cell: Vec2, column: usize, row: usize) -> Rect {
@@ -884,17 +884,38 @@ impl eframe::App for TerminalApp {
                         ui.close();
                     }
                 });
-                if ui
-                    .selectable_label(self.files_settings.visible, "Files")
-                    .clicked()
-                {
-                    self.toggle_files();
-                    self.files_focused = self.files_settings.visible;
-                }
                 if ui.button("About").clicked() {
                     self.about_open = true;
                     self.about_licenses = false;
                 }
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    let (rect, response) =
+                        ui.allocate_exact_size(Vec2::splat(24.), egui::Sense::click());
+                    let response = response.on_hover_text(if self.files_settings.visible {
+                        "Hide Git and Files"
+                    } else {
+                        "Show Git and Files"
+                    });
+                    if response.hovered() {
+                        ui.painter()
+                            .rect_filled(rect, 6., self.theme.border().gamma_multiply(0.4));
+                    }
+                    let icon = rect.shrink(4.);
+                    let stroke = egui::Stroke::new(1., self.theme.foreground());
+                    ui.painter()
+                        .rect_stroke(icon, 2., stroke, egui::StrokeKind::Inside);
+                    ui.painter().line_segment(
+                        [
+                            egui::pos2(icon.right() - 5., icon.top()),
+                            egui::pos2(icon.right() - 5., icon.bottom()),
+                        ],
+                        stroke,
+                    );
+                    if response.clicked() {
+                        self.toggle_files();
+                        self.files_focused = self.files_settings.visible;
+                    }
+                });
             });
             egui::ScrollArea::horizontal()
                 .id_salt("tabs")
@@ -2073,11 +2094,131 @@ fn configure_fonts_for(ctx: &egui::Context, family: &str) {
     ctx.set_fonts(fonts);
 }
 
+// Paint sidebar rows explicitly so their alignment and icons do not depend on
+// egui's centered button labels or the desktop's available symbol fonts.
+fn sidebar_row(
+    ui: &mut egui::Ui,
+    theme: ThemeMode,
+    name: &str,
+    indent: f32,
+    directory: bool,
+    expanded: bool,
+    selected: bool,
+    badge: Option<&str>,
+) -> egui::Response {
+    let (rect, response) =
+        ui.allocate_exact_size(Vec2::new(ui.available_width(), 30.), egui::Sense::click());
+    if !ui.is_rect_visible(rect) {
+        return response;
+    }
+    let painter = ui.painter();
+    if selected || response.hovered() {
+        painter.rect_filled(
+            rect,
+            4.,
+            if selected {
+                theme.selection().gamma_multiply(0.6)
+            } else {
+                theme.border().gamma_multiply(0.25)
+            },
+        );
+    }
+    let x = rect.left() + indent;
+    let y = rect.center().y;
+    let stroke = egui::Stroke::new(1., theme.palette(8));
+    if directory {
+        let points = if expanded {
+            vec![
+                egui::pos2(x + 3., y - 2.),
+                egui::pos2(x + 6., y + 1.),
+                egui::pos2(x + 9., y - 2.),
+            ]
+        } else {
+            vec![
+                egui::pos2(x + 4., y - 4.),
+                egui::pos2(x + 7., y),
+                egui::pos2(x + 4., y + 4.),
+            ]
+        };
+        painter.add(egui::Shape::line(points, stroke));
+    }
+    let icon = egui::pos2(x + 19., y - 8.);
+    let points = if directory {
+        vec![
+            (0., 3.),
+            (0., 1.),
+            (6., 1.),
+            (8., 4.),
+            (15., 4.),
+            (15., 14.),
+            (0., 14.),
+            (0., 3.),
+            (7., 3.),
+        ]
+    } else {
+        vec![
+            (2., 1.),
+            (9., 1.),
+            (14., 6.),
+            (14., 15.),
+            (2., 15.),
+            (2., 1.),
+        ]
+    };
+    painter.add(egui::Shape::line(
+        points
+            .into_iter()
+            .map(|(x, y)| icon + Vec2::new(x, y))
+            .collect(),
+        stroke,
+    ));
+    if !directory {
+        painter.add(egui::Shape::line(
+            vec![
+                icon + Vec2::new(9., 1.),
+                icon + Vec2::new(9., 6.),
+                icon + Vec2::new(14., 6.),
+            ],
+            stroke,
+        ));
+    }
+    let color = badge.map_or(theme.foreground(), |badge| {
+        theme.palette(match badge {
+            "!" | "D" => 1,
+            "A" | "U" => 2,
+            _ => 3,
+        })
+    });
+    let right = rect.right() - if badge.is_some() { 26. } else { 4. };
+    let text_rect = Rect::from_min_max(
+        egui::pos2(x + 42., rect.top()),
+        egui::pos2(right.max(x + 42.), rect.bottom()),
+    );
+    let name: String = name
+        .chars()
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .collect();
+    painter.with_clip_rect(rect.intersect(text_rect)).text(
+        egui::pos2(x + 42., y),
+        egui::Align2::LEFT_CENTER,
+        name,
+        FontId::proportional(13.),
+        color,
+    );
+    if let Some(badge) = badge {
+        painter.text(
+            egui::pos2(rect.right() - 12., y),
+            egui::Align2::RIGHT_CENTER,
+            badge,
+            FontId::proportional(12.),
+            color,
+        );
+    }
+    response.on_hover_cursor(egui::CursorIcon::PointingHand)
+}
+
 impl TerminalApp {
     fn show_files(&mut self, ctx: &egui::Context) {
-        let mut close = false;
-        let mut manual_root = false;
-        let mut follow_changed = false;
         let mut scroll_selected = false;
         let mut mode_changed = false;
         if self.files_settings.mode == settings::FilesPanelMode::Git {
@@ -2122,79 +2263,104 @@ impl TerminalApp {
             .default_width(self.files_settings.width)
             .width_range(240.0..=800.0)
             .resizable(true)
+            .frame(
+                egui::Frame::NONE
+                    .fill(if self.theme == ThemeMode::Light {
+                        rgb(0xFAF9F6)
+                    } else {
+                        rgb(0x202228)
+                    })
+                    .inner_margin(egui::Margin::symmetric(12, 8))
+                    .stroke(egui::Stroke::new(1., self.theme.border())),
+            )
             .show(ctx, |ui| {
+                ui.spacing_mut().item_spacing.y = 0.;
                 if ctx.input(|i| i.pointer.any_pressed()) && ui.rect_contains_pointer(ui.max_rect())
                 {
                     self.files_focused = true;
                 }
                 ui.horizontal(|ui| {
-                    for (mode, label) in [
-                        (settings::FilesPanelMode::Files, "Files"),
-                        (settings::FilesPanelMode::Git, "Git"),
-                    ] {
-                        if ui
-                            .selectable_label(self.files_settings.mode == mode, label)
-                            .clicked()
-                        {
-                            self.files_settings.mode = mode;
-                            self.git.back();
-                            mode_changed = true;
-                        }
-                    }
-                    if ui.button("×").clicked() {
-                        close = true;
-                    }
+                    ui.add_space(((ui.available_width() - 144.) / 2.).max(0.));
+                    egui::Frame::NONE
+                        .inner_margin(3.)
+                        .corner_radius(9.)
+                        .stroke(egui::Stroke::new(1., self.theme.border()))
+                        .show(ui, |ui| {
+                            ui.spacing_mut().item_spacing.x = 2.;
+                            for (mode, label) in [
+                                (settings::FilesPanelMode::Git, "Git"),
+                                (settings::FilesPanelMode::Files, "Files"),
+                            ] {
+                                let active = self.files_settings.mode == mode;
+                                let response = ui.add_sized(
+                                    [68., 32.],
+                                    egui::Button::new(egui::RichText::new(label).size(13.).color(
+                                        if active {
+                                            self.theme.foreground()
+                                        } else {
+                                            self.theme.palette(8)
+                                        },
+                                    ))
+                                    .fill(if active {
+                                        self.theme.background()
+                                    } else {
+                                        Color32::TRANSPARENT
+                                    })
+                                    .stroke(egui::Stroke::NONE)
+                                    .corner_radius(6.),
+                                );
+                                if response.clicked() {
+                                    self.files_settings.mode = mode;
+                                    self.git.back();
+                                    mode_changed = true;
+                                }
+                            }
+                        });
                 });
+                ui.add_space(2.);
                 if self.files_settings.mode == settings::FilesPanelMode::Git {
                     self.show_git_body(ui, ctx);
                     return;
                 }
-                follow_changed = ui
-                    .checkbox(
-                        &mut self.files_settings.follow_terminal,
-                        "Follow terminal directory",
-                    )
-                    .changed();
                 let state = &mut self.tabs[self.active].files;
-                ui.horizontal(|ui| {
-                    if ui.button("↑").clicked() {
-                        if let Some(path) = state.root.parent().map(|p| p.to_owned()) {
-                            state.set_root(path);
-                            manual_root = true;
-                        }
-                    }
+                let preview = state.preview_path.is_some();
+                let path = if preview {
+                    state.selected_path()
+                } else {
+                    &state.root
+                };
+                let label = path
+                    .file_name()
+                    .map(|name| name.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| path.to_string_lossy().into_owned());
+                let label = if preview {
+                    format!("‹ {label}")
+                } else {
+                    label
+                };
+                let root = sidebar_row(ui, self.theme, &label, 0., !preview, true, false, None)
+                    .on_hover_text(path.to_string_lossy());
+                if preview && root.clicked() {
+                    state.back();
+                }
+                root.context_menu(|ui| {
                     if ui.button("Refresh").clicked() {
-                        self.git.refresh();
                         state.refresh();
+                        self.git.refresh();
+                        ui.close();
                     }
                     if ui.checkbox(&mut state.hidden, "Dotfiles").changed() {
                         state.refresh();
                     }
-                });
-                ui.horizontal(|ui| {
-                    let response = ui.add(
-                        egui::TextEdit::singleline(&mut state.draft)
-                            .desired_width((ui.available_width() - 45.).max(40.)),
-                    );
-                    if ui.button("Go").clicked()
-                        || (response.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter)))
-                    {
-                        state.set_root(std::path::PathBuf::from(&state.draft));
-                        manual_root = true;
-                    }
-                });
-                ui.horizontal(|ui| {
-                    if state.preview_path.is_some() && ui.button("Back").clicked() {
-                        state.back();
-                    }
                     if ui.button("Copy Path").clicked() {
                         ctx.copy_text(state.selected_path().to_string_lossy().into_owned());
+                        ui.close();
                     }
                     if ui.button("Open").clicked() {
                         state.open();
+                        ui.close();
                     }
                 });
-                ui.label(state.selected_path().to_string_lossy());
                 let notice = state.notice();
                 if !notice.is_empty() {
                     ui.label(notice);
@@ -2221,40 +2387,25 @@ impl TerminalApp {
                     ));
                     if scroll_selected {
                         area =
-                            area.vertical_scroll_offset(state.selected.unwrap_or(0) as f32 * 24.);
+                            area.vertical_scroll_offset(state.selected.unwrap_or(0) as f32 * 30.);
                     }
-                    area.show_rows(ui, 24., state.rows.len(), |ui, range| {
+                    area.show_rows(ui, 30., state.rows.len(), |ui, range| {
                         for index in range {
                             let row = &state.rows[index];
-                            let marker = if row.entry.directory {
-                                if state.expanded.contains(&row.entry.path) {
-                                    "▾"
-                                } else {
-                                    "▸"
-                                }
-                            } else if row.entry.regular {
-                                "·"
-                            } else {
-                                "↗"
-                            };
-                            ui.horizontal(|ui| {
-                                ui.add_space(row.depth.min(40) as f32 * 14.);
-                                let response = ui.add_sized(
-                                    [ui.available_width(), 24.],
-                                    egui::Button::selectable(
-                                        state.selected == Some(index),
-                                        format!(
-                                            "{marker} {}  {}",
-                                            row.entry.name,
-                                            self.git.badge(&row.entry.path).unwrap_or("")
-                                        ),
-                                    )
-                                    .truncate(),
-                                );
-                                if response.clicked() {
-                                    activate = Some(index);
-                                }
-                            });
+                            let response = sidebar_row(
+                                ui,
+                                self.theme,
+                                &row.entry.name,
+                                14. + row.depth.min(40) as f32 * 18.,
+                                row.entry.directory,
+                                state.expanded.contains(&row.entry.path),
+                                state.selected == Some(index),
+                                self.git.badge(&row.entry.path),
+                            )
+                            .on_hover_text(row.entry.path.to_string_lossy());
+                            if response.clicked() {
+                                activate = Some(index);
+                            }
                         }
                     });
                     if let Some(index) = activate {
@@ -2265,19 +2416,10 @@ impl TerminalApp {
         if mode_changed {
             self.save_files_settings();
         }
-        if manual_root {
-            self.set_files_follow(false);
-        } else if follow_changed {
-            self.set_files_follow(self.files_settings.follow_terminal);
-        }
         let width = panel.response.rect.width().clamp(240., 800.);
         if (self.files_settings.width - width).abs() > 1. && !ctx.input(|i| i.pointer.any_down()) {
             self.files_settings.width = width;
             self.save_files_settings();
-        }
-        if close {
-            self.toggle_files();
-            self.files_focused = false;
         }
     }
 }
@@ -2333,18 +2475,6 @@ impl TerminalApp {
     fn show_git_body(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
         let mut file_action = None;
         let mut section_action = None;
-        ui.horizontal(|ui| {
-            if ui.button("Refresh").clicked() {
-                self.git.refresh();
-                self.git.poll();
-            }
-            if ui
-                .checkbox(&mut self.files_settings.follow_terminal, "Follow")
-                .changed()
-            {
-                self.set_files_follow(self.files_settings.follow_terminal);
-            }
-        });
         if let Some(snapshot) = &self.git.snapshot {
             ui.label(&snapshot.branch);
             ui.add(egui::Label::new(git::shown(&snapshot.root)).truncate());
@@ -2444,13 +2574,13 @@ impl TerminalApp {
             egui::ScrollArea::vertical()
                 .max_height((ui.available_height() - 160.).max(80.))
                 .id_salt(("git-changes", &snapshot.root))
-                .show_rows(ui, 26., snapshot.rows.len(), |ui, range| {
+                .show_rows(ui, 30., snapshot.rows.len(), |ui, range| {
                     for index in range {
                         match &snapshot.rows[index] {
                             git::ListRow::Header(section, count) => {
                                 ui.horizontal(|ui| {
                                     ui.add_sized(
-                                        [(ui.available_width() - 92.).max(20.), 26.],
+                                        [(ui.available_width() - 92.).max(20.), 30.],
                                         egui::Label::new(
                                             egui::RichText::new(format!(
                                                 "{} ({count})",
@@ -2480,18 +2610,24 @@ impl TerminalApp {
                             git::ListRow::Change(change_index) => {
                                 let change = &snapshot.changes[*change_index];
                                 ui.horizontal(|ui| {
-                                    let response = ui.add_sized(
-                                        [(ui.available_width() - 70.).max(20.), 26.],
-                                        egui::Button::selectable(
-                                            self.git.cursor == Some(index),
-                                            format!(
-                                                "{}  {}",
-                                                change.mark.label(),
-                                                git::shown(&change.path)
-                                            ),
+                                    let response = ui
+                                        .allocate_ui_with_layout(
+                                            Vec2::new((ui.available_width() - 70.).max(20.), 30.),
+                                            egui::Layout::top_down(egui::Align::Min),
+                                            |ui| {
+                                                sidebar_row(
+                                                    ui,
+                                                    self.theme,
+                                                    &git::shown(&change.path),
+                                                    0.,
+                                                    false,
+                                                    false,
+                                                    self.git.cursor == Some(index),
+                                                    Some(change.mark.label()),
+                                                )
+                                            },
                                         )
-                                        .truncate(),
-                                    );
+                                        .inner;
                                     if self.git.cursor == Some(index)
                                         && ctx.input(|i| {
                                             i.key_pressed(Key::ArrowUp)
