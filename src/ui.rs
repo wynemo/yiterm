@@ -2247,6 +2247,21 @@ impl TerminalUi {
     }
 
     #[cfg(windows)]
+    fn close_other_web_browsers(&mut self, tab_id: u64, cx: &mut ViewContext<Self>) {
+        // Only one panel owns the shared profile. VNC has independent profiles.
+        for tab in &mut self.app.tabs {
+            if tab.id != tab_id
+                && let Some(browser) = &tab.browser
+            {
+                let empty = browser.update(cx, |browser, cx| browser.close_web_tabs(cx));
+                if empty {
+                    tab.browser = None;
+                }
+            }
+        }
+    }
+
+    #[cfg(windows)]
     fn open_ssh_browser(
         &mut self,
         initial_url: String,
@@ -2308,24 +2323,33 @@ impl TerminalUi {
             match result {
                 Ok((tunnel, pid)) => {
                     let reused = this.update_in(cx, |this, window, cx| {
-                        let Some(tab) = this.app.tabs.iter().find(|tab| tab.id == tab_id) else {
-                            return false;
-                        };
+                        if !this.app.tabs.iter().any(|tab| tab.id == tab_id) {
+                            return true;
+                        }
+                        if initial_url != "yiterm:vnc" {
+                            this.close_other_web_browsers(tab_id, cx);
+                        }
+                        let background = this.app.tabs[this.app.active].id != tab_id;
+                        let tab = this.app.tabs.iter_mut().find(|tab| tab.id == tab_id).unwrap();
                         if let Some(browser) = &tab.browser
                             && browser.read(cx).ssh_pid() == pid
                         {
                             browser.update(cx, |browser, cx| {
                                 browser.open_tab(initial_url.clone(), window, cx);
-                                if this.app.tabs[this.app.active].id != tab_id {
+                                if background {
                                     browser.set_visible(false, cx);
                                 }
                             });
                             cx.notify();
                             return true;
                         }
+                        if let Some(browser) = tab.browser.take() {
+                            browser.update(cx, |browser, cx| browser.close(cx));
+                        }
+                        cx.notify();
                         false
                     });
-                    if matches!(reused, Ok(true)) { return; }
+                    if !matches!(reused, Ok(false)) { return; }
                     let browser = match cx.new_window_entity(|window, cx| {
                         browser::BrowserUi::new(tunnel, pid, initial_url, window, cx)
                     }) {
@@ -2345,7 +2369,7 @@ impl TerminalUi {
                             return false;
                         };
                         cx.subscribe(&browser, move |this, browser, _: &browser::CloseBrowser, cx| {
-                            browser.update(cx, |browser, cx| browser.set_visible(false, cx));
+                            browser.update(cx, |browser, cx| browser.close(cx));
                             if let Some(tab) = this.app.tabs.iter_mut().find(|tab| tab.id == tab_id)
                                 && tab.browser.as_ref() == Some(&browser)
                             {
@@ -2354,6 +2378,22 @@ impl TerminalUi {
                             cx.notify();
                         }).detach();
                         tab.browser = Some(browser.clone());
+                        cx.subscribe_in(&browser, window, move |this, browser, event: &browser::OpenWebTab, window, cx| {
+                            if !this.app.tabs.iter().any(|tab| {
+                                tab.id == tab_id && tab.browser.as_ref() == Some(&browser)
+                            }) {
+                                return;
+                            }
+                            this.close_other_web_browsers(tab_id, cx);
+                            let background = this.app.tabs[this.app.active].id != tab_id;
+                            browser.update(cx, |browser, cx| {
+                                browser.open_tab(event.0.clone(), window, cx);
+                                if background {
+                                    browser.set_visible(false, cx);
+                                }
+                            });
+                            cx.notify();
+                        }).detach();
                         cx.observe(&browser, |_, _, cx| cx.notify()).detach();
                         if this.app.tabs[this.app.active].id != tab_id {
                             browser.update(cx, |browser, cx| browser.set_visible(false, cx));

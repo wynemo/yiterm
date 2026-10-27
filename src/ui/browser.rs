@@ -6,7 +6,11 @@ use gpui_component::{
     input::{Input, InputEvent, InputState},
 };
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
-use std::{path::Path, rc::Rc};
+use std::{
+    os::windows::ffi::OsStrExt,
+    path::{Path, PathBuf},
+    rc::Rc,
+};
 use webview2_com::{
     CoreWebView2EnvironmentOptions, CreateCoreWebView2ControllerCompletedHandler,
     CreateCoreWebView2EnvironmentCompletedHandler, Microsoft::Web::WebView2::Win32::*,
@@ -14,11 +18,45 @@ use webview2_com::{
     NewWindowRequestedEventHandler,
 };
 use windows::{
-    Win32::Foundation::{E_POINTER, HWND, RECT},
+    Win32::Foundation::{E_POINTER, ERROR_INVALID_STATE, HWND, RECT},
     core::{BOOL, PCWSTR, PWSTR},
 };
 
 const TOOLBAR_HEIGHT: f32 = 50.;
+
+// Only VNC profiles are temporary. Web pages always use the same on-disk data.
+enum BrowserProfile {
+    Persistent(PathBuf),
+    Temporary(tempfile::TempDir),
+}
+
+impl BrowserProfile {
+    fn persistent() -> anyhow::Result<Self> {
+        let path = directories::BaseDirs::new()
+            .context("Cannot locate local browser data directory")?
+            .data_local_dir()
+            .join("yiterm/browser");
+        std::fs::create_dir_all(&path)
+            .with_context(|| format!("Cannot create browser data directory: {}", path.display()))?;
+        Ok(Self::Persistent(path))
+    }
+
+    fn temporary() -> anyhow::Result<Self> {
+        Ok(Self::Temporary(
+            tempfile::Builder::new()
+                .prefix("yiterm-vnc-")
+                .tempdir()
+                .context("Cannot create temporary VNC browser data directory")?,
+        ))
+    }
+
+    fn path(&self) -> &Path {
+        match self {
+            Self::Persistent(path) => path,
+            Self::Temporary(directory) => directory.path(),
+        }
+    }
+}
 
 struct WebViewState {
     controller: ICoreWebView2Controller,
@@ -46,6 +84,7 @@ impl Drop for WebViewState {
 }
 
 pub(super) struct CloseBrowser;
+pub(super) struct OpenWebTab(pub String);
 struct OpenBrowserTab(String);
 impl gpui::EventEmitter<OpenBrowserTab> for BrowserPage {}
 
@@ -53,7 +92,7 @@ impl gpui::EventEmitter<OpenBrowserTab> for BrowserPage {}
 pub(crate) struct BrowserUi {
     tunnel: Rc<yiterm::native_ssh::SocksTunnel>,
     ssh_pid: u32,
-    user_data: Rc<Option<tempfile::TempDir>>,
+    user_data: Rc<anyhow::Result<BrowserProfile>>,
     pages: Vec<(u64, gpui::Entity<BrowserPage>)>,
     active: usize,
     next_id: u64,
@@ -63,6 +102,7 @@ pub(crate) struct BrowserUi {
 }
 
 impl gpui::EventEmitter<CloseBrowser> for BrowserUi {}
+impl gpui::EventEmitter<OpenWebTab> for BrowserUi {}
 
 impl BrowserUi {
     pub(super) fn new(
@@ -75,12 +115,7 @@ impl BrowserUi {
         let mut this = Self {
             tunnel: Rc::new(tunnel),
             ssh_pid,
-            user_data: Rc::new(
-                tempfile::Builder::new()
-                    .prefix("yiterm-webview-")
-                    .tempdir()
-                    .ok(),
-            ),
+            user_data: Rc::new(BrowserProfile::persistent()),
             pages: Vec::new(),
             active: 0,
             next_id: 0,
@@ -94,6 +129,33 @@ impl BrowserUi {
 
     pub(super) fn ssh_pid(&self) -> u32 {
         self.ssh_pid
+    }
+
+    pub(super) fn close(&mut self, cx: &mut ViewContext<Self>) {
+        self.set_visible(false, cx);
+        for (_, page) in &self.pages {
+            page.update(cx, |page, _| page.close());
+        }
+        self.pages.clear();
+    }
+
+    /// Release the shared profile while leaving independent VNC pages running.
+    pub(super) fn close_web_tabs(&mut self, cx: &mut ViewContext<Self>) -> bool {
+        let active_id = self.pages.get(self.active).map(|(id, _)| *id);
+        self.pages.retain(|(_, page)| {
+            if page.read(cx)._vnc.is_some() {
+                true
+            } else {
+                page.update(cx, |page, _| page.close());
+                false
+            }
+        });
+        self.active = active_id
+            .and_then(|id| self.pages.iter().position(|(page_id, _)| *page_id == id))
+            .unwrap_or(0);
+        self.set_visible(self.visible, cx);
+        cx.notify();
+        self.pages.is_empty()
     }
 
     pub(super) fn maximized(&self) -> bool {
@@ -118,15 +180,9 @@ impl BrowserUi {
             )
         });
         cx.observe(&page, |_, _, cx| cx.notify()).detach();
-        cx.subscribe_in(
-            &page,
-            window,
-            |this, _, event: &OpenBrowserTab, window, cx| {
-                let visible = this.visible;
-                this.open_tab(event.0.clone(), window, cx);
-                this.set_visible(visible, cx);
-            },
-        )
+        cx.subscribe(&page, |_, _, event: &OpenBrowserTab, cx| {
+            cx.emit(OpenWebTab(event.0.clone()));
+        })
         .detach();
         self.pages.push((self.next_id, page));
         self.next_id += 1;
@@ -151,9 +207,7 @@ impl BrowserUi {
     }
 
     fn close_tab(&mut self, index: usize, cx: &mut ViewContext<Self>) {
-        self.pages[index]
-            .1
-            .update(cx, |page, _| page.set_visible(false));
+        self.pages[index].1.update(cx, |page, _| page.close());
         self.pages.remove(index);
         if self.pages.is_empty() {
             cx.emit(CloseBrowser);
@@ -240,8 +294,8 @@ impl Render for BrowserUi {
                         Button::new("browser-new-tab")
                             .small()
                             .label("+")
-                            .on_click(cx.listener(|this, _, window, cx| {
-                                this.open_tab("about:blank".into(), window, cx)
+                            .on_click(cx.listener(|_, _, _, cx| {
+                                cx.emit(OpenWebTab("about:blank".into()));
                             })),
                     )
                     .child(
@@ -279,7 +333,8 @@ struct BrowserPage {
     _vnc: Option<Rc<yiterm::vnc::VncBridge>>,
     webview: Option<WebViewState>,
     visible: bool,
-    _user_data: Rc<Option<tempfile::TempDir>>,
+    _user_data: Rc<anyhow::Result<BrowserProfile>>,
+    closed: bool,
     address: gpui::Entity<InputState>,
     status: Option<String>,
     _address_subscription: Option<Subscription>,
@@ -289,7 +344,7 @@ impl BrowserPage {
     pub(super) fn new(
         tunnel: Rc<yiterm::native_ssh::SocksTunnel>,
         ssh_pid: u32,
-        user_data: Rc<Option<tempfile::TempDir>>,
+        user_data: Rc<anyhow::Result<BrowserProfile>>,
         initial_url: String,
         window: &mut Window,
         cx: &mut ViewContext<Self>,
@@ -307,12 +362,7 @@ impl BrowserPage {
             .unwrap_or(initial_url);
         // Local VNC pages must never share the SSH browser's proxy/profile.
         let user_data = if is_vnc {
-            Rc::new(
-                tempfile::Builder::new()
-                    .prefix("yiterm-vnc-")
-                    .tempdir()
-                    .ok(),
-            )
+            Rc::new(BrowserProfile::temporary())
         } else {
             user_data
         };
@@ -322,34 +372,8 @@ impl BrowserPage {
         let (popup_sender, popup_receiver) = async_channel::unbounded();
         let status = Some("Starting WebView2…".to_owned());
         let parent = Self::parent_hwnd(window);
-        if let Some(error) = bridge_error {
-            let _ = sender.try_send(Err(error));
-        } else {
-            match (parent, user_data.as_ref().as_ref()) {
-                (Ok(parent), Some(user_data)) => {
-                    if let Err(error) = Self::start_webview(
-                        parent,
-                        if is_vnc { 0 } else { tunnel.port() },
-                        &initial_url,
-                        user_data.path(),
-                        sender.clone(),
-                        navigation_sender.clone(),
-                    ) {
-                        let _ = sender.try_send(Err(error));
-                    }
-                }
-                (Err(error), _) => {
-                    let _ = sender.try_send(Err(error));
-                }
-                (_, None) => {
-                    let _ = sender.try_send(Err(anyhow::anyhow!(
-                        "Cannot create a temporary WebView2 profile directory"
-                    )));
-                }
-            }
-        }
-        // Retain the proxy/profile until an in-flight native initialization has
-        // delivered (and closed) its controller, even if the page is closed early.
+        // Keep the tunnel and temporary VNC profile alive through native init,
+        // including when the page is closed before its callbacks return.
         let initializing_resources = (tunnel.clone(), user_data.clone(), vnc.clone());
         let mut this = Self {
             _tunnel: tunnel,
@@ -358,6 +382,7 @@ impl BrowserPage {
             webview: None,
             visible: false,
             _user_data: user_data,
+            closed: false,
             address,
             status,
             _address_subscription: None,
@@ -371,11 +396,52 @@ impl BrowserPage {
             });
         this._address_subscription = Some(subscription);
         cx.spawn_in(window, async move |this, cx| {
-            let _initializing_resources = initializing_resources;
-            let result = receiver.recv().await.unwrap_or_else(|_| {
-                Err(anyhow::anyhow!("WebView2 initialization was cancelled"))
-            });
+            let (tunnel, user_data, _vnc) = initializing_resources;
+            let started = std::time::Instant::now();
+            let mut bridge_error = bridge_error;
+            let result = loop {
+                if !this.update(cx, |this, _| !this.closed).unwrap_or(false) {
+                    return;
+                }
+                let start = if let Some(error) = bridge_error.take() {
+                    Err(error)
+                } else {
+                    match (&parent, user_data.as_ref()) {
+                        (Ok(parent), Ok(profile)) => Self::start_webview(
+                            *parent,
+                            if is_vnc { 0 } else { tunnel.port() },
+                            &initial_url,
+                            profile.path(),
+                            sender.clone(),
+                            navigation_sender.clone(),
+                        ),
+                        (Err(error), _) | (_, Err(error)) => Err(anyhow::anyhow!("{error:#}")),
+                    }
+                };
+                let result = match start {
+                    Ok(()) => receiver.recv().await.unwrap_or_else(|_| {
+                        Err(anyhow::anyhow!("WebView2 initialization was cancelled"))
+                    }),
+                    Err(error) => Err(error),
+                };
+                // Closing the last controller does not immediately stop its
+                // browser process. Retry options conflicts while it releases
+                // the shared directory; never fall back to a temporary profile.
+                let options_conflict = result.as_ref().err().is_some_and(|error| {
+                    error.downcast_ref::<windows::core::Error>().is_some_and(|error| {
+                        error.code() == windows::core::HRESULT::from_win32(ERROR_INVALID_STATE.0)
+                    })
+                });
+                if !is_vnc && options_conflict && started.elapsed() < Duration::from_secs(10) {
+                    gpui::Timer::after(Duration::from_millis(100)).await;
+                    continue;
+                }
+                break result;
+            };
             let _ = this.update(cx, |this, cx| {
+                if this.closed {
+                    return;
+                }
                 match result {
                     Ok(mut webview) => {
                         let handler = NewWindowRequestedEventHandler::create(Box::new(move |_, args| {
@@ -402,8 +468,9 @@ impl BrowserPage {
                         this.status = None;
                     }
                     Err(error) => {
+                        tracing::warn!(%error, "Could not initialize WebView2");
                         this.status = Some(format!(
-                            "Cannot initialize WebView2. Install the Microsoft Edge WebView2 Runtime. {error:#}"
+                            "Cannot initialize WebView2: {error:#}. Check the WebView2 Runtime and close any other YiTerm browser using this data directory."
                         ));
                     }
                 }
@@ -438,7 +505,11 @@ impl BrowserPage {
         cx.spawn_in(window, async move |this, cx| {
             while let Ok(uri) = popup_receiver.recv().await {
                 if this
-                    .update(cx, |_, cx| cx.emit(OpenBrowserTab(uri)))
+                    .update(cx, |this, cx| {
+                        if !this.closed {
+                            cx.emit(OpenBrowserTab(uri));
+                        }
+                    })
                     .is_err()
                 {
                     break;
@@ -447,6 +518,12 @@ impl BrowserPage {
         })
         .detach();
         this
+    }
+
+    fn close(&mut self) {
+        self.closed = true;
+        self.set_visible(false);
+        self.webview.take();
     }
 
     fn parent_hwnd(window: &Window) -> anyhow::Result<HWND> {
@@ -468,8 +545,8 @@ impl BrowserPage {
         navigation_sender: async_channel::Sender<Option<String>>,
     ) -> anyhow::Result<()> {
         let folder: Vec<u16> = user_data_path
-            .to_string_lossy()
-            .encode_utf16()
+            .as_os_str()
+            .encode_wide()
             .chain(Some(0))
             .collect();
         let options = CoreWebView2EnvironmentOptions::default();
