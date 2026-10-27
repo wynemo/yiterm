@@ -332,34 +332,40 @@ impl TerminalSession {
             tracing::debug!("Clipboard paste started");
             let result = (|| -> Result<PasteResult> {
                 let mut clipboard = arboard::Clipboard::new()?;
-                if let Ok(image) = clipboard.get_image() {
-                    let path = paste::save_image(image)?;
-                    let root = root.context("Shell process is unavailable")?;
-                    let detected = ssh::detect(root, group, &ssh_context)?;
-                    let (text, target) = if let Some(detected) = detected {
-                        (
-                            paste::upload_detected(&path, &detected, &scp)?,
-                            Some(detected.identity),
-                        )
-                    } else if cfg!(windows) {
-                        (paste::quote_powershell(&path.to_string_lossy()), None)
-                    } else {
-                        (paste::quote_posix(&path.to_string_lossy()), None)
-                    };
-                    Ok(PasteResult {
-                        text,
-                        target,
-                        image_group: Some(group),
-                    })
+                let path = if let Ok(image) = clipboard.get_image() {
+                    paste::save_image(image)?
                 } else {
-                    Ok(PasteResult {
-                        text: clipboard
-                            .get_text()
-                            .context("Clipboard has no image or text")?,
-                        target: None,
-                        image_group: None,
-                    })
-                }
+                    let text = clipboard
+                        .get_text()
+                        .context("Clipboard has no image or text")?;
+                    match paste::save_base64_png(&text)? {
+                        Some(path) => path,
+                        None => {
+                            return Ok(PasteResult {
+                                text,
+                                target: None,
+                                image_group: None,
+                            });
+                        }
+                    }
+                };
+                let root = root.context("Shell process is unavailable")?;
+                let detected = ssh::detect(root, group, &ssh_context)?;
+                let (text, target) = if let Some(detected) = detected {
+                    (
+                        paste::upload_detected(&path, &detected, &scp)?,
+                        Some(detected.identity),
+                    )
+                } else if cfg!(windows) {
+                    (paste::quote_powershell(&path.to_string_lossy()), None)
+                } else {
+                    (paste::quote_posix(&path.to_string_lossy()), None)
+                };
+                Ok(PasteResult {
+                    text,
+                    target,
+                    image_group: Some(group),
+                })
             })();
             tracing::debug!(
                 elapsed_ms = started.elapsed().as_millis() as u64,

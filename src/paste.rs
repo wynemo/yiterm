@@ -1,4 +1,8 @@
 use anyhow::{Context, Result, bail};
+use base64::{
+    Engine,
+    engine::general_purpose::{STANDARD, STANDARD_NO_PAD},
+};
 use std::{
     io::Read,
     path::{Path, PathBuf},
@@ -20,6 +24,53 @@ pub fn save_image(image: arboard::ImageData<'_>) -> Result<PathBuf> {
     let height = u32::try_from(image.height)?;
     let buffer = image::RgbaImage::from_raw(width, height, image.bytes.into_owned())
         .context("Invalid clipboard image dimensions")?;
+    save_png(image::DynamicImage::ImageRgba8(buffer))
+}
+
+/// Invalid or oversized image text remains ordinary clipboard text.
+/// Once an image is recognized, file I/O failures must reach the caller.
+pub fn save_base64_png(text: &str) -> Result<Option<PathBuf>> {
+    const MAX_TEXT_BYTES: usize = 72 * 1024 * 1024;
+    const MAX_PNG_BYTES: usize = 50 * 1024 * 1024;
+    const MAX_BASE64_BYTES: usize = MAX_PNG_BYTES.div_ceil(3) * 4;
+
+    if text.len() > MAX_TEXT_BYTES {
+        return Ok(None);
+    }
+    let text = text.trim();
+    let payload = text.strip_prefix("data:image/png;base64,").unwrap_or(text);
+    let bytes = payload.bytes().filter(|byte| !byte.is_ascii_whitespace());
+    // A PNG signature always starts with these Base64 characters.
+    if !bytes.clone().take(11).eq(b"iVBORw0KGgo".iter().copied()) {
+        return Ok(None);
+    }
+    let encoded: Vec<u8> = bytes.take(MAX_BASE64_BYTES + 1).collect();
+    if encoded.len() > MAX_BASE64_BYTES {
+        return Ok(None);
+    }
+    let Ok(png) = STANDARD
+        .decode(&encoded)
+        .or_else(|_| STANDARD_NO_PAD.decode(&encoded))
+    else {
+        return Ok(None);
+    };
+    if png.len() > MAX_PNG_BYTES || !png.starts_with(b"\x89PNG\r\n\x1a\n") {
+        return Ok(None);
+    }
+    let mut reader =
+        image::ImageReader::with_format(std::io::Cursor::new(png), image::ImageFormat::Png);
+    let mut limits = image::Limits::default();
+    limits.max_image_width = Some(16_384);
+    limits.max_image_height = Some(16_384);
+    limits.max_alloc = Some(128 * 1024 * 1024);
+    reader.limits(limits);
+    let Ok(image) = reader.decode() else {
+        return Ok(None);
+    };
+    save_png(image).map(Some)
+}
+
+fn save_png(image: image::DynamicImage) -> Result<PathBuf> {
     let path = std::env::temp_dir().join(format!("yiterm-drop-{}.png", uuid::Uuid::new_v4()));
     // Create exclusively; on Unix keep clipboard contents private.
     let mut options = std::fs::OpenOptions::new();
@@ -30,8 +81,7 @@ pub fn save_image(image: arboard::ImageData<'_>) -> Result<PathBuf> {
         options.mode(0o600);
     }
     let file = options.open(&path)?;
-    image::DynamicImage::ImageRgba8(buffer)
-        .write_to(&mut std::io::BufWriter::new(file), image::ImageFormat::Png)?;
+    image.write_to(&mut std::io::BufWriter::new(file), image::ImageFormat::Png)?;
     Ok(path)
 }
 
