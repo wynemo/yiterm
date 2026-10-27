@@ -2363,7 +2363,7 @@ impl TerminalUi {
                             return;
                         }
                     };
-                    let attached = this.update(cx, |this, cx| {
+                    let attached = this.update_in(cx, |this, window, cx| {
                         let Some(tab) = this.app.tabs.iter_mut().find(|tab| tab.id == tab_id)
                         else {
                             return false;
