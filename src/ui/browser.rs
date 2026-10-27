@@ -22,6 +22,15 @@ use windows::{
     core::{BOOL, PCWSTR, PWSTR},
 };
 
+mod cookies;
+mod lifecycle;
+use cookies::CookiePersistence;
+use windows::core::Interface;
+
+pub(super) async fn finish_shutdown() {
+    lifecycle::finish_shutdown().await;
+}
+
 const TOOLBAR_HEIGHT: f32 = 50.;
 
 // Only VNC profiles are temporary. Web pages always use the same on-disk data.
@@ -64,6 +73,7 @@ struct WebViewState {
     navigation_token: i64,
     navigation_completed_token: i64,
     new_window_token: Option<i64>,
+    cookies: Option<Rc<CookiePersistence>>,
 }
 
 impl Drop for WebViewState {
@@ -78,7 +88,11 @@ impl Drop for WebViewState {
             if let Some(token) = self.new_window_token {
                 let _ = self.webview.remove_NewWindowRequested(token);
             }
-            let _ = self.controller.Close();
+            if let Some(cookies) = &self.cookies {
+                cookies.close(self.controller.clone());
+            } else {
+                let _ = self.controller.Close();
+            }
         }
     }
 }
@@ -403,6 +417,17 @@ impl BrowserPage {
                 if !this.update(cx, |this, _| !this.closed).unwrap_or(false) {
                     return;
                 }
+                // A previous last tab may still be saving its session cookies.
+                // Do not restore an older snapshot while that close is pending.
+                if !is_vnc && cookies::closing() {
+                    if started.elapsed() >= Duration::from_secs(10) {
+                        break Err(anyhow::anyhow!(
+                            "Timed out waiting for the previous browser to save session cookies"
+                        ));
+                    }
+                    gpui::Timer::after(Duration::from_millis(25)).await;
+                    continue;
+                }
                 let start = if let Some(error) = bridge_error.take() {
                     Err(error)
                 } else {
@@ -517,6 +542,26 @@ impl BrowserPage {
             }
         })
         .detach();
+        cx.spawn(async move |this, cx| {
+            loop {
+                gpui::Timer::after(Duration::from_secs(5)).await;
+                let running = this.update(cx, |this, _| {
+                    if this.closed {
+                        return false;
+                    }
+                    if let Some(state) = &this.webview
+                        && let Some(cookies) = &state.cookies
+                    {
+                        cookies.checkpoint();
+                    }
+                    true
+                });
+                if !running.unwrap_or(false) {
+                    break;
+                }
+            }
+        })
+        .detach();
         this
     }
 
@@ -566,6 +611,8 @@ impl BrowserPage {
         let callback_sender = sender.clone();
         let callback_navigation_sender = navigation_sender.clone();
         let initial_url = initial_url.to_owned();
+        let user_data_path = user_data_path.to_owned();
+        let initializing = lifecycle::Initialization::begin();
         let handler = CreateCoreWebView2EnvironmentCompletedHandler::create(Box::new(
             move |result, environment| {
                 let environment = match result
@@ -580,8 +627,33 @@ impl BrowserPage {
                 let controller_sender = callback_sender.clone();
                 let controller_navigation_sender = callback_navigation_sender.clone();
                 let controller_initial_url = initial_url.clone();
+                let actual_data_path = (|| -> anyhow::Result<PathBuf> {
+                    let mut folder = PWSTR::null();
+                    unsafe {
+                        environment
+                            .cast::<ICoreWebView2Environment7>()?
+                            .UserDataFolder(&mut folder)?;
+                    }
+                    Ok(PathBuf::from(webview2_com::take_pwstr(folder)))
+                })();
+                let controller_data_path = match actual_data_path {
+                    Ok(path) => path,
+                    Err(error) => {
+                        let _ = callback_sender.try_send(Err(error));
+                        return Ok(());
+                    }
+                };
+                tracing::info!(requested = %user_data_path.display(), actual = %controller_data_path.display(), "WebView2 user data folder");
+                if std::fs::canonicalize(&controller_data_path).ok()
+                    != std::fs::canonicalize(&user_data_path).ok()
+                {
+                    tracing::warn!(
+                        "WebView2 user data folder was overridden by runtime configuration or policy"
+                    );
+                }
                 let controller_handler = CreateCoreWebView2ControllerCompletedHandler::create(
                     Box::new(move |result, controller| {
+                        let _initializing = initializing;
                         let controller = match result.and_then(|()| {
                             controller.ok_or_else(|| windows::core::Error::from(E_POINTER))
                         }) {
@@ -592,11 +664,15 @@ impl BrowserPage {
                             }
                         };
                         let state = Self::finish_webview(
-                            controller,
+                            controller.clone(),
                             &controller_initial_url,
                             controller_navigation_sender,
                             proxy_port == 0,
+                            &controller_data_path,
                         );
+                        if state.is_err() {
+                            let _ = unsafe { controller.Close() };
+                        }
                         let _ = controller_sender.try_send(state);
                         Ok(())
                     }),
@@ -625,12 +701,35 @@ impl BrowserPage {
         initial_url: &str,
         navigation_sender: async_channel::Sender<Option<String>>,
         local_only: bool,
+        user_data_path: &Path,
     ) -> anyhow::Result<WebViewState> {
         unsafe {
             controller.SetBounds(RECT::default())?;
             controller.SetIsVisible(false)?;
         }
         let webview = unsafe { controller.CoreWebView2()? };
+        lifecycle::track(&webview);
+        if !local_only {
+            // Inspect the effective profile, not just the requested directory.
+            let profile = unsafe { webview.cast::<ICoreWebView2_13>()?.Profile()? };
+            let mut private = BOOL(0);
+            let mut path = PWSTR::null();
+            unsafe {
+                profile.IsInPrivateModeEnabled(&mut private)?;
+                profile.ProfilePath(&mut path)?;
+            }
+            let path = webview2_com::take_pwstr(path);
+            ensure!(
+                !private.as_bool(),
+                "WebView2 opened an InPrivate profile; browser data cannot be persisted"
+            );
+            tracing::info!(profile = %path, in_private = private.as_bool(), "WebView2 storage profile");
+        }
+        let cookies = if local_only {
+            None
+        } else {
+            Some(CookiePersistence::new(&webview, user_data_path)?)
+        };
         let local_vnc = local_only.then(|| url::Url::parse(initial_url).expect("local VNC URL"));
         let navigation = NavigationStartingEventHandler::create(Box::new(move |_, args| {
             if let Some(args) = args {
@@ -657,8 +756,12 @@ impl BrowserPage {
         unsafe {
             webview.add_NavigationStarting(&navigation, &mut navigation_token)?;
         }
+        let navigation_cookies = cookies.clone();
         let navigation_completed =
             NavigationCompletedEventHandler::create(Box::new(move |_, args| {
+                if let Some(cookies) = &navigation_cookies {
+                    cookies.checkpoint();
+                }
                 if let Some(args) = args {
                     let mut is_success = BOOL(0);
                     unsafe { args.IsSuccess(&mut is_success)? };
@@ -691,6 +794,7 @@ impl BrowserPage {
             navigation_token,
             navigation_completed_token,
             new_window_token: None,
+            cookies,
         })
     }
 

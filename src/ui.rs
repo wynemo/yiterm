@@ -266,6 +266,8 @@ pub(super) struct TerminalUi {
     ime_selection: Range<usize>,
     #[cfg(windows)]
     clipboard_owner: std::result::Result<isize, String>,
+    #[cfg(windows)]
+    shutting_down: bool,
     _redraw: gpui::Subscription,
     _activation: gpui::Subscription,
     _poll: gpui::Task<()>,
@@ -281,6 +283,13 @@ impl TerminalUi {
         }
         let focus = cx.focus_handle();
         focus.focus(window);
+        #[cfg(windows)]
+        {
+            let view = cx.weak_entity();
+            window.on_window_should_close(cx, move |_, cx| {
+                view.update(cx, |this, cx| this.shutdown(cx)).is_err()
+            });
+        }
         // Canvas callbacks update this entity outside the normal view render pass.
         // Keep a window subscription even when a modal removes the input handler.
         let redraw = cx.observe_in(&cx.entity(), window, |_, _, window, _| window.refresh());
@@ -474,12 +483,37 @@ impl TerminalUi {
             ime_selection: 0..0,
             #[cfg(windows)]
             clipboard_owner: windows_clipboard_owner(window).map_err(|e| format!("{e:#}")),
+            #[cfg(windows)]
+            shutting_down: false,
             _redraw: redraw,
             _activation: activation,
             _poll: task,
         }
     }
+    #[cfg(windows)]
+    fn shutdown(&mut self, cx: &mut ViewContext<Self>) {
+        if self.shutting_down {
+            return;
+        }
+        self.shutting_down = true;
+        for tab in &mut self.app.tabs {
+            if let Some(browser) = tab.browser.take() {
+                browser.update(cx, |browser, cx| browser.close(cx));
+            }
+        }
+        cx.spawn(async move |_, cx| {
+            browser::finish_shutdown().await;
+            let _ = cx.update(|cx| cx.quit());
+        })
+        .detach();
+        cx.notify();
+    }
+
     fn tick(&mut self, cx: &mut ViewContext<Self>) {
+        #[cfg(windows)]
+        if self.shutting_down {
+            return;
+        }
         let started = Instant::now();
         let mut changed = self.app.updater.poll();
         if matches!(self.app.updater.state, yiterm::update::State::Restarting) {
@@ -488,6 +522,9 @@ impl TerminalUi {
                     let _ = pane.child.kill();
                 }
             }
+            #[cfg(windows)]
+            self.shutdown(cx);
+            #[cfg(not(windows))]
             cx.quit();
             return;
         }
@@ -1663,8 +1700,15 @@ impl Focusable for TerminalUi {
 impl Render for TerminalUi {
     fn render(&mut self, window: &mut Window, cx: &mut ViewContext<Self>) -> impl IntoElement {
         if self.app.tabs.is_empty() {
+            #[cfg(windows)]
+            self.shutdown(cx);
+            #[cfg(not(windows))]
             window.remove_window();
             return div().into_any_element();
+        }
+        #[cfg(windows)]
+        if self.shutting_down {
+            return div().size_full().child("Closing…").into_any_element();
         }
         let title = self.app.tabs[self.app.active].focused().title.clone();
         if title != self.app.window_title {
@@ -2268,6 +2312,9 @@ impl TerminalUi {
         window: &mut Window,
         cx: &mut ViewContext<Self>,
     ) {
+        if self.shutting_down {
+            return;
+        }
         if self.app.files_settings.visible {
             self.app.toggle_files();
         }
@@ -2323,6 +2370,9 @@ impl TerminalUi {
             match result {
                 Ok((tunnel, pid)) => {
                     let reused = this.update_in(cx, |this, window, cx| {
+                        if this.shutting_down {
+                            return true;
+                        }
                         if !this.app.tabs.iter().any(|tab| tab.id == tab_id) {
                             return true;
                         }
@@ -2364,6 +2414,10 @@ impl TerminalUi {
                         }
                     };
                     let attached = this.update_in(cx, |this, window, cx| {
+                        if this.shutting_down {
+                            browser.update(cx, |browser, cx| browser.close(cx));
+                            return false;
+                        }
                         let Some(tab) = this.app.tabs.iter_mut().find(|tab| tab.id == tab_id)
                         else {
                             return false;

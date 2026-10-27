@@ -147,7 +147,21 @@ Windows 的 **Tools → Open SSH Browser** 会从当前聚焦 pane 检测前台 
 
 主程序通过受当前 Windows 用户 ACL 保护的 SSH 私有命名管道请求 SOCKS5 监听端口，只传递开始/结束和状态，不传递 SSH 凭据。浏览器侧使用无认证 SOCKS5，不需要单独填写 SOCKS 用户名或密码；SSH 凭据仍按原 SSH 登录流程处理。监听地址仅为 `127.0.0.1`，只支持 TCP CONNECT；目标主机名（包括 `localhost`）随 SSH `direct-tcpip` 通道发送，由远端解析 DNS。每个网页 TCP 连接复用同一条已认证 SSH transport 上的新 SSH channel。关闭整个浏览器或所属终端 tab 会停止该浏览器的 SOCKS 监听，SSH 会话退出时也会关闭。WebView2 通过 Chromium 参数关闭 localhost 的隐式代理绕过、限制本地 DNS 解析、禁用 QUIC 和非代理 WebRTC UDP。页面导航失败时，浏览器区域会显示 WebView2 错误码，日志会记录详情。
 
-WebView2 网页统一使用 `%LOCALAPPDATA%\yiterm\browser\` 数据目录，关闭浏览器或退出 YiTerm 时保留 Cookie、LocalStorage、IndexedDB、站点权限等数据；Cookie 的有效期仍由网站决定，SessionStorage 不作为长期偏好保存。所有 SSH 连接共用这份数据，网站按来源（协议、主机、端口）区分 LocalStorage 等存储；不同服务器上的同名地址（例如 `http://localhost:8080`）也会共享数据，Cookie 则遵循其域和路径规则。
+WebView2 网页默认使用 `%LOCALAPPDATA%\yiterm\browser\` 保存整份浏览器配置，关闭网页、浏览器面板或重启 YiTerm 不删除该目录，也不回退到临时目录。应用记录 WebView2 实际使用的数据目录、Profile 路径和 InPrivate 状态；环境变量或系统策略覆盖目录时记录警告，会话快照跟随实际目录。普通网页若意外进入 InPrivate 模式则报错，避免无声丢失数据。VNC 仍使用独立临时目录。原生存储范围参见 [WebView2 用户数据目录说明](https://learn.microsoft.com/en-us/microsoft-edge/webview2/concepts/user-data-folder)。
+
+| 数据 | 保存与重开行为 |
+| --- | --- |
+| 有过期时间的 Cookie | WebView2 按网站设置保存、更新和删除 |
+| 没有过期时间的会话 Cookie | 由 YiTerm 补充加密快照，在新浏览器进程首次访问网站前恢复，保留 HttpOnly、Secure、SameSite、域和路径，不人为设置过期时间 |
+| LocalStorage、IndexedDB、站点文件系统 | 由 WebView2 在同一 Profile 中保存，重开时继续使用 |
+| CacheStorage、Service Worker 注册和关联站点数据、磁盘缓存 | 由 WebView2 管理；网站更新、删除、存储配额或引擎缓存回收仍可使其变化 |
+| 站点权限、浏览记录、设置以及已启用的自动填充等 Profile 数据 | 沿用 WebView2 原生保存机制，不在关闭时清理；不等于恢复关闭标签的前进/后退栈 |
+| SessionStorage | 按网页标准隔离到单个标签页；刷新或隐藏原标签继续保留，关闭标签后不跨新标签恢复 |
+| 页面 DOM、JavaScript 内存、未提交表单、活动网络连接 | 属于运行中的页面状态，不作为磁盘存储导出；重新打开会重新加载页面 |
+
+会话 Cookie 保存为当前 Windows 用户 DPAPI 加密的 `session-cookies.dpapi`。页面导航后及运行期间每 5 秒更新快照，关闭网页时先完成最终快照再关闭控件，立即重开会等待保存完成；退出登录时以当前 Cookie 列表覆盖快照，避免恢复已删除的登录 Cookie。正常关闭 Windows 窗口、关闭最后一个终端 tab 或更新重启时，先关闭浏览器，继续运行消息循环，等待会话快照和已创建的 WebView2 浏览器进程退出后再结束 YiTerm，最多等待 10 秒，超时记录警告。强制结束进程、系统断电或关闭超时，可能丢失未完成的写入；这不是网站持久化接口的保证。
+
+所有 SSH 连接共用这份数据，网站按来源（协议、主机、端口）区分 LocalStorage 等存储；不同服务器上的同名地址（例如 `http://localhost:8080`）也会共享数据，Cookie 则遵循其域和路径规则。服务端会话到期、主动注销或凭据撤销后仍需重新登录；只使用 SessionStorage 或页面内存保存身份的网站，关闭原标签后也可能要求登录。当前功能保留网站存储，不提供“恢复上次全部标签与页面运行状态”。
 
 网页浏览器同时只在一个终端 tab 中打开；从其他终端 tab 打开网页时会关闭原网页标签，从另一 SSH 会话打开时也会关闭当前面板后重新创建，使用新 SSH 代理访问页面。独立 VNC 标签不占用共享目录，可继续在其他终端 tab 中运行。旧 WebView2 进程释放目录期间，会对代理参数冲突短暂重试（最多 10 秒）；若仍被其他 YiTerm 实例占用，则显示错误，不创建临时目录替代。
 
