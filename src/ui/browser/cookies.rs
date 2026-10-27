@@ -18,11 +18,19 @@ pub(super) fn closing() -> bool {
     CLOSING.get() != 0
 }
 
-struct ClosingController(ICoreWebView2Controller);
+// This guard only accounts for pending work. Native Close must never run in
+// a destructor reached from a WebView2 COM callback.
+pub(super) struct Closing;
 
-impl Drop for ClosingController {
+impl Closing {
+    pub(super) fn begin() -> Self {
+        CLOSING.set(CLOSING.get() + 1);
+        Self
+    }
+}
+
+impl Drop for Closing {
     fn drop(&mut self) {
-        let _ = unsafe { self.0.Close() };
         CLOSING.set(CLOSING.get() - 1);
     }
 }
@@ -47,14 +55,24 @@ impl Drop for SessionCookie {
 pub(super) struct CookiePersistence {
     manager: ICoreWebView2CookieManager,
     path: PathBuf,
+    executor: gpui::ForegroundExecutor,
+    retiring: Cell<bool>,
+    checkpoint_pending: Cell<bool>,
 }
 
 impl CookiePersistence {
-    pub(super) fn new(webview: &ICoreWebView2, directory: &Path) -> anyhow::Result<Rc<Self>> {
+    pub(super) fn new(
+        webview: &ICoreWebView2,
+        directory: &Path,
+        executor: gpui::ForegroundExecutor,
+    ) -> anyhow::Result<Rc<Self>> {
         let manager = unsafe { webview.cast::<ICoreWebView2_2>()?.CookieManager()? };
         let this = Rc::new(Self {
             manager,
             path: directory.join("session-cookies.dpapi"),
+            executor,
+            retiring: Cell::new(false),
+            checkpoint_pending: Cell::new(false),
         });
         let mut process = 0;
         unsafe {
@@ -98,40 +116,73 @@ impl CookiePersistence {
         Ok(())
     }
 
+    pub(super) fn stop_checkpoints(&self) {
+        self.retiring.set(true);
+    }
+
     pub(super) fn checkpoint(self: &Rc<Self>) {
-        self.capture(None);
+        if self.retiring.get() || self.checkpoint_pending.replace(true) {
+            return;
+        }
+        let this = self.clone();
+        self.executor
+            .spawn(async move {
+                // A queued periodic checkpoint must not run after final close.
+                if !this.retiring.get() {
+                    if let Err(error) = this.snapshot().await {
+                        tracing::warn!(%error, "Could not save WebView2 session cookies");
+                    }
+                }
+                this.checkpoint_pending.set(false);
+            })
+            .detach();
     }
 
-    pub(super) fn close(self: &Rc<Self>, controller: ICoreWebView2Controller) {
-        CLOSING.set(CLOSING.get() + 1);
-        self.capture(Some(ClosingController(controller)));
+    pub(super) async fn final_snapshot(&self) -> anyhow::Result<()> {
+        // Finish any periodic request before closing its native controller.
+        // Queued checkpoints see retiring=true and simply clear this flag.
+        while self.checkpoint_pending.get() {
+            gpui::Timer::after(Duration::from_millis(25)).await;
+        }
+        self.snapshot().await
     }
 
-    fn capture(self: &Rc<Self>, closing: Option<ClosingController>) {
+    async fn snapshot(&self) -> anyhow::Result<()> {
         let sequence = NEXT_SNAPSHOT.get() + 1;
         NEXT_SNAPSHOT.set(sequence);
-        let this = self.clone();
+        let (sender, receiver) = async_channel::bounded(1);
         let handler = GetCookiesCompletedHandler::create(Box::new(move |result, cookies| {
-            // Keep the controller alive until the final snapshot is on disk.
-            let _closing = closing;
-            if sequence < SAVED_SNAPSHOT.get() {
-                return Ok(());
-            }
-            let result = result.map_err(anyhow::Error::from).and_then(|()| {
-                let cookies = cookies.context("WebView2 returned no cookie list")?;
-                this.save(&cookies)?;
-                SAVED_SNAPSHOT.set(sequence);
-                Ok(())
-            });
-            if let Err(error) = result {
-                tracing::warn!(%error, "Could not save WebView2 session cookies");
-            }
+            // Only hand ownership to a queued UI task. No file IO, controller
+            // teardown or application updates on a WebView2 callback stack.
+            let result = result
+                .map_err(anyhow::Error::from)
+                .and_then(|()| cookies.context("WebView2 returned no cookie list"));
+            let _ = sender.try_send(result);
             Ok(())
         }));
-        // Empty URI enumerates the entire profile, including HttpOnly cookies.
-        if let Err(error) = unsafe { self.manager.GetCookies(windows::core::w!(""), &handler) } {
-            tracing::warn!(%error, "Could not enumerate WebView2 session cookies");
+        unsafe {
+            self.manager.GetCookies(windows::core::w!(""), &handler)?;
         }
+        let list = futures_lite::future::race(
+            async {
+                receiver
+                    .recv()
+                    .await
+                    .context("WebView2 cookie callback was cancelled")?
+            },
+            async {
+                gpui::Timer::after(Duration::from_secs(3)).await;
+                Err(anyhow::anyhow!(
+                    "Timed out reading WebView2 session cookies"
+                ))
+            },
+        )
+        .await?;
+        if sequence >= SAVED_SNAPSHOT.get() {
+            self.save(&list)?;
+            SAVED_SNAPSHOT.set(sequence);
+        }
+        Ok(())
     }
 
     fn save(&self, list: &ICoreWebView2CookieList) -> anyhow::Result<()> {

@@ -67,6 +67,34 @@ impl BrowserProfile {
     }
 }
 
+// Keep the native view's dependencies alive through asynchronous teardown,
+// even after the GPUI page and browser panel have already been removed.
+#[derive(Clone)]
+struct BrowserLifetime {
+    executor: gpui::ForegroundExecutor,
+    _resources: (
+        Rc<yiterm::native_ssh::SocksTunnel>,
+        Rc<anyhow::Result<BrowserProfile>>,
+        Option<Rc<yiterm::vnc::VncBridge>>,
+    ),
+}
+
+impl BrowserLifetime {
+    fn close_failed_controller(self, controller: ICoreWebView2Controller) {
+        let closing = cookies::Closing::begin();
+        self.executor
+            .clone()
+            .spawn(async move {
+                let _lifetime = self;
+                let _closing = closing;
+                if let Err(error) = unsafe { controller.Close() } {
+                    tracing::warn!(%error, "Could not close failed WebView2 controller");
+                }
+            })
+            .detach();
+    }
+}
+
 struct WebViewState {
     controller: ICoreWebView2Controller,
     webview: ICoreWebView2,
@@ -74,26 +102,50 @@ struct WebViewState {
     navigation_completed_token: i64,
     new_window_token: Option<i64>,
     cookies: Option<Rc<CookiePersistence>>,
+    lifetime: BrowserLifetime,
 }
 
 impl Drop for WebViewState {
     fn drop(&mut self) {
-        unsafe {
-            let _ = self
-                .webview
-                .remove_NavigationStarting(self.navigation_token);
-            let _ = self
-                .webview
-                .remove_NavigationCompleted(self.navigation_completed_token);
-            if let Some(token) = self.new_window_token {
-                let _ = self.webview.remove_NewWindowRequested(token);
-            }
-            if let Some(cookies) = &self.cookies {
-                cookies.close(self.controller.clone());
-            } else {
-                let _ = self.controller.Close();
-            }
+        let lifetime = self.lifetime.clone();
+        let executor = lifetime.executor.clone();
+        let controller = self.controller.clone();
+        let webview = self.webview.clone();
+        let cookies = self.cookies.clone();
+        let navigation_token = self.navigation_token;
+        let navigation_completed_token = self.navigation_completed_token;
+        let new_window_token = self.new_window_token;
+        if let Some(cookies) = &cookies {
+            cookies.stop_checkpoints();
         }
+        let closing = cookies::Closing::begin();
+        // Drop can run during a GPUI update or a WebView2 callback. Return
+        // first, then perform all native teardown on the same STA UI thread.
+        executor
+            .spawn(async move {
+                let _lifetime = lifetime;
+                let _closing = closing;
+                unsafe {
+                    let _ = webview.remove_NavigationStarting(navigation_token);
+                    let _ = webview.remove_NavigationCompleted(navigation_completed_token);
+                    if let Some(token) = new_window_token {
+                        let _ = webview.remove_NewWindowRequested(token);
+                    }
+                }
+                if let Some(cookies) = cookies {
+                    if let Err(error) = cookies.final_snapshot().await {
+                        tracing::warn!(%error, "Could not save final WebView2 session cookies");
+                    }
+                }
+                tracing::info!("Closing WebView2 controller");
+                if let Err(error) = unsafe { controller.Close() } {
+                    tracing::warn!(%error, "Could not close WebView2 controller");
+                }
+                drop(webview);
+                drop(controller);
+                tracing::info!("WebView2 controller closed");
+            })
+            .detach();
     }
 }
 
@@ -389,6 +441,7 @@ impl BrowserPage {
         // Keep the tunnel and temporary VNC profile alive through native init,
         // including when the page is closed before its callbacks return.
         let initializing_resources = (tunnel.clone(), user_data.clone(), vnc.clone());
+        let executor = cx.foreground_executor().clone();
         let mut this = Self {
             _tunnel: tunnel,
             _ssh_pid: ssh_pid,
@@ -439,6 +492,10 @@ impl BrowserPage {
                             profile.path(),
                             sender.clone(),
                             navigation_sender.clone(),
+                            BrowserLifetime {
+                                executor: executor.clone(),
+                                _resources: (tunnel.clone(), user_data.clone(), _vnc.clone()),
+                            },
                         ),
                         (Err(error), _) | (_, Err(error)) => Err(anyhow::anyhow!("{error:#}")),
                     }
@@ -507,6 +564,9 @@ impl BrowserPage {
             while let Ok(status) = navigation_receiver.recv().await {
                 if this
                     .update_in(cx, |this, window, cx| {
+                        if this.closed {
+                            return;
+                        }
                         if status.is_none()
                             && let Some(state) = &this.webview
                         {
@@ -588,6 +648,7 @@ impl BrowserPage {
         user_data_path: &Path,
         sender: async_channel::Sender<anyhow::Result<WebViewState>>,
         navigation_sender: async_channel::Sender<Option<String>>,
+        lifetime: BrowserLifetime,
     ) -> anyhow::Result<()> {
         let folder: Vec<u16> = user_data_path
             .as_os_str()
@@ -669,9 +730,10 @@ impl BrowserPage {
                             controller_navigation_sender,
                             proxy_port == 0,
                             &controller_data_path,
+                            lifetime.clone(),
                         );
                         if state.is_err() {
-                            let _ = unsafe { controller.Close() };
+                            lifetime.close_failed_controller(controller);
                         }
                         let _ = controller_sender.try_send(state);
                         Ok(())
@@ -702,6 +764,7 @@ impl BrowserPage {
         navigation_sender: async_channel::Sender<Option<String>>,
         local_only: bool,
         user_data_path: &Path,
+        lifetime: BrowserLifetime,
     ) -> anyhow::Result<WebViewState> {
         unsafe {
             controller.SetBounds(RECT::default())?;
@@ -728,7 +791,11 @@ impl BrowserPage {
         let cookies = if local_only {
             None
         } else {
-            Some(CookiePersistence::new(&webview, user_data_path)?)
+            Some(CookiePersistence::new(
+                &webview,
+                user_data_path,
+                lifetime.executor.clone(),
+            )?)
         };
         let local_vnc = local_only.then(|| url::Url::parse(initial_url).expect("local VNC URL"));
         let navigation = NavigationStartingEventHandler::create(Box::new(move |_, args| {
@@ -795,6 +862,7 @@ impl BrowserPage {
             navigation_completed_token,
             new_window_token: None,
             cookies,
+            lifetime,
         })
     }
 
