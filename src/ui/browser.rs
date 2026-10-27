@@ -126,6 +126,7 @@ impl Drop for WebViewState {
                 let _lifetime = lifetime;
                 let _closing = closing;
                 unsafe {
+                    let _ = controller.SetIsVisible(false);
                     let _ = webview.remove_NavigationStarting(navigation_token);
                     let _ = webview.remove_NavigationCompleted(navigation_completed_token);
                     if let Some(token) = new_window_token {
@@ -198,7 +199,7 @@ impl BrowserUi {
     }
 
     pub(super) fn close(&mut self, cx: &mut ViewContext<Self>) {
-        self.set_visible(false, cx);
+        self.visible = false;
         for (_, page) in &self.pages {
             page.update(cx, |page, _| page.close());
         }
@@ -382,7 +383,7 @@ impl Render for BrowserUi {
                             .small()
                             .label("Close")
                             .on_click(cx.listener(|this, _, _, cx| {
-                                this.set_visible(false, cx);
+                                this.visible = false;
                                 cx.emit(CloseBrowser);
                             })),
                     ),
@@ -627,7 +628,9 @@ impl BrowserPage {
 
     fn close(&mut self) {
         self.closed = true;
-        self.set_visible(false);
+        // Hiding a native child can synchronously move focus to its parent.
+        // Do that in the teardown task, after GPUI releases its entity borrow.
+        self.visible = false;
         self.webview.take();
     }
 
