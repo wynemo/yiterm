@@ -254,10 +254,9 @@ impl TerminalSession {
             term,
             parser: Processor::new(),
             #[cfg(unix)]
-            graphics: kitty::Graphics::new(
-                args.ssh.is_none() && args.mosh.is_none(),
-                repaint.clone(),
-            ),
+            // System OpenSSH preserves the same VT stream and terminal replies
+            // as a local shell; direct Kitty data needs no separate transport.
+            graphics: kitty::Graphics::new(args.mosh.is_none(), repaint.clone()),
             mouse_modes: mouse::MouseModes::default(),
             mouse_wheel: mouse::Wheel::default(),
             output,

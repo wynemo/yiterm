@@ -220,9 +220,9 @@ SSH 远端程序可通过 OSC 52 的 `c` 目标把文本复制到主机剪贴板
 
 自动识别终端文字中的 HTTP/HTTPS 链接（支持自动折行）和 OSC 8 超链接。悬停时为整个链接加下划线并显示目标地址；macOS 按住 **Cmd** 点击、Linux 按住 **Ctrl** 点击，在系统默认浏览器打开；Windows 按住 **Ctrl** 点击时，默认使用“Windows 内置浏览器与 SSH SOCKS5”所述的当前聚焦 SSH pane；关闭 **Open Links in Built-in Browser** 设置后使用系统默认浏览器。普通拖动仍用于选择文字。仅打开 HTTP/HTTPS 地址。
 
-## Kitty 静态图片（macOS / Linux 本地终端）
+## Kitty 静态图片（macOS / Linux 本地终端与普通 SSH）
 
-本地 shell 支持 Kitty graphics protocol 的静态图片子集，保持 `TERM=xterm-256color`；客户端可通过 `a=q` 查询能力，无需把 TERM 改成 `xterm-kitty`。Windows 和通过 `--ssh` / `--mosh` 创建的会话暂不启用此功能；本地 shell 内再运行 SSH、tmux 或其他终端复用器的兼容性不在首版保证范围内。
+macOS / Linux 的本地 shell 和普通 SSH 会话支持 Kitty graphics protocol 的同一静态图片子集，包括通过 `--ssh` 创建的会话，以及在本地 shell 中运行系统 `ssh` 进入的远端会话。保持 `TERM=xterm-256color`；客户端可通过 `a=q` 查询能力，无需把 TERM 改成 `xterm-kitty`。Windows、Mosh 以及 tmux 等终端复用器的透传暂不在支持范围内。
 
 - 传输：`t=d` 直接传输，`f=24` RGB、`f=32` RGBA、`f=100` PNG，支持 `m` 分块、`o=z` zlib 压缩和 `q` 回复抑制。
 - 操作：`a=q` 查询、`a=t` 上传、`a=T` 上传并显示、`a=p` 再次显示；支持图片 ID `i`、放置 ID `p`，同一图片可以多处显示。上传替换同一图片 ID 时移除旧放置。
@@ -234,11 +234,13 @@ SSH 远端程序可通过 OSC 52 的 `c` 目标把文本复制到主机剪贴板
 
 图片解码在后台运行，每个 pane 同时只解码一张；后续终端输出等待完成，以保持 VT 输出、图片放置和查询回复的顺序。处理图片命令前先应用 VTE 同步刷新缓存中的光标移动、滚动和清屏，再恢复剩余输出的同步刷新；同步刷新也按 VTE 的超时期限结束，避免未闭合的刷新块一直挂起。Codex 等 TUI 的图片因此使用同一帧中已更新的光标位置。单张图片最大 8192×8192，且解码后的 RGBA 数据不超过 64 MiB；传输和解压后的数据各不超过 64 MiB。每个 pane 最多缓存 128 MiB RGBA、256 张图片和 1024 个放置，达到缓存限制时淘汰已有图片。图片数据和路径不会通过协议触发本地文件读取。
 
-支持直接传输的客户端可使用此功能。例如安装了 `kitten` 时，在本地 shell 运行（`--transfer-mode=stream` 强制通过终端传输数据）：
+支持直接传输的客户端可使用此功能。例如安装了 `kitten` 时，在本地或远端 shell 运行（`--transfer-mode=stream` 强制通过终端传输数据）：
 
 ```sh
 kitten icat --transfer-mode=stream /path/to/image.png
 ```
+
+SSH 可通过 `cargo run --release -- --ssh user@host` 启动，或在已有本地终端中运行 `ssh user@host`。在远端执行上面的 `kitten icat` 命令时，图片路径属于远端文件系统，图片内容通过 SSH 终端流直接传回 YiTerm 显示，不需要先下载文件，也不依赖 SFTP。能力查询和显示回复沿同一 SSH 通道返回远端客户端；图片缓存和资源限制仍按 YiTerm pane 管理。远端客户端必须使用直接传输 `t=d`，不能让 YiTerm 读取远端路径或共享内存。
 
 第三方客户端可能依赖尚未实现的协议扩展；遇到图片不显示时，先确认其使用直接传输和普通静态放置，而非共享内存或 Unicode 占位符。
 
