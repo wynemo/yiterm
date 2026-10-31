@@ -26,7 +26,7 @@ Download and extract the package for your platform from [Releases](https://githu
 - Inline static images using the Kitty graphics protocol in local and SSH sessions, including the built-in SSH client on Windows.
 - An embedded monospace font, with no extra font installation required.
 
-Windows, macOS and Linux support displaying images directly in the terminal.
+Windows, macOS and Linux support displaying images directly in the terminal. Some applications may require the `TERM_PROGRAM` environment variable to be set to `ghostty`.
 
 ![YiTerm displaying an image in Codex on macOS](assets/screenshots/yiterm-macos-images.png)
 
