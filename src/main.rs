@@ -1,6 +1,8 @@
 #![cfg_attr(windows, windows_subsystem = "windows")]
 mod files;
 mod git;
+#[cfg(unix)]
+mod kitty;
 #[cfg(not(target_os = "linux"))]
 mod profiling;
 #[cfg(target_os = "linux")]
@@ -114,6 +116,8 @@ struct TerminalSession {
     title: String,
     term: Term<Listener>,
     parser: Processor,
+    #[cfg(unix)]
+    graphics: kitty::Graphics,
     mouse_modes: mouse::MouseModes,
     mouse_wheel: mouse::Wheel,
     output: mpsc::Receiver<TerminalOutput>,
@@ -249,6 +253,11 @@ impl TerminalSession {
                 .unwrap_or_else(|| "Terminal".into()),
             term,
             parser: Processor::new(),
+            #[cfg(unix)]
+            graphics: kitty::Graphics::new(
+                args.ssh.is_none() && args.mosh.is_none(),
+                repaint.clone(),
+            ),
             mouse_modes: mouse::MouseModes::default(),
             mouse_wheel: mouse::Wheel::default(),
             output,
@@ -492,7 +501,25 @@ fn terminal_colors(cell: &Cell, theme: ThemeMode) -> (Rgba, Rgba) {
 
 impl TerminalSession {
     fn poll(&mut self) -> bool {
+        // VTE relies on its caller to expire synchronized updates. A client
+        // waiting for a buffered terminal query must not stall the pane forever.
+        if self
+            .parser
+            .sync_timeout()
+            .sync_timeout()
+            .is_some_and(|deadline| deadline <= Instant::now())
+        {
+            self.parser.stop_sync(&mut self.term);
+            self.repaint.store(true, Ordering::Release);
+            wake_ui();
+        }
+        #[cfg(unix)]
+        self.graphics.advance(&mut self.parser, &mut self.term);
         for batch in 0..128 {
+            #[cfg(unix)]
+            if self.graphics.busy() {
+                break;
+            }
             let Ok(output) = self.output.try_recv() else {
                 break;
             };
@@ -503,6 +530,12 @@ impl TerminalSession {
             self.output_revision = self.output_revision.wrapping_add(1);
             let previous_mode = *self.term.mode();
             let requests = self.mouse_modes.observe(&bytes);
+            #[cfg(unix)]
+            {
+                self.graphics.feed(&bytes);
+                self.graphics.advance(&mut self.parser, &mut self.term);
+            }
+            #[cfg(not(unix))]
             self.parser.advance(&mut self.term, &bytes);
             for (mode, enabled) in requests {
                 tracing::debug!(target: "yiterm::mouse",
@@ -537,6 +570,17 @@ impl TerminalSession {
         while let Ok(event) = self.events.try_recv() {
             match event {
                 Event::PtyWrite(text) => self.write(text.as_bytes()),
+                #[cfg(unix)]
+                Event::TextAreaSizeRequest(format) => {
+                    let [cell_width, cell_height] = self.graphics.cell_pixels();
+                    let text = format(alacritty_terminal::event::WindowSize {
+                        num_lines: self.size.rows as u16,
+                        num_cols: self.size.cols as u16,
+                        cell_width: cell_width.min(u16::MAX / self.size.cols as u16),
+                        cell_height: cell_height.min(u16::MAX / self.size.rows as u16),
+                    });
+                    self.write(text.as_bytes());
+                }
                 Event::Title(title) => self.title = title,
                 Event::ResetTitle => self.title = "Terminal".into(),
                 Event::ClipboardStore(ClipboardType::Clipboard, text) => {

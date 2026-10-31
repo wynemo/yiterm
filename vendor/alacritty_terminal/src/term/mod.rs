@@ -266,6 +266,10 @@ impl TermDamageState {
 }
 
 pub struct Term<T> {
+    /// Image anchors in the active and inactive grids (owned by the frontend).
+    pub graphics_anchors: std::collections::BTreeMap<u64, Point>,
+    inactive_graphics_anchors: std::collections::BTreeMap<u64, Point>,
+
     /// Terminal focus controlling the cursor shape.
     pub is_focused: bool,
 
@@ -423,6 +427,8 @@ impl<T> Term<T> {
         let damage = TermDamageState::new(num_cols, num_lines);
 
         Term {
+            graphics_anchors: Default::default(),
+            inactive_graphics_anchors: Default::default(),
             inactive_grid,
             scroll_region,
             event_proxy,
@@ -664,6 +670,11 @@ impl<T> Term<T> {
             return;
         }
 
+        // Reflow can split/rejoin text rows. Drop image anchors rather than leave
+        // stale placements after a resize until graphics-aware reflow is available.
+        self.graphics_anchors.clear();
+        self.inactive_graphics_anchors.clear();
+
         debug!("New num_cols is {num_cols} and num_lines is {num_lines}");
 
         // Move vi mode cursor with the content.
@@ -704,6 +715,25 @@ impl<T> Term<T> {
         self.damage.resize(num_cols, num_lines);
     }
 
+    /// Remove a frontend image anchor from either screen buffer.
+    pub fn remove_graphics_anchor(&mut self, id: u64) {
+        self.graphics_anchors.remove(&id);
+        self.inactive_graphics_anchors.remove(&id);
+    }
+
+    /// Whether a frontend image anchor still belongs to either screen buffer.
+    pub fn has_graphics_anchor(&self, id: u64) -> bool {
+        self.graphics_anchors.contains_key(&id) || self.inactive_graphics_anchors.contains_key(&id)
+    }
+
+    /// Queue a graphics reply in the same order as other terminal replies.
+    pub fn graphics_reply(&self, reply: String)
+    where
+        T: EventListener,
+    {
+        self.event_proxy.send_event(Event::PtyWrite(reply));
+    }
+
     /// Active terminal modes.
     #[inline]
     pub fn mode(&self) -> &TermMode {
@@ -723,6 +753,10 @@ impl<T> Term<T> {
             self.inactive_grid.reset_region(..);
         }
 
+        if !self.mode.contains(TermMode::ALT_SCREEN) {
+            self.inactive_graphics_anchors.clear();
+        }
+        mem::swap(&mut self.graphics_anchors, &mut self.inactive_graphics_anchors);
         mem::swap(&mut self.keyboard_mode_stack, &mut self.inactive_keyboard_mode_stack);
         let keyboard_mode =
             self.keyboard_mode_stack.last().copied().unwrap_or(KeyboardModes::NO_MODE).into();
@@ -758,6 +792,14 @@ impl<T> Term<T> {
         }
 
         // Scroll between origin and bottom
+        self.graphics_anchors.retain(|_, point| {
+            if region.contains(&point.line) {
+                point.line += lines;
+                point.line < region.end
+            } else {
+                true
+            }
+        });
         self.grid.scroll_down(&region, lines);
         self.mark_fully_damaged();
     }
@@ -777,6 +819,16 @@ impl<T> Term<T> {
         // Scroll selection.
         self.selection = self.selection.take().and_then(|s| s.rotate(self, &region, lines as i32));
 
+        let history = self.config.scrolling_history as i32;
+        let keep_history = region.start == 0 && !self.mode.contains(TermMode::ALT_SCREEN);
+        self.graphics_anchors.retain(|_, point| {
+            if point.line < region.end && (keep_history || point.line >= region.start) {
+                point.line -= lines;
+                point.line.0 >= if keep_history { -history } else { region.start.0 }
+            } else {
+                true
+            }
+        });
         self.grid.scroll_up(&region, lines);
 
         // Scroll vi mode cursor.
@@ -1791,6 +1843,13 @@ impl<T: EventListener> Handler for Term<T> {
     #[inline]
     fn clear_screen(&mut self, mode: ansi::ClearMode) {
         trace!("Clearing screen: {mode:?}");
+        let cursor = self.grid.cursor.point;
+        self.graphics_anchors.retain(|_, point| match mode {
+            ansi::ClearMode::All => point.line < 0,
+            ansi::ClearMode::Saved => point.line >= 0,
+            ansi::ClearMode::Above => *point > cursor,
+            ansi::ClearMode::Below => *point < cursor,
+        });
         let bg = self.grid.cursor.template.bg;
 
         let screen_lines = self.screen_lines();
@@ -1833,7 +1892,12 @@ impl<T: EventListener> Handler for Term<T> {
                 } else {
                     let old_offset = self.grid.display_offset();
 
-                    self.grid.clear_viewport();
+                    let scrolled = self.grid.clear_viewport();
+                    let history = self.grid.history_size() as i32;
+                    self.graphics_anchors.retain(|_, point| {
+                        point.line -= scrolled;
+                        point.line.0 >= -history
+                    });
 
                     // Compute number of lines scrolled by clearing the viewport.
                     let lines = self.grid.display_offset().saturating_sub(old_offset);
@@ -1875,6 +1939,8 @@ impl<T: EventListener> Handler for Term<T> {
     /// Reset all important fields in the term struct.
     #[inline]
     fn reset_state(&mut self) {
+        self.graphics_anchors.clear();
+        self.inactive_graphics_anchors.clear();
         if self.mode.contains(TermMode::ALT_SCREEN) {
             mem::swap(&mut self.grid, &mut self.inactive_grid);
         }

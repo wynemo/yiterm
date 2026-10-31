@@ -237,6 +237,8 @@ enum Menu {
 
 pub(super) struct TerminalUi {
     app: TerminalApp,
+    #[cfg(target_os = "macos")]
+    graphics_images: Vec<Arc<gpui::RenderImage>>,
     focus: FocusHandle,
     files_focus: FocusHandle,
     git_message: gpui::Entity<InputState>,
@@ -453,6 +455,8 @@ impl TerminalUi {
         let files_focus = cx.focus_handle();
         let files_split = cx.new(|_| gpui_component::resizable::ResizableState::default());
         Self {
+            #[cfg(target_os = "macos")]
+            graphics_images: Vec::new(),
             git_message,
             git_message_repo: None,
             git_message_synced: String::new(),
@@ -860,12 +864,25 @@ impl TerminalUi {
                 ((geo.terminal.size.width / self.cell.width) as usize).clamp(2, u16::MAX as usize);
             let rows = ((geo.terminal.size.height / self.cell.height) as usize)
                 .clamp(1, u16::MAX as usize);
-            if cols != pane.size.cols || rows != pane.size.rows {
+            #[cfg(unix)]
+            let pixels_changed = pane.graphics.set_cell(
+                [f32::from(self.cell.width), f32::from(self.cell.height)],
+                window.scale_factor(),
+                cols,
+                rows,
+            );
+            #[cfg(not(unix))]
+            let pixels_changed = false;
+            if cols != pane.size.cols || rows != pane.size.rows || pixels_changed {
+                #[cfg(unix)]
+                let [pixel_width, pixel_height] = pane.graphics.pixels;
+                #[cfg(not(unix))]
+                let (pixel_width, pixel_height) = (0, 0);
                 if let Err(error) = pane.master.resize(PtySize {
                     cols: cols as u16,
                     rows: rows as u16,
-                    pixel_width: 0,
-                    pixel_height: 0,
+                    pixel_width,
+                    pixel_height,
                 }) {
                     pane.status = format!("PTY resize failed: {error}");
                 }
@@ -1148,6 +1165,22 @@ impl TerminalUi {
         if let Some(profile) = &mut self.profile {
             profile.rendered();
         }
+        #[cfg(target_os = "macos")]
+        {
+            let current: Vec<_> = self
+                .app
+                .tabs
+                .iter()
+                .flat_map(|tab| &tab.panes)
+                .flat_map(|pane| pane.graphics.render_images())
+                .collect();
+            for old in &self.graphics_images {
+                if !current.iter().any(|image| image.id == old.id) {
+                    let _ = window.drop_image(old.clone());
+                }
+            }
+            self.graphics_images = current;
+        }
         let theme = self.app.theme;
         self.focused = self.focus.is_focused(window) && window.is_window_active();
         let tab = &mut self.app.tabs[self.app.active];
@@ -1405,6 +1438,35 @@ fn paint_box_drawing(text: &str, rect: Rect, color: Rgba, window: &mut Window) -
     true
 }
 
+#[cfg(target_os = "macos")]
+fn paint_graphics(pane: &TerminalSession, rect: Rect, above_text: bool, window: &mut Window) {
+    for draw in pane.graphics.draws(&pane.term) {
+        if (draw.z >= 0) != above_text {
+            continue;
+        }
+        let [x, y, w, h] = draw.rect;
+        let [u0, v0, u1, v1] = draw.uv;
+        let bounds = Bounds::new(rect.origin + point(px(x), px(y)), size(px(w), px(h)));
+        let source_width = w / (u1 - u0);
+        let source_height = h / (v1 - v0);
+        let image_bounds = Bounds::new(
+            bounds.origin - point(px(u0 * source_width), px(v0 * source_height)),
+            size(px(source_width), px(source_height)),
+        );
+        window.with_content_mask(Some(ContentMask { bounds }), |window| {
+            if let Err(error) = window.paint_image(
+                image_bounds,
+                Default::default(),
+                draw.picture.render.clone(),
+                0,
+                false,
+            ) {
+                tracing::warn!(%error, "Could not paint Kitty image");
+            }
+        });
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn paint_terminal(
     pane: &TerminalSession,
@@ -1439,6 +1501,8 @@ fn paint_terminal(
             ));
         }
     }
+    #[cfg(target_os = "macos")]
+    paint_graphics(pane, rect, false, window);
     for indexed in &cells {
         let row = indexed.point.line.0 + offset as i32;
         if row < 0 {
@@ -1499,6 +1563,8 @@ fn paint_terminal(
             ));
         }
     }
+    #[cfg(target_os = "macos")]
+    paint_graphics(pane, rect, true, window);
     if focused && offset == 0 && pane.term.mode().contains(TermMode::SHOW_CURSOR) {
         let cursor = content.cursor.point;
         let mut bounds = cell_rect(

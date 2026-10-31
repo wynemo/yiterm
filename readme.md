@@ -23,6 +23,7 @@ Download and extract the package for your platform from [Releases](https://githu
 - Windows embedded WebView2 browser routed through the focused YiTerm SSH session.
 - Drag to select and copy text.
 - Paste text and images; images are saved as files and their paths inserted, with remote uploads supported in SSH sessions.
+- Inline static images using the Kitty graphics protocol in local macOS / Linux terminals.
 - An embedded monospace font, with no extra font installation required.
 
 See the [technical and usage guide (Chinese)](TECHNICAL.md) for building from source, keyboard shortcuts, configuration and logging.

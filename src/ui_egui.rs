@@ -10,6 +10,23 @@ fn terminal_cell_rect(origin: egui::Pos2, cell: Vec2, column: usize, row: usize)
     )
 }
 
+fn paint_graphics(pane: &TerminalSession, rect: Rect, above_text: bool, ui: &egui::Ui) {
+    let painter = ui.painter().with_clip_rect(rect.intersect(ui.clip_rect()));
+    for draw in pane.graphics.draws(&pane.term) {
+        if (draw.z >= 0) != above_text {
+            continue;
+        }
+        let [x, y, w, h] = draw.rect;
+        let [u0, v0, u1, v1] = draw.uv;
+        painter.image(
+            draw.picture.texture(ui.ctx()),
+            Rect::from_min_size(rect.min + Vec2::new(x, y), Vec2::new(w, h)),
+            Rect::from_min_max(egui::pos2(u0, v0), egui::pos2(u1, v1)),
+            Color32::WHITE,
+        );
+    }
+}
+
 impl TerminalSession {
     fn copy_selection_egui(&mut self, ctx: &egui::Context) {
         if let Some(text) = self
@@ -121,12 +138,18 @@ impl TerminalSession {
             cols: ((rect.width() / cell.x) as usize).max(2),
             rows: ((rect.height() / cell.y) as usize).max(1),
         };
-        if size.cols != self.size.cols || size.rows != self.size.rows {
+        let pixels_changed = self.graphics.set_cell(
+            [cell.x, cell.y],
+            ctx.pixels_per_point(),
+            size.cols,
+            size.rows,
+        );
+        if size.cols != self.size.cols || size.rows != self.size.rows || pixels_changed {
             if let Err(error) = self.master.resize(PtySize {
                 cols: size.cols as u16,
                 rows: size.rows as u16,
-                pixel_width: 0,
-                pixel_height: 0,
+                pixel_width: self.graphics.pixels[0],
+                pixel_height: self.graphics.pixels[1],
             }) {
                 tracing::warn!(%error, "PTY resize failed");
                 self.status = error.to_string();
@@ -429,6 +452,7 @@ impl TerminalSession {
         for (background, bg) in backgrounds {
             ui.painter().rect_filled(background, 0.0, bg);
         }
+        paint_graphics(self, rect, false, ui);
         for indexed in &cells {
             let row = indexed.point.line.0 + offset as i32;
             if row < 0 {
@@ -481,6 +505,7 @@ impl TerminalSession {
                 }
             }
         }
+        paint_graphics(self, rect, true, ui);
         if focused
             && offset == 0
             && self.term.mode().contains(TermMode::SHOW_CURSOR)
