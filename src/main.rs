@@ -160,7 +160,7 @@ impl TerminalSession {
             ssh::parse(std::slice::from_ref(host))?;
         }
         #[cfg(windows)]
-        let graphics_enabled = conpty::initialize()? && args.ssh.is_none() && args.mosh.is_none();
+        let graphics_enabled = conpty::initialize()? && args.mosh.is_none();
         #[cfg(unix)]
         let graphics_enabled = args.mosh.is_none();
         let pair = portable_pty::native_pty_system().openpty(PtySize {

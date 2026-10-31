@@ -809,6 +809,7 @@ fn run_inner(real_ssh: &Path, directory: &Path, args: Vec<OsString>, mosh: bool)
                     output(&terminal)
                 }).await;
             }
+            let mut terminal_output = super::output::Output::default();
             let mut channel = super::shell(&handle, size.0, size.1).await?;
             loop {
                 tokio::select! {
@@ -846,13 +847,18 @@ fn run_inner(real_ssh: &Path, directory: &Path, args: Vec<OsString>, mosh: bool)
                                                 }
                                             }
                                         }
-                                        output(&terminal_bytes)?;
+                                        for part in terminal_output.advance(&terminal_bytes) {
+                                            output(&part)?;
+                                        }
                                     }
                                     russh::ChannelMsg::ExitStatus { exit_status: status } => exit_status = status as i32,
                                     russh::ChannelMsg::ExitSignal { .. } => exit_status = 128,
                                     russh::ChannelMsg::Close if shell_reply_pending => bail!("SSH channel closed before the shell request was accepted"),
                                     russh::ChannelMsg::Close => {
-                                        output(&osc52_filter.finish())?;
+                                        for part in terminal_output.advance(&osc52_filter.finish()) {
+                                            output(&part)?;
+                                        }
+                                        output(&terminal_output.finish())?;
                                         break;
                                     }
                                     _ => {},
@@ -860,7 +866,10 @@ fn run_inner(real_ssh: &Path, directory: &Path, args: Vec<OsString>, mosh: bool)
                             }
                             None if shell_reply_pending => bail!("SSH channel closed before the shell request was accepted"),
                             None => {
-                                output(&osc52_filter.finish())?;
+                                for part in terminal_output.advance(&osc52_filter.finish()) {
+                                    output(&part)?;
+                                }
+                                output(&terminal_output.finish())?;
                                 break;
                             }
                         }

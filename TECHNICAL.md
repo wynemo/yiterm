@@ -222,7 +222,7 @@ SSH 远端程序可通过 OSC 52 的 `c` 目标把文本复制到主机剪贴板
 
 ## Kitty 静态图片
 
-Windows 本地 shell，以及 macOS / Linux 的本地 shell 和普通 SSH 会话，使用同一 Kitty graphics protocol 静态图片实现。macOS / Linux 包括通过 `--ssh` 创建的会话，以及在本地 shell 中运行系统 `ssh` 进入的远端会话。保持 `TERM=xterm-256color`；客户端可通过 `a=q` 查询能力，无需把 TERM 改成 `xterm-kitty`。Windows 的 `--ssh` / `--mosh` 会话仍不启用图片能力，Mosh 和 tmux 等终端复用器透传不在支持范围内。
+Windows 本地 shell 和内置 SSH 会话，以及 macOS / Linux 的本地 shell 和普通 SSH 会话，使用同一 Kitty graphics protocol 静态图片实现。macOS / Linux 包括通过 `--ssh` 创建的会话，以及在本地 shell 中运行系统 `ssh` 进入的远端会话。保持 `TERM=xterm-256color`；客户端可通过 `a=q` 查询能力，无需把 TERM 改成 `xterm-kitty`。Windows 的 `--ssh` 和在本地 shell 中直接运行 YiTerm 内置 `ssh` 均启用图片能力；`ssh --system` 等外部客户端未包含下面的分段缓冲。Mosh 和 tmux 等终端复用器透传不在支持范围内。
 
 - 传输：`t=d` 直接传输，`f=24` RGB、`f=32` RGBA、`f=100` PNG，支持 `m` 分块、`o=z` zlib 压缩和 `q` 回复抑制。
 - 操作：`a=q` 查询、`a=t` 上传、`a=T` 上传并显示、`a=p` 再次显示；支持图片 ID `i`、放置 ID `p`，同一图片可以多处显示。上传替换同一图片 ID 时移除旧放置。
@@ -235,6 +235,8 @@ Windows 本地 shell，以及 macOS / Linux 的本地 shell 和普通 SSH 会话
 图片解码在后台运行，每个 pane 同时只解码一张；后续终端输出等待完成，以保持 VT 输出、图片放置和查询回复的顺序。处理图片命令前先应用 VTE 同步刷新缓存中的光标移动、滚动和清屏，再恢复剩余输出的同步刷新；同步刷新也按 VTE 的超时期限结束，避免未闭合的刷新块一直挂起。Codex 等 TUI 的图片因此使用同一帧中已更新的光标位置。单张图片最大 8192×8192，且解码后的 RGBA 数据不超过 64 MiB；传输和解压后的数据各不超过 64 MiB。每个 pane 最多缓存 128 MiB RGBA、256 张图片和 1024 个放置，达到缓存限制时淘汰已有图片。图片数据和路径不会通过协议触发本地文件读取。
 
 Windows 需要使用完整发布包，将 `yiterm.exe`、`conpty.dll` 和 `OpenConsole.exe` 保留在同一目录。本次打包使用官方 [Microsoft.Windows.Console.ConPTY 1.25.260930003](https://www.nuget.org/packages/Microsoft.Windows.Console.ConPTY/1.25.260930003)，包含未知 VT/APC 透传后的[光标重新同步修复](https://github.com/microsoft/terminal/pull/20009)。图片序列经过 ConPTY 输出管道进入 YiTerm，解码、放置、DPI 缩放和 GPUI 绘制复用 macOS 路径；不使用本地文件读取或额外图片上传通道。
+
+Windows 内置 SSH 会在进入 ConPTY 前，将跨 SSH 数据包、跨 OSC 52 过滤边界的 APC 拼成完整控制串，包含结束符后才写入控制台，避免读取下一包期间的窗口尺寸查询等控制台操作打断图片序列。单条 APC 缓冲最多 8192 字节，超限或连接关闭时未完成的 APC 会被丢弃并记录警告，不把残缺图片数据当作文字输出。开启 `yiterm::graphics=debug` 可查看完整 APC 的转发字节数和图片放置位置，日志不记录图片载荷。
 
 Windows 从源码运行时，需要先从本次 Windows CI 发布包复制配套的 `conpty.dll` / `OpenConsole.exe` 到 `target/release/`，再执行 `cargo run --release`。没有配套运行时的开发构建仍可回退到系统 ConPTY 启动普通 shell，但关闭 Kitty 图片能力并记录警告；系统内置 ConPTY 对未知 APC 的透传不作保证。不要混用旧发布包的运行时。
 

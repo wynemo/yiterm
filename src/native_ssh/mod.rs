@@ -4,6 +4,8 @@ pub mod auth;
 pub mod config;
 pub mod connection;
 pub mod osc52;
+#[cfg_attr(not(windows), allow(dead_code))]
+mod output;
 pub mod socks;
 pub mod transfer;
 #[cfg(windows)]
