@@ -18,6 +18,7 @@ enum Action {
     Text(Vec<u8>),
     Command(Vec<u8>),
     Abort,
+    CellSizeQuery,
 }
 struct Transfer {
     controls: Controls,
@@ -101,6 +102,7 @@ pub struct Graphics {
     anonymous: std::collections::BTreeSet<u32>,
     state: u8,
     apc: Vec<u8>,
+    size_query: Vec<u8>,
     overflow: bool,
     actions: VecDeque<Action>,
     transfer: Option<Transfer>,
@@ -122,6 +124,7 @@ impl Graphics {
             anonymous: Default::default(),
             state: 0,
             apc: Vec::new(),
+            size_query: Vec::new(),
             overflow: false,
             actions: VecDeque::new(),
             transfer: None,
@@ -183,6 +186,9 @@ impl Graphics {
                         self.apc.clear();
                         self.overflow = false;
                         self.state = 4;
+                    } else if b == b'[' {
+                        self.size_query.extend_from_slice(b"\x1b[");
+                        self.state = 6;
                     } else if b == 0x1b {
                         text.push(0x1b);
                     } else {
@@ -242,6 +248,9 @@ impl Graphics {
                             self.apc.clear();
                             self.overflow = false;
                             self.state = 4;
+                        } else if b == b'[' {
+                            self.size_query.extend_from_slice(b"\x1b[");
+                            self.state = 6;
                         } else {
                             text.extend_from_slice(&[0x1b, b]);
                             self.state = match b {
@@ -255,6 +264,30 @@ impl Graphics {
                     }
                 }
                 6 => {
+                    // VTE does not implement XTWINOPS 16. Keep its short prefix
+                    // across PTY reads and dispatch the query in stream order.
+                    self.size_query.push(b);
+                    if self.size_query == b"\x1b[16t" {
+                        if !text.is_empty() {
+                            self.actions
+                                .push_back(Action::Text(std::mem::take(&mut text)));
+                        }
+                        self.actions.push_back(Action::CellSizeQuery);
+                        self.size_query.clear();
+                        self.state = 0;
+                    } else if !b"\x1b[16t".starts_with(&self.size_query) {
+                        if b == 0x1b {
+                            self.size_query.pop();
+                            self.state = 1;
+                        } else if (0x40..=0x7e).contains(&b) || b == 0x18 || b == 0x1a {
+                            self.state = 0;
+                        } else {
+                            self.state = 9;
+                        }
+                        text.append(&mut self.size_query);
+                    }
+                }
+                9 => {
                     if b != 0x1b {
                         text.push(b);
                     }
@@ -290,6 +323,10 @@ impl Graphics {
             match action {
                 Action::Text(bytes) => parser.advance(term, &bytes),
                 Action::Abort => self.transfer = None,
+                Action::CellSizeQuery => {
+                    let [width, height] = self.cell_pixels();
+                    term.graphics_reply(format!("\x1b[6;{height};{width}t"));
+                }
                 Action::Command(bytes) => {
                     // APCs are dispatched outside VTE. Its synchronized-update
                     // buffer must first apply all preceding cursor movements,
