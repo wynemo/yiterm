@@ -21,7 +21,8 @@ TARGETS = {
     "aarch64-apple-darwin": ("macos-arm64", "yiterm"),
     "x86_64-unknown-linux-gnu": ("linux-x64", "yiterm"),
 }
-CONPTY_VERSION = "1.24.261001001"
+# 1.25 includes cursor resynchronization after unknown VT/APC passthrough.
+CONPTY_VERSION = "1.25.260930003"
 CONPTY_FILES = {
     "runtimes/win-x64/native/conpty.dll": "conpty.dll",
     "build/native/runtimes/x64/OpenConsole.exe": "OpenConsole.exe",

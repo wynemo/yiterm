@@ -30,7 +30,7 @@ struct Pending {
 pub struct Picture {
     pub width: u32,
     pub height: u32,
-    #[cfg(target_os = "macos")]
+    #[cfg(not(target_os = "linux"))]
     pub render: Arc<gpui::RenderImage>,
     #[cfg(target_os = "linux")]
     rgba: image::RgbaImage,
@@ -42,7 +42,7 @@ impl Picture {
         Self {
             width: rgba.width(),
             height: rgba.height(),
-            #[cfg(target_os = "macos")]
+            #[cfg(not(target_os = "linux"))]
             render: {
                 // GPUI's sprite shader expects BGRA bytes.
                 let mut bgra = rgba;
@@ -155,7 +155,7 @@ impl Graphics {
         self.cell
             .map(|v| (v * self.scale).round().clamp(1., u16::MAX as f32) as u16)
     }
-    #[cfg(target_os = "macos")]
+    #[cfg(not(target_os = "linux"))]
     pub fn render_images(&self) -> impl Iterator<Item = Arc<gpui::RenderImage>> + '_ {
         self.images.values().map(|picture| picture.render.clone())
     }

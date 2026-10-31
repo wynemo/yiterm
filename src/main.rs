@@ -1,7 +1,6 @@
 #![cfg_attr(windows, windows_subsystem = "windows")]
 mod files;
 mod git;
-#[cfg(unix)]
 mod kitty;
 #[cfg(not(target_os = "linux"))]
 mod profiling;
@@ -116,7 +115,6 @@ struct TerminalSession {
     title: String,
     term: Term<Listener>,
     parser: Processor,
-    #[cfg(unix)]
     graphics: kitty::Graphics,
     mouse_modes: mouse::MouseModes,
     mouse_wheel: mouse::Wheel,
@@ -162,7 +160,9 @@ impl TerminalSession {
             ssh::parse(std::slice::from_ref(host))?;
         }
         #[cfg(windows)]
-        conpty::initialize()?;
+        let graphics_enabled = conpty::initialize()? && args.ssh.is_none() && args.mosh.is_none();
+        #[cfg(unix)]
+        let graphics_enabled = args.mosh.is_none();
         let pair = portable_pty::native_pty_system().openpty(PtySize {
             rows: 24,
             cols: 80,
@@ -253,10 +253,7 @@ impl TerminalSession {
                 .unwrap_or_else(|| "Terminal".into()),
             term,
             parser: Processor::new(),
-            #[cfg(unix)]
-            // System OpenSSH preserves the same VT stream and terminal replies
-            // as a local shell; direct Kitty data needs no separate transport.
-            graphics: kitty::Graphics::new(args.mosh.is_none(), repaint.clone()),
+            graphics: kitty::Graphics::new(graphics_enabled, repaint.clone()),
             mouse_modes: mouse::MouseModes::default(),
             mouse_wheel: mouse::Wheel::default(),
             output,
@@ -512,10 +509,8 @@ impl TerminalSession {
             self.repaint.store(true, Ordering::Release);
             wake_ui();
         }
-        #[cfg(unix)]
         self.graphics.advance(&mut self.parser, &mut self.term);
         for batch in 0..128 {
-            #[cfg(unix)]
             if self.graphics.busy() {
                 break;
             }
@@ -529,13 +524,8 @@ impl TerminalSession {
             self.output_revision = self.output_revision.wrapping_add(1);
             let previous_mode = *self.term.mode();
             let requests = self.mouse_modes.observe(&bytes);
-            #[cfg(unix)]
-            {
-                self.graphics.feed(&bytes);
-                self.graphics.advance(&mut self.parser, &mut self.term);
-            }
-            #[cfg(not(unix))]
-            self.parser.advance(&mut self.term, &bytes);
+            self.graphics.feed(&bytes);
+            self.graphics.advance(&mut self.parser, &mut self.term);
             for (mode, enabled) in requests {
                 tracing::debug!(target: "yiterm::mouse",
                     session_id = %self.log_id, source = "pty_output",
@@ -569,7 +559,6 @@ impl TerminalSession {
         while let Ok(event) = self.events.try_recv() {
             match event {
                 Event::PtyWrite(text) => self.write(text.as_bytes()),
-                #[cfg(unix)]
                 Event::TextAreaSizeRequest(format) => {
                     let [cell_width, cell_height] = self.graphics.cell_pixels();
                     let text = format(alacritty_terminal::event::WindowSize {

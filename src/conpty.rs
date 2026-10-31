@@ -9,13 +9,20 @@ use windows_sys::Win32::System::LibraryLoader::{
     LOAD_LIBRARY_SEARCH_SYSTEM32, LoadLibraryExW,
 };
 
-pub fn initialize() -> Result<()> {
+/// Whether the bundled runtime is available for Kitty APC passthrough.
+/// The system fallback keeps development shells usable, but must not advertise
+/// graphics: older inbox console hosts discard unsupported APC strings.
+pub fn initialize() -> Result<bool> {
     let executable = std::env::current_exe()?;
     let directory = executable.parent().context("Executable has no directory")?;
     let dll = directory.join("conpty.dll");
     if !dll.exists() && option_env!("YITERM_BUILD_REV").is_none() {
-        tracing::info!(runtime = "system", "ConPTY initialized (development build)");
-        return Ok(());
+        tracing::warn!(
+            runtime = "system",
+            graphics = false,
+            "ConPTY initialized without bundled runtime; Kitty images require the release conpty.dll and OpenConsole.exe"
+        );
+        return Ok(false);
     }
     ensure!(
         dll.is_file() && directory.join("OpenConsole.exe").is_file(),
@@ -55,5 +62,5 @@ pub fn initialize() -> Result<()> {
         "ConPTY runtime=bundled path={}",
         OsString::from_wide(&actual[..length as usize]).to_string_lossy()
     );
-    Ok(())
+    Ok(true)
 }

@@ -237,7 +237,6 @@ enum Menu {
 
 pub(super) struct TerminalUi {
     app: TerminalApp,
-    #[cfg(target_os = "macos")]
     graphics_images: Vec<Arc<gpui::RenderImage>>,
     focus: FocusHandle,
     files_focus: FocusHandle,
@@ -455,7 +454,6 @@ impl TerminalUi {
         let files_focus = cx.focus_handle();
         let files_split = cx.new(|_| gpui_component::resizable::ResizableState::default());
         Self {
-            #[cfg(target_os = "macos")]
             graphics_images: Vec::new(),
             git_message,
             git_message_repo: None,
@@ -864,20 +862,14 @@ impl TerminalUi {
                 ((geo.terminal.size.width / self.cell.width) as usize).clamp(2, u16::MAX as usize);
             let rows = ((geo.terminal.size.height / self.cell.height) as usize)
                 .clamp(1, u16::MAX as usize);
-            #[cfg(unix)]
             let pixels_changed = pane.graphics.set_cell(
                 [f32::from(self.cell.width), f32::from(self.cell.height)],
                 window.scale_factor(),
                 cols,
                 rows,
             );
-            #[cfg(not(unix))]
-            let pixels_changed = false;
             if cols != pane.size.cols || rows != pane.size.rows || pixels_changed {
-                #[cfg(unix)]
                 let [pixel_width, pixel_height] = pane.graphics.pixels;
-                #[cfg(not(unix))]
-                let (pixel_width, pixel_height) = (0, 0);
                 if let Err(error) = pane.master.resize(PtySize {
                     cols: cols as u16,
                     rows: rows as u16,
@@ -1165,7 +1157,6 @@ impl TerminalUi {
         if let Some(profile) = &mut self.profile {
             profile.rendered();
         }
-        #[cfg(target_os = "macos")]
         {
             let current: Vec<_> = self
                 .app
@@ -1438,7 +1429,6 @@ fn paint_box_drawing(text: &str, rect: Rect, color: Rgba, window: &mut Window) -
     true
 }
 
-#[cfg(target_os = "macos")]
 fn paint_graphics(pane: &TerminalSession, rect: Rect, above_text: bool, window: &mut Window) {
     for draw in pane.graphics.draws(&pane.term) {
         if (draw.z >= 0) != above_text {
@@ -1501,7 +1491,6 @@ fn paint_terminal(
             ));
         }
     }
-    #[cfg(target_os = "macos")]
     paint_graphics(pane, rect, false, window);
     for indexed in &cells {
         let row = indexed.point.line.0 + offset as i32;
@@ -1563,7 +1552,6 @@ fn paint_terminal(
             ));
         }
     }
-    #[cfg(target_os = "macos")]
     paint_graphics(pane, rect, true, window);
     if focused && offset == 0 && pane.term.mode().contains(TermMode::SHOW_CURSOR) {
         let cursor = content.cursor.point;
