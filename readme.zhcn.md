@@ -26,10 +26,12 @@
 - Windows / macOS / Linux 本地终端和 SSH 会话支持通过 Kitty 图片协议显示静态图片，Windows 使用内置 SSH 客户端。
 - 内置等宽字体，无需额外安装。
 
-macOS 和 Linux 均支持在终端内直接显示图片。
+Windows、macOS 和 Linux 均支持在终端内直接显示图片。
 
 ![YiTerm 在 macOS 上显示 Codex 中的图片](assets/screenshots/yiterm-macos-images.png)
 
 ![YiTerm 在 Linux 上显示 Codex 中的图片](assets/screenshots/yiterm-linux-images.png)
+
+![YiTerm 在 Windows 上通过 SSH 显示 Codex 中的图片](assets/screenshots/yiterm-windows-images.png)
 
 构建、快捷键、配置和日志等详情见 [技术与详细使用说明](TECHNICAL.md)。
