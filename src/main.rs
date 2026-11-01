@@ -496,7 +496,7 @@ fn terminal_colors(cell: &Cell, theme: ThemeMode) -> (Rgba, Rgba) {
 }
 
 impl TerminalSession {
-    fn poll(&mut self) -> bool {
+    fn poll(&mut self, theme: ThemeMode) -> bool {
         // VTE relies on its caller to expire synchronized updates. A client
         // waiting for a buffered terminal query must not stall the pane forever.
         if self
@@ -559,6 +559,24 @@ impl TerminalSession {
         while let Ok(event) = self.events.try_recv() {
             match event {
                 Event::PtyWrite(text) => self.write(text.as_bytes()),
+                Event::ColorRequest(index, format) => {
+                    // Use the same palette as the renderer so applications can
+                    // detect a light background through OSC 10/11 queries.
+                    let value = match index {
+                        0..=255 => color(Color::Indexed(index as u8), true, theme),
+                        index if index == NamedColor::Foreground as usize => theme.foreground(),
+                        index if index == NamedColor::Background as usize => theme.background(),
+                        index if index == NamedColor::Cursor as usize => theme.cursor(),
+                        _ => continue,
+                    };
+                    #[cfg(target_os = "linux")]
+                    let [r, g, b] = [value.r(), value.g(), value.b()];
+                    #[cfg(not(target_os = "linux"))]
+                    let [r, g, b] =
+                        [value.r, value.g, value.b].map(|channel| (channel * 255.).round() as u8);
+                    let text = format(alacritty_terminal::vte::ansi::Rgb { r, g, b });
+                    self.write(text.as_bytes());
+                }
                 Event::TextAreaSizeRequest(format) => {
                     let [cell_width, cell_height] = self.graphics.cell_pixels();
                     let text = format(alacritty_terminal::event::WindowSize {
@@ -763,9 +781,9 @@ impl TerminalTab {
         }
     }
 
-    fn poll(&mut self) -> bool {
+    fn poll(&mut self, theme: ThemeMode) -> bool {
         for index in (0..self.panes.len()).rev() {
-            if !self.panes[index].poll() {
+            if !self.panes[index].poll(theme) {
                 self.close_pane(index);
             }
         }

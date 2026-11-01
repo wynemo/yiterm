@@ -813,7 +813,7 @@ impl eframe::App for TerminalApp {
             }
         }
         for index in (0..self.tabs.len()).rev() {
-            if !self.tabs[index].poll() {
+            if !self.tabs[index].poll(self.theme) {
                 self.close_tab(index);
             }
         }

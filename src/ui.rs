@@ -279,7 +279,7 @@ impl TerminalUi {
         let mut app = app;
         for tab in &mut app.tabs {
             for pane in &mut tab.panes {
-                pane.poll();
+                pane.poll(app.theme);
             }
         }
         let focus = cx.focus_handle();
@@ -536,7 +536,7 @@ impl TerminalUi {
             }
         }
         for index in (0..self.app.tabs.len()).rev() {
-            if !self.app.tabs[index].poll() {
+            if !self.app.tabs[index].poll(self.app.theme) {
                 self.app.close_tab(index);
                 changed = true;
             }
