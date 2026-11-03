@@ -16,6 +16,7 @@ use tokio::{net::UdpSocket, sync::mpsc, task::JoinHandle};
 /// Kept in memory only; never serialize or log the MOSH CONNECT key.
 pub struct Endpoint {
     address: SocketAddr,
+    host: String,
     key: zeroize::Zeroizing<String>,
 }
 
@@ -75,7 +76,7 @@ pub async fn bootstrap(
                     .or_else(|| server_ip.and_then(|ip| addresses.iter().find(|a| a.is_ipv4() == ip.is_ipv4()).copied()))
                     .or_else(|| addresses.first().copied())
                     .context("Mosh host has no IP address")?;
-                endpoint = Some(Endpoint { address, key });
+                endpoint = Some(Endpoint { address, host: host.to_owned(), key });
             }
         }
         endpoint.context("Server did not return MOSH CONNECT; verify mosh-server is installed")
@@ -150,9 +151,9 @@ impl Session {
         self.closing.get_or_insert_with(Instant::now);
         self.send_due = Instant::now();
     }
-    fn packets(&mut self) -> Result<Vec<Vec<u8>>> {
+    fn message(&mut self) -> Result<Option<Vec<u8>>> {
         if Instant::now() < self.send_due {
-            return Ok(Vec::new());
+            return Ok(None);
         }
         let latest = *self.local.last_key_value().unwrap().0;
         // Empty numbered states make keepalives acknowledgeable. Lost input is
@@ -184,7 +185,7 @@ impl Session {
             throwaway: self.ack_local,
             diff,
         };
-        let packets = self.wire.encode(&instruction.encode(), self.clock())?;
+        let message = instruction.encode();
         self.last_send = Instant::now();
         self.send_due = self.last_send
             + if latest > self.ack_local || self.closing.is_some() {
@@ -192,7 +193,7 @@ impl Session {
             } else {
                 Duration::from_secs(3)
             };
-        Ok(packets)
+        Ok(Some(message))
     }
     fn receive(&mut self, data: &[u8]) -> Result<Option<Vec<u8>>> {
         let received = self.wire.receive(data, self.clock())?;
@@ -299,7 +300,14 @@ impl Session {
     }
 }
 
+struct Datagram {
+    local: SocketAddr,
+    data: Vec<u8>,
+}
+
 struct Socket {
+    local: SocketAddr,
+    peer: SocketAddr,
     socket: Arc<UdpSocket>,
     reader: JoinHandle<()>,
     created: Instant,
@@ -309,7 +317,7 @@ impl Drop for Socket {
         self.reader.abort();
     }
 }
-async fn socket(address: SocketAddr, sender: mpsc::Sender<Vec<u8>>) -> Result<Socket> {
+async fn socket(address: SocketAddr, sender: mpsc::Sender<Datagram>) -> Result<Socket> {
     let bind = if address.is_ipv4() {
         "0.0.0.0:0"
     } else {
@@ -317,13 +325,21 @@ async fn socket(address: SocketAddr, sender: mpsc::Sender<Vec<u8>>) -> Result<So
     };
     let socket = Arc::new(UdpSocket::bind(bind).await?);
     socket.connect(address).await?;
+    let local = socket.local_addr()?;
     let read_socket = socket.clone();
     let reader = tokio::spawn(async move {
         let mut buffer = vec![0; 65536];
         loop {
             match read_socket.recv(&mut buffer).await {
                 Ok(n) => {
-                    if sender.send(buffer[..n].to_vec()).await.is_err() {
+                    if sender
+                        .send(Datagram {
+                            local,
+                            data: buffer[..n].to_vec(),
+                        })
+                        .await
+                        .is_err()
+                    {
                         break;
                     }
                 }
@@ -332,6 +348,8 @@ async fn socket(address: SocketAddr, sender: mpsc::Sender<Vec<u8>>) -> Result<So
         }
     });
     Ok(Socket {
+        local,
+        peer: address,
         socket,
         reader,
         created: Instant::now(),
@@ -356,13 +374,16 @@ pub async fn run(
     let mut session = Session::new(&endpoint.key, current_size.0, current_size.1)?;
     let (sender, mut packets) = mpsc::channel(64);
     let mut sockets = vec![socket(endpoint.address, sender.clone()).await?];
+    let mut active = sockets[0].local;
+    let mut resolver: Option<JoinHandle<Result<Vec<SocketAddr>>>> = None;
+    let mut disconnected = false;
     let mut tick = tokio::time::interval(Duration::from_millis(20));
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut last_hop = Instant::now();
     let mut escape = false;
     let mut notice = None;
     output(b"\x1b[?1049h\x1b[?1h")?;
-    tracing::info!(port = endpoint.address.port(), "Mosh UDP session started");
+    tracing::info!(host = %endpoint.host, peer = %endpoint.address, local = %active, "Mosh UDP session started");
     let result = async {
         loop {
             tokio::select! {
@@ -390,9 +411,24 @@ pub async fn run(
                     }
                 }
                 Some(packet) = packets.recv() => {
-                    match session.receive(&packet) {
+                    let previous_contact = session.last_contact;
+                    match session.receive(&packet.data) {
                         Ok(paint) => {
-                            if notice.take().is_some() { output(&session.frame())?; }
+                            // Only a complete, authenticated protocol message can
+                            // select a candidate. DNS alone never replaces the peer.
+                            if session.last_contact > previous_contact {
+                                if let Some(socket) = sockets.iter().find(|s| s.local == packet.local) {
+                                    if active != socket.local {
+                                        tracing::info!(peer = %socket.peer, local = %socket.local, "Mosh selected a responding UDP path");
+                                        active = socket.local;
+                                    }
+                                    if disconnected {
+                                        tracing::info!(peer = %socket.peer, outage_seconds = previous_contact.elapsed().as_secs(), "Mosh UDP replies resumed");
+                                        disconnected = false;
+                                    }
+                                }
+                            }
+                            if session.last_contact > previous_contact && notice.take().is_some() { output(&session.frame())?; }
                             else if let Some(paint) = paint { output(&paint)?; }
                         }
                         // Unauthenticated/invalid datagrams cannot end a session
@@ -410,21 +446,81 @@ pub async fn run(
                         session.event(proto::resize(current_size.0, current_size.1))?;
                         output(&session.frame())?;
                     }
-                    if session.last_roundtrip.elapsed() >= Duration::from_secs(10) && last_hop.elapsed() >= Duration::from_secs(10) {
-                        last_hop = Instant::now();
-                        match socket(endpoint.address, sender.clone()).await {
-                            Ok(next) => { sockets.push(next); tracing::info!("Mosh selected a new local UDP port"); }
-                            Err(error) => tracing::debug!(%error, "Mosh UDP port change deferred"),
+                    let stalled = session.last_roundtrip.elapsed() >= Duration::from_secs(10);
+                    if resolver.as_ref().is_some_and(|task| task.is_finished()) {
+                        match resolver.take().unwrap().await {
+                            Ok(Ok(addresses)) if stalled => {
+                                tracing::info!(host = %endpoint.host, ?addresses, "Mosh refreshed UDP host addresses");
+                                for address in addresses {
+                                    if sockets.iter().any(|s| s.peer == address && s.created >= last_hop) { continue; }
+                                    match socket(address, sender.clone()).await {
+                                        Ok(next) => {
+                                            tracing::info!(peer = %next.peer, local = %next.local, "Mosh probing resolved UDP address");
+                                            sockets.push(next);
+                                            session.send_due = Instant::now();
+                                        }
+                                        Err(error) => tracing::warn!(peer = %address, %error, "Mosh UDP address probe deferred"),
+                                    }
+                                }
+                            }
+                            Ok(Ok(_)) => {}
+                            Ok(Err(error)) => tracing::warn!(host = %endpoint.host, %error, "Mosh DNS refresh failed; retaining UDP paths"),
+                            Err(error) => tracing::warn!(%error, "Mosh DNS refresh task failed"),
                         }
                     }
-                    while sockets.len() > 1 && sockets[0].created.elapsed() > Duration::from_secs(60) { sockets.remove(0); }
-                    for packet in session.packets()? {
-                        if let Err(error) = sockets.last().unwrap().socket.send(&packet).await {
-                            tracing::debug!(%error, "Mosh UDP send deferred; state remains pending");
+                    if stalled && last_hop.elapsed() >= Duration::from_secs(10) {
+                        last_hop = Instant::now();
+                        let peer = sockets.iter().find(|s| s.local == active).unwrap().peer;
+                        match socket(peer, sender.clone()).await {
+                            Ok(next) => {
+                                tracing::info!(peer = %next.peer, local = %next.local, "Mosh probing a new local UDP port");
+                                sockets.push(next);
+                                session.send_due = Instant::now();
+                            }
+                            Err(error) => tracing::warn!(%error, "Mosh UDP port change deferred"),
+                        }
+                        if resolver.is_none() {
+                            let host = endpoint.host.clone();
+                            let port = endpoint.address.port();
+                            // Keep DNS (including a slow system resolver) off the
+                            // terminal event loop. Never resolve an SSH alias.
+                            resolver = Some(tokio::spawn(async move {
+                                let addresses = tokio::time::timeout(Duration::from_secs(5), tokio::net::lookup_host((host.as_str(), port)))
+                                    .await.context("Mosh DNS refresh timed out")??;
+                                let mut unique = Vec::new();
+                                for address in addresses {
+                                    if !unique.contains(&address) { unique.push(address); }
+                                    if unique.len() >= 16 { break; }
+                                }
+                                ensure!(!unique.is_empty(), "Mosh host has no IP address");
+                                Ok(unique)
+                            }));
+                        }
+                    }
+                    sockets.retain(|s| s.local == active || s.created.elapsed() < Duration::from_secs(60));
+                    if let Some(message) = session.message()? {
+                        // Give each path fresh sequence numbers so server replay
+                        // protection cannot suppress a probe after another path
+                        // delivered the same state. Probe after the active path
+                        // so the server can roam to the new client port.
+                        let paths = sockets.iter().filter(|s| s.local == active)
+                            .chain(sockets.iter().filter(|s| stalled && s.created >= last_hop && s.local != active));
+                        for socket in paths {
+                            let clock = session.clock();
+                            for packet in session.wire.encode(&message, clock)? {
+                                if let Err(error) = socket.socket.send(&packet).await {
+                                    tracing::debug!(peer = %socket.peer, local = %socket.local, %error, "Mosh UDP send deferred; state remains pending");
+                                }
+                            }
                         }
                     }
                     if session.remote_closed { return Ok(0); } // final server ACK was sent above
                     let seconds = session.last_contact.elapsed().as_secs();
+                    if seconds >= 5 && !disconnected {
+                        let peer = sockets.iter().find(|s| s.local == active).unwrap().peer;
+                        tracing::warn!(peer = %peer, seconds, "Mosh UDP replies stalled");
+                        disconnected = true;
+                    }
                     if seconds >= 5 && notice != Some(seconds) {
                         let text = format!("Mosh: no UDP reply for {seconds}s; Ctrl-^ . to quit");
                         let text: String = text.chars().take(current_size.0 as usize).collect();
@@ -435,6 +531,9 @@ pub async fn run(
             }
         }
     }.await;
+    if let Some(task) = resolver {
+        task.abort();
+    }
     let reset = output(b"\x1b[0m\x1b[?25h\x1b[?1l\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l\x1b[?2004l\x1b[?1049l");
     tracing::info!("Mosh UDP session ended");
     result.and_then(|code| reset.map(|_| code))
