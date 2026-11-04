@@ -195,6 +195,15 @@ impl TerminalSession {
             integration.shell_with_directory(&shell, directory_token.as_deref())?
         };
         command.env("TERM", "xterm-256color");
+        #[cfg(windows)]
+        {
+            let path = args
+                .config
+                .clone()
+                .map(Ok)
+                .unwrap_or_else(logging::config_path)?;
+            command.env("YITERM_CONFIG_PATH", std::path::absolute(path)?);
+        }
         let child = pair
             .slave
             .spawn_command(command)

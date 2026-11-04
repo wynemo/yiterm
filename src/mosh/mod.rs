@@ -1,6 +1,7 @@
 //! Native Mosh protocol-v2 client. The protocol layout and state rebasing follow
 //! packages/MoshCore/Sources/MoshCoreSwift in the adjacent mymosh project.
 mod proto;
+mod theme_sync;
 mod wire;
 
 use anyhow::{Context, Result, ensure};
@@ -374,6 +375,7 @@ async fn socket(address: SocketAddr, sender: mpsc::Sender<Datagram>) -> Result<S
 /// protocol portable and compiled by the ordinary macOS Release build as well.
 pub async fn run(
     endpoint: Endpoint,
+    handle: Arc<russh::client::Handle<crate::native_ssh::auth::Handler>>,
     input: &mut mpsc::Receiver<Result<Vec<u8>>>,
     size: impl Fn() -> Result<(u32, u32)>,
     mut output: impl FnMut(&[u8]) -> Result<()>,
@@ -397,10 +399,14 @@ pub async fn run(
     let mut escape = false;
     let mut notice = None;
     output(b"\x1b[?1049h\x1b[?1h")?;
+    let (mut themes, theme_monitor) = theme_sync::monitor(handle, endpoint.address.port());
     tracing::info!(host = %endpoint.host, peer = %endpoint.address, local = %active, "Mosh UDP session started");
     let result = async {
         loop {
             tokio::select! {
+                Some(bytes) = themes.recv(), if session.closing.is_none() => {
+                    session.event(proto::input(&bytes))?;
+                }
                 bytes = input.recv(), if session.closing.is_none() => {
                     match bytes {
                         Some(Ok(bytes)) if !bytes.is_empty() => {
@@ -545,6 +551,7 @@ pub async fn run(
             }
         }
     }.await;
+    theme_monitor.abort();
     if let Some(task) = resolver {
         task.abort();
     }

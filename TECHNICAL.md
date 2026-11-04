@@ -137,6 +137,8 @@ yiterm --mosh my-server
 
 协议核心参考 `mymosh/packages/MoshCore/Sources/MoshCoreSwift` 的报文、protobuf、分片和状态同步实现，使用 RustCrypto OCB 与 zlib；每个服务端状态保留独立屏幕快照，分支切换时重绘。未确认输入从最近确认状态重新发送，断网后继续等待，持续没有往返确认时每 10 秒尝试更换本地 UDP 端口，并在后台重新解析 SSH config 的 HostName（单次等待最多 5 秒）；探测新解析地址和原有路径，收到完整且通过会话密钥认证的协议消息后才切换路径，并短暂保留旧端口接收。DNS 刷新受系统解析缓存和域名 TTL 影响；远端 IP 变化后须仍能通过原 UDP 端口访问同一 mosh-server 进程，服务器重启或会话消失不能靠 DNS 刷新恢复。日志记录启动目标、本地端口、断线、DNS 结果、路径切换和恢复，不记录会话密钥或终端内容。超过 5 秒没有完整服务端消息时在底行显示状态；恢复后自动重绘。第一版没有本地预测回显、跨进程会话恢复或自定义 UDP 端口参数。退出远端 shell，或按 **Ctrl+^**（通常为 Ctrl+Shift+6）后按 **.** 退出客户端；前缀后按 **^** 发送字面 Ctrl+^。
 
+Mosh 会截住 OSC 颜色查询，单靠本地终端的查询回复不能让 Herdr 获得当前主题。内置客户端参考 mymosh，通过保留的 SSH 连接每 3 秒检查当前 UDP 端口对应的 mosh-server 进程树；仅在确认其前台程序为 Herdr 时，通过 Mosh 输入通道发送当前前景色、背景色、ANSI 0–15 调色板及深浅主题报告。首次检测到 Herdr、检测到退出后重新进入或配置主题变化时同步，支持 `--config`；避免 Herdr / pi 因主题探测不一致而使用不可见的输入框光标颜色。远端需提供 `lsof` 和支持 `pgid` / `tpgid` 的 `ps`；无法确认前台程序或辅助 SSH 已断开时跳过同步，不为此自动重连或弹出认证。Windows 下 `mosh + herdr + pi` 的实际显示仍需实机确认。
+
 Mosh 会话期间保留启动时的 SSH 连接，图片上传通过同一已认证连接的新 SFTP 通道完成，**Open SSH Browser / Open SSH VNC** 也可复用该连接。终端 UDP 会话独立运行；辅助 SSH 默认每 30 秒保活（可通过 ServerAliveInterval / ServerAliveCountMax 配置）；断开后不主动重连，下次浏览器转发或上传时按需重连，并复用当前进程内存中缓存的密码或密钥口令，不再弹出终端认证输入。凭据不写入磁盘、日志或 GUI IPC，进程退出后清除。需要新的验证码、认证提示或密码已失效时，本次操作失败，须重新登录；ProxyJump 的跳板机重连依赖其非交互式密钥或 agent 认证。已中断的网页连接需刷新，上传中断后需重试。关闭客户端会尝试发送 Mosh 退出握手；直接关闭 tab / pane 会终止客户端进程，不保存恢复信息，远端清理由 mosh-server 自身策略决定。
 
 ### Windows 内置浏览器与 SSH SOCKS5

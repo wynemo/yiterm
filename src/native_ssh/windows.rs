@@ -794,7 +794,7 @@ fn run_inner(real_ssh: &Path, directory: &Path, args: Vec<OsString>, mosh: bool)
             .then(crate::mouse::MouseModes::default);
         let result = async {
             if let Some(endpoint) = endpoint {
-                return crate::mosh::run(endpoint, &mut rx, || console.size(), |bytes| {
+                return crate::mosh::run(endpoint, handle.clone(), &mut rx, || console.size(), |bytes| {
                     let (terminal, requests) = osc52_filter.advance(bytes);
                     // Use the same authenticated per-pane clipboard IPC as SSH.
                     // Requests are dispatched independently of the UDP loop.
