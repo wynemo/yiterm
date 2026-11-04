@@ -526,6 +526,21 @@ impl TerminalSession {
             let requests = self.mouse_modes.observe(&bytes);
             self.graphics.feed(&bytes);
             self.graphics.advance(&mut self.parser, &mut self.term);
+            if tracing::enabled!(target: "yiterm::cursor", tracing::Level::DEBUG) {
+                let visible = self.term.mode().contains(TermMode::SHOW_CURSOR);
+                if previous_mode.contains(TermMode::SHOW_CURSOR) != visible {
+                    tracing::debug!(target: "yiterm::cursor",
+                        session_id = %self.log_id, source = "terminal_parser", visible,
+                        "Terminal cursor visibility changed");
+                }
+                let cursor = self.term.renderable_content().cursor.point;
+                tracing::trace!(target: "yiterm::cursor",
+                    session_id = %self.log_id, source = "terminal_parser",
+                    revision = self.output_revision, visible,
+                    row = cursor.line.0, column = cursor.column.0,
+                    display_offset = self.term.grid().display_offset(),
+                    "Terminal cursor state after PTY output");
+            }
             for (mode, enabled) in requests {
                 tracing::debug!(target: "yiterm::mouse",
                     session_id = %self.log_id, source = "pty_output",

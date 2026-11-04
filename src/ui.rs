@@ -1553,6 +1553,13 @@ fn paint_terminal(
         }
     }
     paint_graphics(pane, rect, true, window);
+    tracing::trace!(target: "yiterm::cursor",
+        session_id = %pane.log_id, source = "gpui_renderer",
+        focused, display_offset = offset,
+        visible = pane.term.mode().contains(TermMode::SHOW_CURSOR),
+        blink_visible = !pane.cursor_settings.blinking
+            || pane.cursor_blink_started.elapsed().as_millis() % 1000 < 500,
+        "Terminal cursor paint conditions");
     if focused && offset == 0 && pane.term.mode().contains(TermMode::SHOW_CURSOR) {
         let cursor = content.cursor.point;
         let mut bounds = cell_rect(

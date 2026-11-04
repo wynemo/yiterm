@@ -252,7 +252,21 @@ impl Session {
         }
         let screen = parser.screen().clone();
         let rendered = if instruction.new > self.displayed {
-            let render = if instruction.old == self.displayed && !resized {
+            let full_repaint = instruction.old != self.displayed || resized;
+            let previous = &self.remote[&self.displayed];
+            if previous.hide_cursor() != screen.hide_cursor() {
+                tracing::debug!(target: "yiterm::cursor",
+                    source = "mosh_server_state", state = instruction.new,
+                    previous_visible = !previous.hide_cursor(), visible = !screen.hide_cursor(),
+                    "Mosh cursor visibility changed");
+            }
+            let (row, column) = screen.cursor_position();
+            tracing::trace!(target: "yiterm::cursor",
+                source = "mosh_server_state", state = instruction.new,
+                parent = instruction.old, displayed = self.displayed,
+                full_repaint, visible = !screen.hide_cursor(), row, column,
+                "Mosh cursor state before ConPTY");
+            let render = if !full_repaint {
                 paint
             } else {
                 screen.state_formatted().into_bytes()

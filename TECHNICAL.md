@@ -346,6 +346,16 @@ YITERM_LOG='warn,yiterm=debug' cargo run
 
 从登录前开始记录，确认鼠标模式是在连接前已经存在，还是在远端登录、启动 tmux 或运行某个程序后开启；退出该程序后检查是否关闭。SSH 字节流不包含远端进程身份，日志不能直接指认某个 shell 或插件，需要在远端逐项禁用启动配置、插件或 tmux 后重连对照。排查结束后恢复原日志级别。
 
+### Windows Mosh 会话中光标消失
+
+若输入仍正常，但 Ctrl+L 重绘和切换 pane 后光标仍不恢复，可在 PowerShell 中启动诊断日志：
+
+```powershell
+.\yiterm.exe --log-filter 'warn,yiterm=info,yiterm::cursor=trace'
+```
+
+从连接 Mosh 前开始记录，复现后通过 **Tools → Open Log File** 查看 `yiterm::cursor`。`mosh_server_state` 记录 Mosh 快照输出到 ConPTY 前的光标显隐、位置和是否全量重绘；`terminal_parser` 记录主程序收到 PTY 输出后解析到的状态和滚动位置；Windows / macOS 的 `gpui_renderer` 记录实际绘制时的焦点、滚动、显隐和闪烁条件。通过时间、wrapper PID 和 `session_id` 区分会话，并对比出问题前后的记录。日志不记录终端文字或输入内容；trace 记录较密集，排查后恢复原日志级别。这些诊断不会强制显示被远端应用隐藏的光标。
+
 ## 光标设置
 
 点击顶部菜单栏第一个入口 **Settings** 打开设置界面。**Cursor Style** 提供实心方块、下划线和竖线三种样式，**Cursor Blinking** 控制是否闪烁。默认使用闪烁的实心方块，方块覆盖的字符以反色显示。修改立即应用到所有标签页和分栏，也适用于后续新建的会话。点击 **Done**、窗口外部或按 **Esc** 关闭。
