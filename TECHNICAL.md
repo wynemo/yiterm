@@ -145,6 +145,8 @@ Mosh 会话期间保留启动时的 SSH 连接，图片上传通过同一已认�
 
 Windows 的 **Tools → Open SSH Browser** 会从当前聚焦 pane 检测前台 SSH 进程，并通过该 YiTerm 内置 SSH wrapper 已认证的连接启动 WebView2。浏览器显示在当前 tab 内容的右侧，终端中的 HTTP/HTTPS 链接按住 **Ctrl** 点击默认也会在这里打开。浏览器工具栏可前进、后退、刷新和输入网址；没有协议的地址按 HTTPS 处理。点击 **Open in System Browser** 可在系统默认浏览器打开当前页面（仅 HTTP/HTTPS，空白页不可用）；系统浏览器使用自身的网络与登录状态，不会继承内置浏览器的 SSH SOCKS 连接或 Cookie。拖动终端与浏览器之间的竖向分隔条可左右调整宽度。浏览器顶部 **+** 新建空白标签页，点击标签切换，标签旁的 **×** 关闭该页；**Close** 关闭整个浏览器并恢复终端宽度，关闭最后一个浏览器标签页也会关闭浏览器。各浏览器标签页保留各自的页面、地址和导航历史，共享同一 SSH SOCKS 连接和固定浏览器数据目录（包括 Cookie / 登录状态）。同一终端 tab 的同一 SSH 会话中再次通过菜单或 Ctrl 点击终端链接，会增加浏览器标签页；网页请求打开新窗口的 HTTP/HTTPS 链接也会转为标签页。切换到其他终端 tab 时，浏览器随所属 tab 隐藏；切回后继续显示。
 
+浏览器地址栏旁的星标图标用于收藏当前实际打开的 HTTP/HTTPS 页面（使用网页标题及 URL，空白页不可收藏），再次点击可取消收藏；星标高亮表示当前页已收藏。文件夹图标展开或收起书签列表，点击条目在当前标签页打开，仍使用该标签页的 SSH SOCKS 连接；鼠标悬停可查看完整 URL。列表为空时显示收藏提示。书签保存在 `%LOCALAPPDATA%\yiterm\browser\bookmarks.json`，供各浏览器标签页和 SSH 会话共用，重启后保留；写入失败会显示错误，VNC 页面不显示收藏工具栏。
+
 主程序通过受当前 Windows 用户 ACL 保护的 SSH 私有命名管道请求 SOCKS5 监听端口，只传递开始/结束和状态，不传递 SSH 凭据。浏览器侧使用无认证 SOCKS5，不需要单独填写 SOCKS 用户名或密码；SSH 凭据仍按原 SSH 登录流程处理。监听地址仅为 `127.0.0.1`，只支持 TCP CONNECT；目标主机名（包括 `localhost`）随 SSH `direct-tcpip` 通道发送，由远端解析 DNS。每个网页 TCP 连接复用同一条已认证 SSH transport 上的新 SSH channel。关闭整个浏览器或所属终端 tab 会停止该浏览器的 SOCKS 监听，SSH 会话退出时也会关闭。WebView2 通过 Chromium 参数关闭 localhost 的隐式代理绕过、限制本地 DNS 解析、禁用 QUIC 和非代理 WebRTC UDP。页面导航失败时，浏览器区域会显示 WebView2 错误码，日志会记录详情。
 
 WebView2 网页默认使用 `%LOCALAPPDATA%\yiterm\browser\` 保存整份浏览器配置，关闭网页、浏览器面板或重启 YiTerm 不删除该目录，也不回退到临时目录。应用记录 WebView2 实际使用的数据目录、Profile 路径和 InPrivate 状态；环境变量或系统策略覆盖目录时记录警告，会话快照跟随实际目录。普通网页若意外进入 InPrivate 模式则报错，避免无声丢失数据。VNC 仍使用独立临时目录。原生存储范围参见 [WebView2 用户数据目录说明](https://learn.microsoft.com/en-us/microsoft-edge/webview2/concepts/user-data-folder)。

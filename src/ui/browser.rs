@@ -22,8 +22,10 @@ use windows::{
     core::{BOOL, PCWSTR, PWSTR},
 };
 
+mod bookmarks;
 mod cookies;
 mod lifecycle;
+use bookmarks::Bookmark;
 use cookies::CookiePersistence;
 use windows::core::Interface;
 
@@ -269,6 +271,11 @@ impl BrowserUi {
 
     fn select(&mut self, index: usize, cx: &mut ViewContext<Self>) {
         self.active = index;
+        self.pages[index].1.update(cx, |page, _| {
+            if let Ok(bookmarks) = bookmarks::load() {
+                page.bookmarks = bookmarks;
+            }
+        });
         self.set_visible(self.visible, cx);
         cx.notify();
     }
@@ -404,6 +411,8 @@ struct BrowserPage {
     closed: bool,
     address: gpui::Entity<InputState>,
     status: Option<String>,
+    bookmarks: Vec<Bookmark>,
+    bookmarks_open: bool,
     _address_subscription: Option<Subscription>,
 }
 
@@ -453,6 +462,15 @@ impl BrowserPage {
             closed: false,
             address,
             status,
+            bookmarks: if is_vnc {
+                Vec::new()
+            } else {
+                bookmarks::load().unwrap_or_else(|error| {
+                    tracing::warn!(%error, "Could not load browser bookmarks");
+                    Vec::new()
+                })
+            },
+            bookmarks_open: false,
             _address_subscription: None,
         };
         let subscription =
@@ -922,6 +940,58 @@ impl BrowserPage {
         crate::browser_url(&webview2_com::take_pwstr(uri))
     }
 
+    fn toggle_bookmark(&mut self, cx: &mut ViewContext<Self>) {
+        let Some(url) = self.current_url() else {
+            return;
+        };
+        let result = (|| -> anyhow::Result<Vec<Bookmark>> {
+            // Read before each mutation so tabs share the latest saved list.
+            let mut bookmarks = bookmarks::load()?;
+            if bookmarks.iter().any(|bookmark| bookmark.url == url) {
+                bookmarks.retain(|bookmark| bookmark.url != url);
+            } else {
+                let mut title = PWSTR::null();
+                let title = self
+                    .webview
+                    .as_ref()
+                    .and_then(|state| {
+                        unsafe { state.webview.DocumentTitle(&mut title) }.ok()?;
+                        Some(webview2_com::take_pwstr(title))
+                    })
+                    .filter(|title| !title.trim().is_empty())
+                    .unwrap_or_else(|| url.clone());
+                bookmarks.push(Bookmark { title, url });
+            }
+            bookmarks::save(&bookmarks)?;
+            Ok(bookmarks)
+        })();
+        match result {
+            Ok(bookmarks) => {
+                self.bookmarks = bookmarks;
+                self.status = None;
+            }
+            Err(error) => self.status = Some(format!("Cannot save bookmark: {error:#}")),
+        }
+        cx.notify();
+    }
+
+    fn toggle_bookmarks(&mut self, cx: &mut ViewContext<Self>) {
+        self.bookmarks_open = !self.bookmarks_open;
+        if self.bookmarks_open {
+            match bookmarks::load() {
+                Ok(bookmarks) => {
+                    self.bookmarks = bookmarks;
+                    self.status = None;
+                }
+                Err(error) => {
+                    self.bookmarks_open = false;
+                    self.status = Some(format!("Cannot load bookmarks: {error:#}"));
+                }
+            }
+        }
+        cx.notify();
+    }
+
     fn go_back(&self) {
         if let Some(state) = &self.webview
             && let Err(error) = unsafe { state.webview.GoBack() }
@@ -1000,6 +1070,25 @@ impl Render for BrowserPage {
                                 })),
                         )
                         .child(
+                            Button::new("browser-bookmark")
+                                .icon(IconName::Star)
+                                .small()
+                                .selected(self.current_url().is_some_and(|url| {
+                                    self.bookmarks.iter().any(|bookmark| bookmark.url == url)
+                                }))
+                                .tooltip("收藏 / 取消收藏当前页面")
+                                .disabled(self.current_url().is_none())
+                                .on_click(cx.listener(|this, _, _, cx| this.toggle_bookmark(cx))),
+                        )
+                        .child(
+                            Button::new("browser-bookmarks")
+                                .icon(IconName::FolderOpen)
+                                .small()
+                                .selected(self.bookmarks_open)
+                                .tooltip("打开收藏的书签")
+                                .on_click(cx.listener(|this, _, _, cx| this.toggle_bookmarks(cx))),
+                        )
+                        .child(
                             Button::new("browser-open-system")
                                 .label("Open in System Browser")
                                 .small()
@@ -1010,6 +1099,42 @@ impl Render for BrowserPage {
                                     }
                                 })),
                         ),
+                )
+            })
+            .when(self.bookmarks_open && self._vnc.is_none(), |element| {
+                element.child(
+                    div()
+                        .id("browser-bookmark-list")
+                        .flex()
+                        .flex_col()
+                        .flex_shrink_0()
+                        .max_h(px(220.))
+                        .overflow_y_scroll()
+                        .px(px(8.))
+                        .py(px(4.))
+                        .gap(px(4.))
+                        .when(self.bookmarks.is_empty(), |element| {
+                            element.child("暂无书签，点击星标收藏当前页面")
+                        })
+                        .children(self.bookmarks.iter().enumerate().map(|(index, bookmark)| {
+                            let url = bookmark.url.clone();
+                            let tooltip = bookmark.url.clone();
+                            Button::new(("browser-saved-bookmark", index))
+                                .small()
+                                .label({
+                                    let mut title: String =
+                                        bookmark.title.chars().take(60).collect();
+                                    if bookmark.title.chars().count() > 60 {
+                                        title.push('…');
+                                    }
+                                    title
+                                })
+                                .tooltip(tooltip)
+                                .on_click(cx.listener(move |this, _, window, cx| {
+                                    this.bookmarks_open = false;
+                                    this.navigate(&url, window, cx);
+                                }))
+                        })),
                 )
             })
             .child(
