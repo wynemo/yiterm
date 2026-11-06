@@ -107,6 +107,8 @@ Linux 和 macOS 均使用系统 OpenSSH，不创建临时 `bin/ssh`、不往 PAT
 
 `yiterm --ssh host` 直接启动系统 `ssh`，通过命令参数启用 ControlMaster 连接复用。控制 socket 位于当前用户独占的 `~/.yiterm/ssh/`（目录权限 `0700`），仅在主动建立连接时按需创建；每条连接使用独立 socket，避免不同代理、身份或主机密钥配置误用同一个连接。`ControlPersist=no` 让连接随终端 SSH 会话退出；目录不可用时不注入复用参数，按系统 SSH 配置运行。普通 shell 中输入的 `ssh host` 完全按用户配置运行，YiTerm 通过前台进程识别目标，使用系统 scp 上传图片；已有 ControlPath 或密钥 / agent 认证可以免交互上传。普通 SSH 没有连接复用且必须交互输入密码时，后台图片上传无法完成，不会退回粘贴本机路径。已有会话环境不变，更新后需重新启动 YiTerm 并新建 tab / pane。
 
+系统 scp 上传图片时，在 `RemoteCommand=none` 之前传入 `IgnoreUnknown=remotecommand`（OpenSSH 6.3 起支持），兼容 CentOS 7 等不支持 `RemoteCommand` 的旧客户端，避免上传时出现 `Bad configuration option: remotecommand`。支持该选项的新客户端仍会清除 SSH 配置中的远程命令，确保上传会话用于文件传输。此兼容参数仅用于后台上传，不修改用户 SSH 配置。
+
 ### Windows SSH 与图片上传
 
 Windows 发布包携带独立的控制台程序 `bin/ssh.exe`，所有标签页和分栏共用该文件，各连接运行独立进程。YiTerm 将随包 `bin` 加入其子 shell 的 PATH 最前面，输入 `ssh host` 即调用内置客户端；`--ssh` 直接启动该程序。不修改系统 PATH，不使用 shell 函数、别名或转发脚本。会话临时目录只保存会话数据和必要的 shell 初始化脚本，不复制 exe，也不修改 PE 头；不要单独移动主程序或删除 `bin/ssh.exe`。从源码运行 Windows 版本前执行 `cargo build --locked --release --bins`，Cargo 输出目录中的 `ssh.exe` 可供同目录的主程序使用。

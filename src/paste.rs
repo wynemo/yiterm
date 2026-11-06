@@ -112,6 +112,11 @@ pub fn upload(path: &Path, remote: &crate::ssh::Remote, scp: &Path) -> Result<St
         "ForwardX11=no",
         "-o",
         "PermitLocalCommand=no",
+        // RemoteCommand was added in OpenSSH 7.6. Older clients (including
+        // CentOS 7's OpenSSH) must ignore it; newer clients still clear it.
+        // IgnoreUnknown must precede the option it guards.
+        "-o",
+        "IgnoreUnknown=remotecommand",
         "-o",
         "RemoteCommand=none",
     ]);
