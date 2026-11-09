@@ -96,9 +96,9 @@ fn workers() -> &'static mpsc::SyncSender<Job> {
         tx
     })
 }
-// Query one local process only. This runs in the bounded file worker pool,
-// never in the render path, and does not enumerate the process tree.
-fn process_directory(pid: u32) -> Option<PathBuf> {
+// Query one local process only, without enumerating the process tree. Sidebar
+// polling uses the bounded file worker pool; splitting queries once on demand.
+pub fn process_directory(pid: u32) -> Option<PathBuf> {
     use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System, UpdateKind};
     let pid = Pid::from_u32(pid);
     let mut system = System::new();

@@ -142,7 +142,11 @@ struct TerminalSession {
     size: Size,
 }
 impl TerminalSession {
-    fn new(args: &Args, warning: Option<&str>) -> Result<Self> {
+    fn new(
+        args: &Args,
+        warning: Option<&str>,
+        directory: Option<&std::path::Path>,
+    ) -> Result<Self> {
         let log_id = uuid::Uuid::new_v4();
         tracing::trace!(target: "yiterm::mouse",
             "build={} transport=raw_vt",
@@ -194,6 +198,9 @@ impl TerminalSession {
             directory_token = shell_directory::token_for(&shell);
             integration.shell_with_directory(&shell, directory_token.as_deref())?
         };
+        if let Some(directory) = directory {
+            command.cwd(directory);
+        }
         command.env("TERM", "xterm-256color");
         #[cfg(windows)]
         {
@@ -841,7 +848,7 @@ struct TerminalApp {
 
 impl TerminalApp {
     fn new(args: Args, logging: &logging::Logging) -> Result<Self> {
-        let session = TerminalSession::new(&args, logging.warning.as_deref())?;
+        let session = TerminalSession::new(&args, logging.warning.as_deref(), None)?;
         let path = args
             .config
             .clone()
@@ -982,16 +989,16 @@ impl TerminalApp {
         self.git.back();
         self.save_files_settings();
     }
-    fn new_session(&self) -> Result<TerminalSession> {
+    fn new_session(&self, directory: Option<&std::path::Path>) -> Result<TerminalSession> {
         let mut args = self.args.clone();
         if args.ssh.is_none() && args.mosh.is_none() {
             args.shell = Some(self.shell_settings.executable(args.shell.as_deref())?);
         }
-        TerminalSession::new(&args, self.warning.as_deref())
+        TerminalSession::new(&args, self.warning.as_deref(), directory)
     }
 
     fn new_tab(&mut self) {
-        match self.new_session() {
+        match self.new_session(None) {
             Ok(session) => {
                 self.tabs.push(TerminalTab::new(session));
                 self.select(self.tabs.len() - 1);
@@ -1005,7 +1012,22 @@ impl TerminalApp {
     }
 
     fn split_pane(&mut self, direction: SplitDirection) {
-        match self.new_session() {
+        let directory = if self.args.ssh.is_none() && self.args.mosh.is_none() {
+            let pane = self.tabs[self.active].focused();
+            match &pane.reported_directory {
+                // A non-filesystem PowerShell location must not fall back to
+                // the shell process's stale Win32 working directory.
+                Some(directory) => directory.clone(),
+                None => pane
+                    .foreground_group()
+                    .and_then(|pid| u32::try_from(pid).ok())
+                    .and_then(files::process_directory)
+                    .or_else(|| pane.child.process_id().and_then(files::process_directory)),
+            }
+        } else {
+            None
+        };
+        match self.new_session(directory.as_deref()) {
             Ok(session) => {
                 self.tabs[self.active].split(session, direction);
                 self.error = None;
