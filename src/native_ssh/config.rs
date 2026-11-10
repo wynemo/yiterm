@@ -11,6 +11,8 @@ use std::{
 #[derive(Clone, Debug)]
 pub struct Config {
     pub host: String,
+    pub remote_command: Option<String>,
+    pub request_pty: bool,
     pub user: String,
     pub port: u16,
     pub proxy_jump: Option<String>,
@@ -44,21 +46,24 @@ const HELP: &str = "Use ssh --system <arguments> for system OpenSSH (password-on
 // Only options that this backend actually implements are accepted. In particular,
 // silently ignoring a proxy or host-key policy could connect to the wrong host.
 pub fn validate_args(args: &[OsString]) -> Result<()> {
+    destination_end(args).map(|_| ())
+}
+
+// Return the first remote-command argument. Everything after the destination
+// belongs to the remote shell, including words beginning with '-'.
+fn destination_end(args: &[OsString]) -> Result<usize> {
     let mut i = 0;
     let mut destination = false;
     while i < args.len() {
         let arg = args[i].to_str().context("SSH arguments must be UTF-8")?;
         if arg == "--" {
             i += 1;
-            ensure!(i + 1 == args.len(), "Expected one SSH destination. {HELP}");
+            ensure!(i < args.len(), "Missing SSH destination");
+            args[i].to_str().context("SSH destination must be UTF-8")?;
             destination = true;
             break;
         }
         if !arg.starts_with('-') {
-            ensure!(
-                i + 1 == args.len(),
-                "Remote commands are not supported by built-in SSH yet. {HELP}"
-            );
             destination = true;
             break;
         }
@@ -103,6 +108,7 @@ pub fn validate_args(args: &[OsString]) -> Result<()> {
                             "identitiesonly",
                             "identityagent",
                             "proxyjump",
+                            "requesttty",
                         ]
                         .contains(&key.as_str()),
                         "Unsupported SSH option {key}. {HELP}"
@@ -110,16 +116,23 @@ pub fn validate_args(args: &[OsString]) -> Result<()> {
                 }
                 break;
             }
-            ensure!(flag == 't', "Unsupported SSH flag -{flag}. {HELP}");
+            ensure!(
+                matches!(flag, 't' | 'T'),
+                "Unsupported SSH flag -{flag}. {HELP}"
+            );
         }
         i += 1;
     }
     ensure!(destination, "Missing SSH destination");
-    Ok(())
+    for arg in &args[i + 1..] {
+        arg.to_str()
+            .context("Remote command arguments must be UTF-8")?;
+    }
+    Ok(i + 1)
 }
 
 pub fn resolve(ssh: &Path, args: &[OsString]) -> Result<Config> {
-    validate_args(args)?;
+    let command_start = destination_end(args)?;
     let mut command = Command::new(ssh);
     command
         .arg("-G")
@@ -135,7 +148,33 @@ pub fn resolve(ssh: &Path, args: &[OsString]) -> Result<Config> {
         "SSH config resolution failed: {}",
         String::from_utf8_lossy(&output.stderr).trim()
     );
-    Config::parse(&String::from_utf8(output.stdout)?)
+    let resolved = String::from_utf8(output.stdout)?;
+    let mut config = Config::parse(&resolved)?;
+    if command_start < args.len() {
+        // Match OpenSSH: concatenate arguments with spaces, then let the remote
+        // login shell interpret the command string. Do not quote it a second time.
+        config.remote_command = Some(
+            args[command_start..]
+                .iter()
+                .map(|arg| arg.to_str().expect("validated UTF-8"))
+                .collect::<Vec<_>>()
+                .join(" "),
+        );
+    }
+    let request_tty = resolved
+        .lines()
+        .find_map(|line| {
+            let (key, value) = line.split_once(char::is_whitespace)?;
+            key.eq_ignore_ascii_case("requesttty").then(|| value.trim())
+        })
+        .unwrap_or("auto");
+    config.request_pty = match request_tty {
+        "yes" | "true" | "force" => true,
+        "no" | "false" => false,
+        "auto" => config.remote_command.is_none(),
+        value => bail!("Unsupported RequestTTY value {value}. {HELP}"),
+    };
+    Ok(config)
 }
 
 impl Config {
@@ -254,6 +293,8 @@ impl Config {
         );
         Ok(Self {
             host,
+            remote_command: None,
+            request_pty: true,
             user,
             proxy_jump: (proxy_jump != "none" && !proxy_jump.is_empty()).then_some(proxy_jump),
             host_key_name,

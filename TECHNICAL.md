@@ -119,7 +119,7 @@ Windows 下，独立 `ssh.exe` 使用内置 Rust SSH 客户端（`russh`）。�
 
 仍需安装系统 OpenSSH：内置客户端通过 `ssh -G` 解析 SSH config 中的别名、HostName、User、Port、IdentityFile、ProxyJump 和 known_hosts 路径。`ProxyJump` 的跳板链路由系统 OpenSSH 建立，目标主机仍由内置客户端认证并复用连接上传图片；跳板机认证按系统 OpenSSH 的配置和提示处理。支持 OpenSSH 格式私钥文件和 Windows OpenSSH agent；`IdentitiesOnly=yes` 时仅尝试密钥文件。首次连接显示 SHA-256 主机指纹，确认后写入 known_hosts；主机密钥变化或被撤销时拒绝连接。`StrictHostKeyChecking` 支持 `ask`、`yes` 和 `accept-new`。握手/指纹确认和认证阶段各有 120 秒期限。`ssh -G` 可能去掉 known_hosts 路径列表的引号；多个绝对路径可以包含空格，无法判断分隔的相对路径列表会报错，应改用绝对路径或系统客户端。
 
-内置客户端暂不支持 ProxyCommand、端口/agent/X11 转发、SSH 证书和远程命令。遇到这些配置会提示使用 `ssh --system <原有参数>`，显式调用系统 OpenSSH；`ssh -V`、`ssh -G` 和 `ssh -Q` 也直接调用系统客户端。系统客户端会话仍通过独立 scp 上传图片，因此密码认证的会话不能保证免交互上传。Linux / macOS 继续使用系统 OpenSSH 的 ControlMaster 连接复用。
+内置客户端支持 `ssh host <远端命令>`，通过 SSH exec 通道执行；命令参数按 OpenSSH 的方式用空格拼接后交给远端 shell，因此含空格或 shell 元字符的参数需要在远端命令字符串中正确引用。远端命令默认不分配 PTY，交互共享使用 `ssh -t host <采集命令>`；`-T` 禁止 PTY，也支持 `RequestTTY` 配置。SSH config 中的 `RemoteCommand` 暂不支持。内置客户端暂不支持 ProxyCommand、端口/agent/X11 转发和 SSH 证书。遇到这些配置会提示使用 `ssh --system <原有参数>`，显式调用系统 OpenSSH；`ssh -V`、`ssh -G` 和 `ssh -Q` 也直接调用系统客户端。系统客户端会话仍通过独立 scp 上传图片，因此密码认证的会话不能保证免交互上传。Linux / macOS 继续使用系统 OpenSSH 的 ControlMaster 连接复用。
 
 内置上传单张限制为 50 MiB，远端文件名为 `/tmp/yiterm-drop-<UUID>.png`，创建权限为 `0600`。GUI 通过仅当前 Windows 用户可访问的命名管道请求当前分栏的 wrapper 上传，不传递密码；上传完成且目标进程仍有效才粘贴远端路径。失败或取消时尽力清理未完成文件；服务器断开时可能无法清理。
 
@@ -563,15 +563,28 @@ ssh -t host '/path/to/yiterm --share-screen --share-window 123 --share-width 128
 ssh -t host '/path/to/yiterm --share-screen --share-quality lossless --share-fixed-resolution'
 ```
 
+Windows 已发布旧版本的内置 SSH 若提示 `Remote commands are not supported`，可以使用系统客户端：
+
+```powershell
+ssh --system 111 '/Users/tommygreen/Documents/work/yiterm/target/release/yiterm --share-screen --share-list'
+ssh --system -t 111 '/Users/tommygreen/Documents/work/yiterm/target/release/yiterm --share-screen'
+```
+
+也可先执行 `ssh 111` 登录，再在远端运行 `/Users/tommygreen/Documents/work/yiterm/target/release/yiterm --share-screen`。新版内置 SSH 的 exec 支持需要更新 Windows 客户端后生效；此项 Windows CI 和 Windows 实机验证尚未运行。
+
 也可先 SSH 登录，再运行上述远端命令。按 `q` 或 Ctrl+C 退出，删除本会话图片、关闭同步刷新并恢复原终端。使用独立分栏观看；不支持在同一终端嵌套运行。直接 SSH 连接可用，不保证 tmux/screen 等中间终端会转发 Kitty APC。
 
 `--share-width` 默认 1280，范围 160–3840；`--share-fps` 默认 15，范围 1–60。`--share-quality` 可固定为 `lossless`、`565`、`555` 或 `444`，未指定时按输出压力调整颜色质量；颜色较少的平坦／文字瓦片保留原始颜色。拥塞持续时先降低颜色质量，再降低发送帧率，最后降低传输分辨率；`--share-fixed-resolution` 禁止最后一项。恢复质量设较长驻留时间。终端提供焦点通知时，失焦或切到其他分栏／标签页降至每秒最多一次发送，重新聚焦后全量补绘。当前采集频率仍由 `--share-fps` 固定，失焦降频和背压调速作用于编码／发送端。
 
 `--share-stats` 每五秒向 stderr 输出累计 Base64 负载字节数、更新瓦片数、本批编码与写入耗时、发送帧率上限、质量档位、缩放除数和帧内存；字节数不包含控制序列和 SSH 开销，耗时不是端到端显示延迟。需要保留日志时在远端重定向，例如 `--share-stats 2>share.log`，避免日志覆盖画面。
 
-macOS 构建由 `build.rs` 调用 Xcode Command Line Tools 中的 `swiftc -O`，按目标架构编译最低 macOS 13 的 ScreenCaptureKit 辅助程序并内嵌到主程序；运行共享功能时释放到 `~/Library/Caches/yiterm/screen-capture/capture-<内容哈希>`，无需远端另装 Swift 编译器。macOS 系统提供 Swift 运行时。Windows/Linux 构建不编译或内嵌此辅助程序；调用采集入口会提示平台不支持。
+macOS 构建由 `build.rs` 调用 Xcode Command Line Tools 中的 `swiftc -O -emit-library -static`，将 ScreenCaptureKit 采集代码直接链接到 `yiterm`。采集、窗口枚举和 Rust 编码均在同一个 `yiterm` 进程中执行，通过内存回调交付 RGB 帧；不会释放或启动额外的采集可执行程序。旧版本生成的 `~/Library/Caches/yiterm/screen-capture/capture-*` 不再使用。远端无需安装 Swift 编译器；macOS 系统提供 Swift 运行时，采集要求 macOS 13+。Windows/Linux 构建不链接 macOS 采集代码。
 
-首次使用可能触发屏幕录制授权；在系统设置的「隐私与安全性 → 屏幕录制」中授权实际显示的 YiTerm／采集辅助程序／启动终端后重试。辅助程序内容变化会生成新的缓存路径，可能需要重新授权。SSH 登录本身不授予采集权限，也不创建可采集桌面。辅助程序的签名、授权归属和不同 macOS 版本行为仍需实际环境确认。
+权限由 ScreenCaptureKit 实际调用判定，不再因 `CGPreflightScreenCaptureAccess()` 返回 false 就提前拒绝运行。拒绝时保留 macOS 错误域、错误码和当前可执行文件路径；系统设置中同名的 `yiterm` 项不保证对应当前路径或编译签名。需要在「隐私与安全性 → 屏幕录制」中授权实际运行的程序，并重启该进程。SSH 登录本身不授予采集权限，也不创建可采集桌面；不同启动方式下的授权归属仍需实际环境确认，进程内采集不绕过系统授权。
+
+SSH 下如果仍收到 `SCStreamErrorDomain (-3801)`，仅授权 `yiterm` 可能不够：macOS TCC 会沿启动链选择 responsible process。本机失败日志明确记录 `accessing=…/yiterm`，但 `AUTHREQ_SUBJECT` 为 `/usr/libexec/sshd-keygen-wrapper`，且 `yiterm` 的既有授权路径及签名与当前程序一致。此时在 Mac「隐私与安全性 → 屏幕与系统音频录制」点击 `+`，按 Cmd+Shift+G 输入 `/usr/libexec/sshd-keygen-wrapper`，添加并允许后断开、重新连接 SSH。该授权针对 SSH 启动链；「完全磁盘访问」不能代替录屏授权。权限必须由用户通过 macOS 授予，程序不修改 TCC 数据库，也不自动授予系统权限。
+
+本次进程内改动已完成本机 macOS Release 构建；未运行录屏或 SSH 实机验证，Windows CI 尚未运行。
 
 当前已接入首帧全量、逐行及瓦片差分、最多四路并行 RGB/zlib 编码、4096 字符 Base64 分块、普通 Kitty placement、每四块一次同步刷新、按缓存预算放大瓦片、尺寸变化重绘、单槽最新帧队列和已发送状态基准。图片同尺寸替换保留接收端锚点；解码继续采用现有每分栏一个在途任务，保留终端控制序列顺序。传输区域按 PTY 像素尺寸适配源比例；PTY 不提供像素尺寸时按 1:2 字符格估算。
 

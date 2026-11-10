@@ -3,7 +3,7 @@ fn main() {
     #[cfg(target_os = "macos")]
     {
         let output = std::path::PathBuf::from(std::env::var_os("OUT_DIR").unwrap())
-            .join("yiterm-screen-capture");
+            .join("libyiterm_capture.a");
         let arch = match std::env::var("CARGO_CFG_TARGET_ARCH").unwrap().as_str() {
             "aarch64" => "arm64",
             "x86_64" => "x86_64",
@@ -14,6 +14,10 @@ fn main() {
             .args([
                 "swiftc",
                 "-O",
+                "-emit-library",
+                "-static",
+                "-module-name",
+                "YiTermCapture",
                 "-swift-version",
                 "5",
                 "native/ScreenCapture.swift",
@@ -25,8 +29,30 @@ fn main() {
             .expect("macOS screen capture requires Xcode Command Line Tools (swiftc)");
         assert!(
             status.success(),
-            "failed to compile macOS screen capture helper"
+            "failed to compile macOS screen capture library"
         );
+        println!(
+            "cargo:rustc-link-search=native={}",
+            output.parent().unwrap().display()
+        );
+        println!("cargo:rustc-link-lib=static=yiterm_capture");
+        // Swift object files carry framework/runtime autolink directives. Supply
+        // the toolchain search path for compatibility libraries and system Swift.
+        let compiler = std::process::Command::new("xcrun")
+            .args(["--find", "swiftc"])
+            .output()
+            .expect("cannot locate swiftc");
+        assert!(compiler.status.success(), "cannot locate swiftc");
+        let compiler = std::path::PathBuf::from(String::from_utf8(compiler.stdout).unwrap().trim());
+        let runtime = compiler
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .join("lib/swift/macosx");
+        println!("cargo:rustc-link-search=native={}", runtime.display());
+        println!("cargo:rustc-link-search=native=/usr/lib/swift");
+        println!("cargo:rustc-link-arg=-Wl,-rpath,/usr/lib/swift");
     }
     println!("cargo:rerun-if-changed=assets/icons/yiterm.rc");
     println!("cargo:rerun-if-changed=assets/icons/yiterm.ico");

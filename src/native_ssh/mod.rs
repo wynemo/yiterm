@@ -170,19 +170,27 @@ impl AsyncWrite for OpenSshStream {
     }
 }
 
-pub async fn shell(
+pub async fn session(
     handle: &client::Handle<Handler>,
     cols: u32,
     rows: u32,
+    command: Option<&str>,
+    request_pty: bool,
 ) -> Result<Channel<client::Msg>> {
     let mut channel = handle.channel_open_session().await?;
-    channel
-        .request_pty(true, "xterm-256color", cols, rows, 0, 0, &[])
-        .await?;
-    expect_success(&mut channel)
-        .await
-        .context("Server rejected the terminal")?;
-    channel.request_shell(true).await?;
+    if request_pty {
+        channel
+            .request_pty(true, "xterm-256color", cols, rows, 0, 0, &[])
+            .await?;
+        expect_success(&mut channel)
+            .await
+            .context("Server rejected the terminal")?;
+    }
+    if let Some(command) = command {
+        channel.exec(true, command.as_bytes()).await?;
+    } else {
+        channel.request_shell(true).await?;
+    }
     Ok(channel)
 }
 
@@ -201,7 +209,7 @@ async fn expect_success(channel: &mut Channel<client::Msg>) -> Result<()> {
 }
 
 #[cfg(windows)]
-fn shell_request_reply(message: &ChannelMsg, pending: &mut bool) -> Result<bool> {
+fn session_request_reply(message: &ChannelMsg, pending: &mut bool) -> Result<bool> {
     if !*pending {
         return Ok(false);
     }
@@ -212,7 +220,7 @@ fn shell_request_reply(message: &ChannelMsg, pending: &mut bool) -> Result<bool>
         }
         ChannelMsg::Failure => {
             *pending = false;
-            bail!("Server rejected the shell")
+            bail!("Server rejected the SSH session request")
         }
         _ => Ok(false),
     }

@@ -1,5 +1,5 @@
 //! Read-only macOS capture over the existing terminal byte stream.
-use anyhow::{Context, Result, bail};
+use anyhow::{Result, bail};
 use clap::Args;
 
 #[derive(Args, Clone, Debug)]
@@ -47,11 +47,8 @@ mod macos {
     use super::*;
     use base64::{Engine, engine::general_purpose::STANDARD};
     use flate2::{Compression, write::ZlibEncoder};
-    use sha2::{Digest, Sha256};
     use std::{
         io::{IsTerminal, Read, Write},
-        os::unix::fs::PermissionsExt,
-        process::{Child, Command, Stdio},
         sync::{
             Arc, Mutex,
             atomic::{AtomicBool, Ordering},
@@ -62,13 +59,6 @@ mod macos {
     static STOP: AtomicBool = AtomicBool::new(false);
     extern "C" fn stop(_: libc::c_int) {
         STOP.store(true, Ordering::Relaxed);
-    }
-    struct CaptureChild(Child);
-    impl Drop for CaptureChild {
-        fn drop(&mut self) {
-            let _ = self.0.kill();
-            let _ = self.0.wait();
-        }
     }
     struct Terminal {
         saved: libc::termios,
@@ -116,41 +106,10 @@ mod macos {
             }
         }
     }
-    fn helper() -> Result<std::path::PathBuf> {
-        let bytes = include_bytes!(concat!(env!("OUT_DIR"), "/yiterm-screen-capture"));
-        let hash = format!("{:x}", Sha256::digest(bytes));
-        let dir = directories::BaseDirs::new()
-            .context("No user cache directory")?
-            .cache_dir()
-            .join("yiterm/screen-capture");
-        std::fs::create_dir_all(&dir)?;
-        let path = dir.join(format!("capture-{}", &hash[..16]));
-        if !path.exists() {
-            let mut file = tempfile::NamedTempFile::new_in(&dir)?;
-            file.write_all(bytes)?;
-            file.as_file()
-                .set_permissions(std::fs::Permissions::from_mode(0o700))?;
-            file.persist(&path).map_err(|e| e.error)?;
-        }
-        Ok(path)
-    }
     struct Frame {
         w: usize,
         h: usize,
         rgb: Vec<u8>,
-    }
-    fn read_frame(input: &mut impl Read) -> Result<Frame> {
-        let mut header = [0; 8];
-        input.read_exact(&mut header)?;
-        let w = u32::from_le_bytes(header[..4].try_into()?) as usize;
-        let h = u32::from_le_bytes(header[4..].try_into()?) as usize;
-        anyhow::ensure!(
-            w > 0 && h > 0 && w <= 3840 && h <= 16384 && w * h * 3 <= 64 * 1024 * 1024,
-            "Capture frame exceeds memory budget"
-        );
-        let mut rgb = vec![0; w * h * 3];
-        input.read_exact(&mut rgb)?;
-        Ok(Frame { w, h, rgb })
     }
     fn geometry(source: Option<(usize, usize)>) -> Result<(usize, usize)> {
         let mut size = unsafe { std::mem::zeroed::<libc::winsize>() };
@@ -276,49 +235,129 @@ mod macos {
         )?;
         Ok(image.data.len())
     }
+    type Latest = Mutex<(Option<Frame>, Option<String>)>;
+    type FrameCallback =
+        unsafe extern "C" fn(*const u8, usize, i32, i32, *const libc::c_char, *mut libc::c_void);
+    unsafe extern "C" {
+        fn yiterm_capture_run(
+            argc: i32,
+            argv: *const *const libc::c_char,
+            callback: Option<FrameCallback>,
+            context: *mut libc::c_void,
+        ) -> i32;
+        fn yiterm_capture_stop();
+    }
+    unsafe extern "C" fn captured(
+        data: *const u8,
+        len: usize,
+        w: i32,
+        h: i32,
+        error: *const libc::c_char,
+        context: *mut libc::c_void,
+    ) {
+        // Swift calls synchronously; copy before it reuses its pixel buffer.
+        // `latest` lives until the native run loop and encoder have both stopped.
+        let latest = unsafe { &*context.cast::<Latest>() };
+        let Ok(mut slot) = latest.lock() else { return };
+        if !error.is_null() {
+            slot.1 = Some(
+                unsafe { std::ffi::CStr::from_ptr(error) }
+                    .to_string_lossy()
+                    .into_owned(),
+            );
+        } else if !data.is_null() {
+            let (w, h) = (w as usize, h as usize);
+            if w == 0
+                || h == 0
+                || w > 3840
+                || h > 16384
+                || len > 64 * 1024 * 1024
+                || len != w * h * 3
+            {
+                slot.1 = Some("Capture frame exceeds memory budget".into());
+                return;
+            }
+            slot.0 = Some(Frame {
+                w,
+                h,
+                rgb: unsafe { std::slice::from_raw_parts(data, len) }.to_vec(),
+            });
+        }
+    }
     pub fn run(o: &Options) -> Result<()> {
-        let mut cmd = Command::new(helper()?);
+        if !o.share_list {
+            anyhow::ensure!(
+                std::io::stdin().is_terminal() && std::io::stdout().is_terminal(),
+                "Screen sharing requires a terminal; connect with ssh -t"
+            );
+            geometry(None)?;
+        }
+        let mut args = Vec::new();
         for (flag, value) in [("--display", o.share_display), ("--window", o.share_window)] {
             if let Some(value) = value {
-                cmd.arg(flag).arg(value.to_string());
+                args.extend([flag.to_owned(), value.to_string()]);
             }
         }
-        cmd.args([
-            "--width",
-            &o.share_width.to_string(),
-            "--fps",
-            &o.share_fps.to_string(),
+        args.extend([
+            "--width".into(),
+            o.share_width.to_string(),
+            "--fps".into(),
+            o.share_fps.to_string(),
         ]);
         if o.share_list {
-            let status = cmd.arg("--list").status()?;
-            anyhow::ensure!(
-                status.success(),
-                "Cannot list capture sources (see permission / desktop error above)"
-            );
-            return Ok(());
+            args.push("--list".into());
         }
-        anyhow::ensure!(
-            std::io::stdin().is_terminal() && std::io::stdout().is_terminal(),
-            "Screen sharing requires a terminal; connect with ssh -t"
-        );
-        geometry(None)?;
-        let mut child = CaptureChild(cmd.stdin(Stdio::null()).stdout(Stdio::piped()).spawn()?);
-        let mut pipe = child.0.stdout.take().context("Missing capture pipe")?;
-        // The reader always drains capture and replaces one latest-frame slot. Dropped
-        // frames never advance `previous`, which represents fully written terminal state.
+        let args: Vec<_> = args
+            .into_iter()
+            .map(std::ffi::CString::new)
+            .collect::<std::result::Result<_, _>>()?;
+        let pointers: Vec<_> = args.iter().map(|s| s.as_ptr()).collect();
         let latest = Arc::new(Mutex::new((None, None)));
-        let slot = latest.clone();
-        std::thread::spawn(move || {
-            loop {
-                match read_frame(&mut pipe) {
-                    Ok(frame) => slot.lock().unwrap().0 = Some(frame),
-                    Err(error) => {
-                        slot.lock().unwrap().1 = Some(format!("{error:#}"));
-                        break;
+        let context = Arc::as_ptr(&latest).cast_mut().cast::<libc::c_void>();
+        std::thread::scope(|scope| -> Result<()> {
+            let encoder = if o.share_list {
+                None
+            } else {
+                let latest = latest.clone();
+                Some(scope.spawn(move || {
+                    let result = render(o, latest);
+                    unsafe {
+                        yiterm_capture_stop();
                     }
-                }
+                    result
+                }))
+            };
+            // This is the original process main thread, not a spawned executable.
+            let status = unsafe {
+                yiterm_capture_run(
+                    pointers.len() as i32,
+                    pointers.as_ptr(),
+                    Some(captured),
+                    context,
+                )
+            };
+            unsafe {
+                libc::fflush(std::ptr::null_mut());
             }
-        });
+            STOP.store(true, Ordering::Relaxed);
+            if let Some(encoder) = encoder {
+                encoder
+                    .join()
+                    .map_err(|_| anyhow::anyhow!("Screen encoder panicked"))??;
+            }
+            if status != 0 {
+                let error = latest
+                    .lock()
+                    .unwrap()
+                    .1
+                    .take()
+                    .unwrap_or_else(|| "Screen capture failed".into());
+                bail!("{error}");
+            }
+            Ok(())
+        })
+    }
+    fn render(o: &Options, latest: Arc<Latest>) -> Result<()> {
         let _terminal = Terminal::enter()?;
         let mut out = std::io::stdout();
         let mut previous: Option<Arc<Frame>> = None;
@@ -389,9 +428,7 @@ mod macos {
                     (slot.0.take(), slot.1.take())
                 };
                 if let Some(error) = error {
-                    bail!(
-                        "Capture ended: {error}. Check Screen Recording permission and the remote desktop session"
-                    );
+                    bail!("Capture ended: {error}");
                 }
                 let new_frame = frame.is_some();
                 if let Some(frame) = frame {

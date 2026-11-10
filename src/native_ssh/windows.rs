@@ -670,6 +670,12 @@ fn run_inner(real_ssh: &Path, directory: &Path, args: Vec<OsString>, mosh: bool)
         config.keepalive = Some(Duration::from_secs(30));
         config.keepalive_max = 3;
     }
+    ensure!(
+        !mosh || config.remote_command.is_none(),
+        "Remote commands are not supported over Mosh; use ssh for remote commands"
+    );
+    let remote_command = config.remote_command.clone();
+    let request_pty = config.request_pty;
     let udp_host = config.host.clone();
     let osc52_pipe = super::osc52_pipe_name(directory)?;
     let console = Console::enter()?;
@@ -788,7 +794,7 @@ fn run_inner(real_ssh: &Path, directory: &Path, args: Vec<OsString>, mosh: bool)
         let mut resize = tokio::time::interval(Duration::from_millis(100));
         let mut exit_status = 255;
         let mut input_open = true;
-        let mut shell_reply_pending = true;
+        let mut session_reply_pending = true;
         let mut osc52_filter = super::osc52::Filter::default();
         let mut mouse_diagnostics = tracing::enabled!(target: "yiterm::mouse", tracing::Level::DEBUG)
             .then(crate::mouse::MouseModes::default);
@@ -810,7 +816,7 @@ fn run_inner(real_ssh: &Path, directory: &Path, args: Vec<OsString>, mosh: bool)
                 }).await;
             }
             let mut terminal_output = super::output::Output::default();
-            let mut channel = super::shell(&handle, size.0, size.1).await?;
+            let mut channel = super::session(&handle, size.0, size.1, remote_command.as_deref(), request_pty).await?;
             loop {
                 tokio::select! {
                     bytes = rx.recv(), if input_open => {
@@ -823,7 +829,7 @@ fn run_inner(real_ssh: &Path, directory: &Path, args: Vec<OsString>, mosh: bool)
                     message = channel.wait() => {
                         match message {
                             Some(message) => {
-                                if super::shell_request_reply(&message, &mut shell_reply_pending)? {
+                                if super::session_request_reply(&message, &mut session_reply_pending)? {
                                     continue;
                                 }
                                 match message {
@@ -853,7 +859,7 @@ fn run_inner(real_ssh: &Path, directory: &Path, args: Vec<OsString>, mosh: bool)
                                     }
                                     russh::ChannelMsg::ExitStatus { exit_status: status } => exit_status = status as i32,
                                     russh::ChannelMsg::ExitSignal { .. } => exit_status = 128,
-                                    russh::ChannelMsg::Close if shell_reply_pending => bail!("SSH channel closed before the shell request was accepted"),
+                                    russh::ChannelMsg::Close if session_reply_pending => bail!("SSH channel closed before the session request was accepted"),
                                     russh::ChannelMsg::Close => {
                                         for part in terminal_output.advance(&osc52_filter.finish()) {
                                             output(&part)?;
@@ -864,7 +870,7 @@ fn run_inner(real_ssh: &Path, directory: &Path, args: Vec<OsString>, mosh: bool)
                                     _ => {},
                                 }
                             }
-                            None if shell_reply_pending => bail!("SSH channel closed before the shell request was accepted"),
+                            None if session_reply_pending => bail!("SSH channel closed before the session request was accepted"),
                             None => {
                                 for part in terminal_output.advance(&osc52_filter.finish()) {
                                     output(&part)?;
@@ -876,7 +882,7 @@ fn run_inner(real_ssh: &Path, directory: &Path, args: Vec<OsString>, mosh: bool)
                     }
                     _ = resize.tick() => {
                         let next = console.size()?;
-                        if next != size { channel.window_change(next.0, next.1, 0, 0).await?; size = next; }
+                        if request_pty && next != size { channel.window_change(next.0, next.1, 0, 0).await?; size = next; }
                     }
                 }
             }
