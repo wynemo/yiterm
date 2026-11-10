@@ -479,7 +479,11 @@ impl TerminalSession {
                 // but have no glyph to lay out or submit to the renderer.
                 if !text.is_empty() && text != " " {
                     let galley = fit_terminal_galley(
-                        ui.painter().layout_no_wrap(text, font.clone(), fg),
+                        ui.painter().layout_no_wrap(
+                            text.clone(),
+                            terminal_font_id(&self.font_settings, &text),
+                            fg,
+                        ),
                         width,
                     );
                     let text_pos = pos + Vec2::new(0.0, (cell.y - galley.size().y) / 2.0);
@@ -545,7 +549,11 @@ impl TerminalSession {
                     let text = terminal_cell_text(cell_content);
                     let fg = theme.background();
                     let galley = fit_terminal_galley(
-                        ui.painter().layout_no_wrap(text, font.clone(), fg),
+                        ui.painter().layout_no_wrap(
+                            text.clone(),
+                            terminal_font_id(&self.font_settings, &text),
+                            fg,
+                        ),
                         rect.width(),
                     );
                     let text_pos = pos + Vec2::new(0.0, (cell.y - galley.size().y) / 2.0);
@@ -1045,8 +1053,11 @@ impl eframe::App for TerminalApp {
                     self.shell_settings.clone(),
                 )
             {
-                if before.2.family != self.font_settings.family {
-                    configure_fonts_for(ctx, &self.font_settings.family);
+                if before.2.family != self.font_settings.family
+                    || before.2.fallbacks != self.font_settings.fallbacks
+                    || before.2.cjk_family != self.font_settings.cjk_family
+                {
+                    configure_fonts_for(ctx, &self.font_settings);
                 }
                 ctx.set_visuals(self.theme.visuals());
                 let result = self
@@ -1524,83 +1535,56 @@ fn show_settings(
                         "Use a monospace font to keep characters aligned.",
                         220.0,
                         |ui| {
-                            let button = ui.add_sized(
-                                [220.0, 28.0],
-                                egui::Button::new(&font.family).right_text("⏷").truncate(),
-                            );
-                            egui::Popup::menu(&button)
-                                .width(button.rect.width())
-                                .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
-                                .show(|ui| {
-                                    let search_id = egui::Id::new("font-search");
-                                    let mut search = ctx.data_mut(|data| {
-                                        data.get_temp::<String>(search_id).unwrap_or_default()
-                                    });
-                                    let search_changed = ui
-                                        .add(
-                                            egui::TextEdit::singleline(&mut search)
-                                                .id(egui::Id::new("font-search-input"))
-                                                .hint_text("Search fonts…")
-                                                .desired_width(200.0),
-                                        )
-                                        .changed();
-                                    let query = search.to_lowercase();
-                                    ctx.data_mut(|data| data.insert_temp(search_id, search));
-                                    ui.separator();
-                                    // Keep search outside the scrolling font list.
-                                    // A popup's sizing pass can collapse a scroll area to its
-                                    // default 64px minimum; max_height alone won't expand it.
-                                    let list_height =
-                                        (ctx.content_rect().height() - 100.0).clamp(64.0, 300.0);
-                                    let mut list = egui::ScrollArea::vertical()
-                                        .id_salt("font-family-list")
-                                        .min_scrolled_height(list_height)
-                                        .max_height(list_height);
-                                    if search_changed {
-                                        list = list.vertical_scroll_offset(0.0);
-                                    }
-                                    list.show(ui, |ui| {
-                                        let mut found = false;
-                                        for family in families
-                                            .iter()
-                                            .filter(|name| name.to_lowercase().contains(&query))
-                                        {
-                                            found = true;
-                                            if ui
-                                                .selectable_value(
-                                                    &mut font.family,
-                                                    family.clone(),
-                                                    family,
-                                                )
-                                                .clicked()
-                                            {
-                                                ctx.data_mut(|data| {
-                                                    data.remove::<String>(search_id)
-                                                });
-                                                ui.close();
-                                            }
-                                        }
-                                        if !found {
-                                            ui.weak("No matching fonts");
-                                        }
-                                    });
-                                });
+                            font_picker(ui, "primary", &mut font.family, &families, "Select font…");
                         },
                     );
-                    let preview_height = font.size * TERMINAL_LINE_HEIGHT + 28.0;
+                    ui.separator();
+                    settings_row(ui, "Fallbacks", "Tried in order for characters the family lacks.", 280.0, |ui| {
+                        ui.vertical(|ui| {
+                            let mut remove = None;
+                            let mut swap = None;
+                            let count = font.fallbacks.len();
+                            for (index, family) in font.fallbacks.iter_mut().enumerate() {
+                                ui.horizontal(|ui| {
+                                    font_picker(ui, ("fallback", index), family, &families, "Select font…");
+                                    if ui.small_button("×").clicked() { remove = Some(index); }
+                                    if index > 0 && ui.small_button("↑").clicked() { swap = Some((index, index - 1)); }
+                                    if index + 1 < count && ui.small_button("↓").clicked() { swap = Some((index, index + 1)); }
+                                });
+                            }
+                            if let Some(index) = remove { font.fallbacks.remove(index); }
+                            if let Some((a, b)) = swap { font.fallbacks.swap(a, b); }
+                            let mut new = String::new();
+                            font_picker(ui, "add-fallback", &mut new, &families, "Add fallback font…");
+                            if !new.is_empty() { font.fallbacks.push(new); }
+                        });
+                    });
+                    ui.separator();
+                    settings_row(ui, "CJK Font", "Draws Chinese, Japanese and Korean characters.", 240.0, |ui| {
+                        ui.horizontal(|ui| {
+                            let mut value = font.cjk_family.clone().unwrap_or_default();
+                            font_picker(ui, "cjk", &mut value, &families, "Automatic");
+                            if ui.small_button("×").clicked() { value.clear(); }
+                            font.cjk_family = if value.is_empty() { None } else { Some(value) };
+                        });
+                    });
+                    let preview_height = font.size * TERMINAL_LINE_HEIGHT * 3.0 + 28.0;
                     egui::Frame::new()
                         .fill(theme.background())
                         .corner_radius(6.0)
                         .inner_margin(14.0)
                         .show(ui, |ui| {
                             ui.set_min_size(Vec2::new(ui.available_width(), preview_height - 28.0));
-                            ui.add(
-                                egui::Label::new(
-                                    egui::RichText::new("Aa Bb 0123  ~/projects")
-                                        .font(FontId::monospace(font.size)),
-                                )
-                                .truncate(),
-                            );
+                            let mut preview = egui::text::LayoutJob::default();
+                            for ch in "The quick brown fox jumps over the lazy dog.\n中文示例  日本語サンプル  한국어 예제\nFallback symbols: → ⌘ ✓ ★ ⚠".chars() {
+                                let text = ch.to_string();
+                                preview.append(&text, 0.0, egui::TextFormat {
+                                    font_id: terminal_font_id(font, &text),
+                                    color: ui.visuals().text_color(),
+                                    ..Default::default()
+                                });
+                            }
+                            ui.add(egui::Label::new(preview).truncate());
                         });
                     ui.add_space(24.0);
                     ui.weak("CURSOR");
@@ -1910,7 +1894,7 @@ pub(super) fn run(app: TerminalApp) -> Result<()> {
                     }
                 }
             }
-            configure_fonts_for(&cc.egui_ctx, &app.font_settings.family);
+            configure_fonts_for(&cc.egui_ctx, &app.font_settings);
             Ok(Box::new(app))
         }),
     )
@@ -1972,10 +1956,10 @@ pub(super) fn is_default_ignorable(ch: char) -> bool {
 }
 
 fn configure_fonts(ctx: &egui::Context) {
-    configure_fonts_for(ctx, "Lilex");
+    configure_fonts_for(ctx, &settings::FontSettings::default());
 }
 
-fn configure_fonts_for(ctx: &egui::Context, family: &str) {
+fn configure_fonts_for(ctx: &egui::Context, settings: &settings::FontSettings) {
     let mut fonts = egui::FontDefinitions::default();
     fonts.font_data.insert(
         "IBM Plex Sans".into(),
@@ -2093,33 +2077,126 @@ fn configure_fonts_for(ctx: &egui::Context, family: &str) {
             tracing::info!(path, index, "Loaded Linux fallback font");
         }
     }
-    if family != "Lilex" && !family.trim().is_empty() {
-        if let Ok(output) = std::process::Command::new("fc-match")
-            .args(["--format=%{file}\n%{index}\n", family])
-            .output()
-        {
-            let result = String::from_utf8_lossy(&output.stdout);
-            let mut lines = result.lines();
-            if let (Some(path), Some(index)) = (
-                lines.next(),
-                lines.next().and_then(|v| v.parse::<u32>().ok()),
-            ) {
-                if let Ok(bytes) = std::fs::read(path) {
-                    let mut data = egui::FontData::from_owned(bytes);
-                    data.index = index;
-                    fonts
-                        .font_data
-                        .insert("selected-terminal".into(), std::sync::Arc::new(data));
-                    fonts
-                        .families
-                        .entry(egui::FontFamily::Monospace)
-                        .or_default()
-                        .insert(0, "selected-terminal".into());
-                }
+    let mut selected = Vec::new();
+    for family in std::iter::once(&settings.family).chain(settings.fallbacks.iter()) {
+        if let Some(name) = load_terminal_font(&mut fonts, family) {
+            if !selected.contains(&name) {
+                selected.push(name);
             }
         }
     }
+    let automatic = fonts
+        .families
+        .get(&egui::FontFamily::Monospace)
+        .cloned()
+        .unwrap_or_default();
+    for name in automatic {
+        if !selected.contains(&name) {
+            selected.push(name);
+        }
+    }
+    let mut cjk = Vec::new();
+    if let Some(family) = &settings.cjk_family {
+        if let Some(name) = load_terminal_font(&mut fonts, family) {
+            cjk.push(name);
+        }
+    }
+    for name in &selected {
+        if !cjk.contains(name) {
+            cjk.push(name.clone());
+        }
+    }
+    fonts.families.insert(egui::FontFamily::Monospace, selected);
+    fonts
+        .families
+        .insert(egui::FontFamily::Name("terminal-cjk".into()), cjk);
     ctx.set_fonts(fonts);
+}
+
+fn load_terminal_font(fonts: &mut egui::FontDefinitions, family: &str) -> Option<String> {
+    if fonts.font_data.contains_key(family) {
+        return Some(family.to_owned());
+    }
+    let output = std::process::Command::new("fc-match")
+        .args(["--format=%{file}\n%{index}\n", family])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let result = String::from_utf8_lossy(&output.stdout);
+    let mut lines = result.lines();
+    let path = lines.next()?;
+    let index = lines.next()?.parse::<u32>().ok()?;
+    let mut data = egui::FontData::from_owned(std::fs::read(path).ok()?);
+    data.index = index;
+    let name = format!("terminal:{family}");
+    fonts
+        .font_data
+        .insert(name.clone(), std::sync::Arc::new(data));
+    Some(name)
+}
+
+fn terminal_font_id(settings: &settings::FontSettings, text: &str) -> FontId {
+    if text.chars().next().is_some_and(settings::is_cjk) {
+        FontId::new(settings.size, egui::FontFamily::Name("terminal-cjk".into()))
+    } else {
+        FontId::monospace(settings.size)
+    }
+}
+
+fn font_picker(
+    ui: &mut egui::Ui,
+    id: impl std::hash::Hash,
+    value: &mut String,
+    families: &[String],
+    placeholder: &str,
+) {
+    ui.push_id(id, |ui| {
+        let button = ui.add_sized(
+            [200.0, 28.0],
+            egui::Button::new(if value.is_empty() {
+                placeholder
+            } else {
+                value.as_str()
+            })
+            .right_text("⏷")
+            .truncate(),
+        );
+        egui::Popup::menu(&button)
+            .width(button.rect.width())
+            .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
+            .show(|ui| {
+                let search_id = ui.id().with("search");
+                let mut search = ui
+                    .ctx()
+                    .data_mut(|data| data.get_temp::<String>(search_id).unwrap_or_default());
+                let changed = ui
+                    .add(egui::TextEdit::singleline(&mut search).hint_text("Search fonts…"))
+                    .changed();
+                let query = search.to_lowercase();
+                ui.ctx()
+                    .data_mut(|data| data.insert_temp(search_id, search));
+                let height = (ui.ctx().content_rect().height() - 100.0).clamp(64.0, 300.0);
+                let mut list = egui::ScrollArea::vertical()
+                    .min_scrolled_height(height)
+                    .max_height(height);
+                if changed {
+                    list = list.vertical_scroll_offset(0.0);
+                }
+                list.show(ui, |ui| {
+                    for family in families
+                        .iter()
+                        .filter(|name| name.to_lowercase().contains(&query))
+                    {
+                        if ui.selectable_value(value, family.clone(), family).clicked() {
+                            ui.ctx().data_mut(|data| data.remove::<String>(search_id));
+                            ui.close();
+                        }
+                    }
+                });
+            });
+    });
 }
 
 // Paint sidebar rows explicitly so their alignment and icons do not depend on

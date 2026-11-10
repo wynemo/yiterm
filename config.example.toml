@@ -20,6 +20,10 @@ theme = "dark"
 [font]
 family = "Lilex"
 size = 16.0
+# Ordered fallback font families for missing characters.
+fallbacks = []
+# Optional font for Chinese, Japanese and Korean characters.
+# cjk_family = "PingFang SC"
 
 # Windows: open Ctrl-clicked terminal links in the built-in SSH browser.
 [browser]

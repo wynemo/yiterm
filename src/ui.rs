@@ -259,6 +259,9 @@ pub(super) struct TerminalUi {
     context_menu: bool,
     font_select: gpui::Entity<SelectState<SearchableVec<String>>>,
     font_size: gpui::Entity<InputState>,
+    fallback_selects: Vec<gpui::Entity<SelectState<SearchableVec<String>>>>,
+    cjk_select: Option<gpui::Entity<SelectState<SearchableVec<String>>>>,
+    font_chain_subscriptions: Vec<gpui::Subscription>,
     shell_select: gpui::Entity<SelectState<SearchableVec<ShellChoice>>>,
     shell_program: gpui::Entity<InputState>,
     _settings_subscriptions: Vec<gpui::Subscription>,
@@ -477,6 +480,9 @@ impl TerminalUi {
             context_menu: false,
             font_select,
             font_size,
+            fallback_selects: Vec::new(),
+            cjk_select: None,
+            font_chain_subscriptions: Vec::new(),
             shell_select,
             shell_program,
             _settings_subscriptions: settings_subscriptions,
@@ -637,6 +643,65 @@ impl TerminalUi {
             cx.notify();
         }
     }
+    fn refresh_font_chain(&mut self, window: &mut Window, cx: &mut ViewContext<Self>) {
+        self.font_chain_subscriptions.clear();
+        self.fallback_selects.clear();
+        // The final empty selector appends a new fallback.
+        for index in 0..=self.app.font_settings.fallbacks.len() {
+            let current = self.app.font_settings.fallbacks.get(index).cloned();
+            let names = available_font_families(cx, current.as_deref().unwrap_or(""));
+            let selected = current
+                .as_ref()
+                .and_then(|current| names.iter().position(|name| name == current))
+                .map(|row| IndexPath::default().row(row));
+            let select = cx.new(|cx| {
+                SelectState::new(SearchableVec::new(names), selected, window, cx).searchable(true)
+            });
+            self.font_chain_subscriptions.push(cx.subscribe_in(
+                &select,
+                window,
+                move |this, _, event, window, cx| match event {
+                    SelectEvent::Confirm(value) => {
+                        if index < this.app.font_settings.fallbacks.len() {
+                            if let Some(value) = value {
+                                this.app.font_settings.fallbacks[index] = value.clone();
+                            } else {
+                                this.app.font_settings.fallbacks.remove(index);
+                            }
+                        } else if let Some(value) = value {
+                            this.app.font_settings.fallbacks.push(value.clone());
+                        }
+                        this.apply_settings();
+                        this.refresh_font_chain(window, cx);
+                        cx.notify();
+                    }
+                },
+            ));
+            self.fallback_selects.push(select);
+        }
+        let current = self.app.font_settings.cjk_family.as_deref().unwrap_or("");
+        let names = available_font_families(cx, current);
+        let selected = names
+            .iter()
+            .position(|name| name == current)
+            .map(|row| IndexPath::default().row(row));
+        let select = cx.new(|cx| {
+            SelectState::new(SearchableVec::new(names), selected, window, cx).searchable(true)
+        });
+        self.font_chain_subscriptions.push(cx.subscribe_in(
+            &select,
+            window,
+            |this, _, event, _, cx| match event {
+                SelectEvent::Confirm(value) => {
+                    this.app.font_settings.cjk_family = value.clone();
+                    this.apply_settings();
+                    cx.notify();
+                }
+            },
+        ));
+        self.cjk_select = Some(select);
+    }
+
     fn refresh_shell_choices(&mut self, window: &mut Window, cx: &mut ViewContext<Self>) {
         let (choices, selected) = shell_choices(&self.app.shell_settings);
         self.shell_select.update(cx, |select, cx| {
@@ -710,6 +775,7 @@ impl TerminalUi {
             cx.subscribe_in(&self.font_select, window, Self::on_font_selected);
         self.font_size
             .update(cx, |input, cx| input.set_value("16", window, cx));
+        self.refresh_font_chain(window, cx);
         self.apply_settings();
         cx.notify();
     }
@@ -1259,6 +1325,16 @@ fn text_run(text: &str, color: Rgba) -> TextRun {
         strikethrough: None,
     }
 }
+fn terminal_font(settings: &settings::FontSettings, ch: char) -> gpui::Font {
+    let mut font = gpui::font(settings.family_for(ch).to_owned());
+    let mut fallbacks = settings.fallbacks.clone();
+    if settings.family_for(ch) != settings.family {
+        fallbacks.insert(0, settings.family.clone());
+    }
+    font.fallbacks = Some(gpui::FontFallbacks::from_fonts(fallbacks));
+    font
+}
+
 fn paint_text(
     font: &settings::FontSettings,
     text: &str,
@@ -1269,10 +1345,28 @@ fn paint_text(
     window: &mut Window,
     cx: &mut App,
 ) {
-    let runs = [TextRun {
-        font: gpui::font(font.family.clone()),
-        ..text_run(text, color)
-    }];
+    let mut runs: Vec<TextRun> = Vec::new();
+    for ch in text.chars() {
+        // Keep variation selectors and combining marks with their base run.
+        let inherit =
+            matches!(ch as u32, 0x300..=0x36f | 0xfe00..=0xfe0f | 0xe0100..=0xe01ef | 0x200d);
+        let selected = if inherit {
+            runs.last()
+                .map(|run| run.font.clone())
+                .unwrap_or_else(|| terminal_font(font, ch))
+        } else {
+            terminal_font(font, ch)
+        };
+        if let Some(run) = runs.last_mut().filter(|run| run.font == selected) {
+            run.len += ch.len_utf8();
+        } else {
+            runs.push(TextRun {
+                len: ch.len_utf8(),
+                font: selected,
+                ..text_run("", color)
+            });
+        }
+    }
     let mut line =
         window
             .text_system()
@@ -1794,6 +1888,7 @@ impl Render for TerminalUi {
                 self.menu_button("settings", "Settings", cx, |this, window, cx| {
                     this.app.settings_open = true;
                     this.refresh_shell_choices(window, cx);
+                    this.refresh_font_chain(window, cx);
                     this.menu = None;
                 }),
             )
@@ -2603,6 +2698,52 @@ impl TerminalUi {
                 .flex_shrink_0()
         };
         let divider = || div().h(px(1.)).bg(theme.border());
+        let mut fallbacks = div()
+            .w(px(300.))
+            .flex_shrink_0()
+            .flex()
+            .flex_col()
+            .gap(px(6.));
+        for (index, select) in self.fallback_selects.iter().enumerate() {
+            let existing = index < self.app.font_settings.fallbacks.len();
+            let mut controls = div().flex().items_center().gap(px(4.)).child(
+                Select::new(select)
+                    .small()
+                    .search_placeholder("Search fonts…")
+                    .placeholder("Add fallback font…")
+                    .cleanable(existing)
+                    .flex_1()
+                    .min_w_0(),
+            );
+            if existing && index > 0 {
+                controls = controls.child(
+                    Button::new(("fallback-up", index))
+                        .label("↑")
+                        .small()
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            this.app.font_settings.fallbacks.swap(index, index - 1);
+                            this.apply_settings();
+                            this.refresh_font_chain(window, cx);
+                            cx.notify();
+                        })),
+                );
+            }
+            if existing && index + 1 < self.app.font_settings.fallbacks.len() {
+                controls = controls.child(
+                    Button::new(("fallback-down", index))
+                        .label("↓")
+                        .small()
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            this.app.font_settings.fallbacks.swap(index, index + 1);
+                            this.apply_settings();
+                            this.refresh_font_chain(window, cx);
+                            cx.notify();
+                        })),
+                );
+            }
+            fallbacks = fallbacks.child(controls);
+        }
+        let preview_font = self.app.font_settings.clone();
         let mut themes = div().flex().gap(px(4.));
         for (value, label) in [(ThemeMode::Dark, "Dark"), (ThemeMode::Light, "Light")] {
             themes = themes.child(
@@ -2748,21 +2889,71 @@ impl TerminalUi {
                         ),
                     ),
             )
+            .child(divider())
             .child(
-                div()
-                    .mt(px(4.))
-                    .p(px(14.))
-                    .h(px(self.app.font_settings.size * 1.3 + 28.))
-                    .flex_shrink_0()
-                    .flex()
-                    .items_center()
-                    .rounded(px(6.))
-                    .bg(theme.background())
-                    .overflow_hidden()
-                    .font_family(self.app.font_settings.family.clone())
-                    .text_size(px(self.app.font_settings.size))
-                    .line_height(px(self.app.font_settings.size * 1.3))
-                    .child("Aa Bb 0123  ~/projects"),
+                row()
+                    .child(description(
+                        "Fallbacks",
+                        "Tried in order for characters the family lacks.",
+                    ))
+                    .child(fallbacks),
+            )
+            .child(divider())
+            .child(
+                row()
+                    .child(description(
+                        "CJK Font",
+                        "Draws Chinese, Japanese and Korean characters.",
+                    ))
+                    .when_some(self.cjk_select.as_ref(), |row, select| {
+                        row.child(
+                            div().w(px(300.)).child(
+                                Select::new(select)
+                                    .small()
+                                    .w_full()
+                                    .placeholder("Automatic")
+                                    .search_placeholder("Search fonts…")
+                                    .cleanable(true),
+                            ),
+                        )
+                    }),
+            )
+            .child(
+                canvas(
+                    |_, _, _| (),
+                    move |bounds, _, window, cx| {
+                        let lines = [
+                            "The quick brown fox jumps over the lazy dog.",
+                            "中文示例  日本語サンプル  한국어 예제",
+                            "Fallback symbols: → ⌘ ✓ ★ ⚠",
+                        ];
+                        window.with_content_mask(Some(ContentMask { bounds }), |window| {
+                            for (index, text) in lines.iter().enumerate() {
+                                paint_text(
+                                    &preview_font,
+                                    text,
+                                    bounds.origin
+                                        + point(
+                                            px(10.),
+                                            px(8.
+                                                + index as f32
+                                                    * preview_font.size
+                                                    * TERMINAL_LINE_HEIGHT),
+                                        ),
+                                    px(preview_font.size * TERMINAL_LINE_HEIGHT),
+                                    theme.foreground(),
+                                    None,
+                                    window,
+                                    cx,
+                                );
+                            }
+                        });
+                    },
+                )
+                .w_full()
+                .h(px(
+                    self.app.font_settings.size * TERMINAL_LINE_HEIGHT * 3. + 16.
+                )),
             )
             .child(div().mt(px(24.)).opacity(0.6).child("CURSOR"))
             .child(
@@ -3108,7 +3299,9 @@ fn available_font_families(cx: &App, current: &str) -> Vec<String> {
     let mut names = cx.text_system().all_font_names();
     names.retain(|name| !name.starts_with('.'));
     names.push("Lilex".into());
-    names.push(current.to_owned());
+    if !current.is_empty() {
+        names.push(current.to_owned());
+    }
     names.sort_by_key(|name| name.to_lowercase());
     names.dedup();
     names

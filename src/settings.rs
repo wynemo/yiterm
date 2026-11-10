@@ -142,17 +142,37 @@ pub fn save_all(path: &Path, cursor: CursorSettings, theme: crate::theme::ThemeM
 pub struct FontSettings {
     pub family: String,
     pub size: f32,
+    pub fallbacks: Vec<String>,
+    pub cjk_family: Option<String>,
 }
 impl Default for FontSettings {
     fn default() -> Self {
         Self {
             family: "Lilex".into(),
             size: 16.0,
+            fallbacks: Vec::new(),
+            cjk_family: None,
         }
     }
 }
 impl FontSettings {
+    pub fn family_for(&self, ch: char) -> &str {
+        if is_cjk(ch) {
+            self.cjk_family.as_deref().unwrap_or(&self.family)
+        } else {
+            &self.family
+        }
+    }
+
     fn validate(&self) -> Result<()> {
+        anyhow::ensure!(
+            self.fallbacks.iter().all(|name| !name.trim().is_empty())
+                && self
+                    .cjk_family
+                    .as_ref()
+                    .is_none_or(|name| !name.trim().is_empty()),
+            "Fallback and CJK font names cannot be empty"
+        );
         anyhow::ensure!(
             !self.family.trim().is_empty(),
             "Font family cannot be empty"
@@ -164,6 +184,14 @@ impl FontSettings {
         Ok(())
     }
 }
+// CJK punctuation, kana, bopomofo, Hangul and unified/compatibility ideographs.
+pub fn is_cjk(ch: char) -> bool {
+    matches!(ch as u32, 0x1100..=0x11ff | 0x2e80..=0x2fff | 0x3000..=0x33ff | 0x3400..=0x4dbf | 0x4e00..=0x9fff
+        | 0xa960..=0xa97f | 0xac00..=0xd7ff | 0xf900..=0xfaff
+        | 0xfe30..=0xfe4f | 0xff01..=0xff60 | 0xff65..=0xffdc
+        | 0x1aff0..=0x1afff | 0x1b000..=0x1b16f | 0x20000..=0x323af)
+}
+
 pub fn load_font(path: &Path) -> Result<FontSettings> {
     let text = match std::fs::read_to_string(path) {
         Ok(text) => text,
