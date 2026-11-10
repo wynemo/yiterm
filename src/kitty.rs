@@ -478,7 +478,17 @@ impl Graphics {
         } else {
             original_id
         };
-        self.remove_image(id, term);
+        // Replacing pixels at the same dimensions preserves existing placements.
+        // In particular, a=t updates during screen sharing must not erase anchors.
+        let same_size = self
+            .images
+            .get(&id)
+            .is_some_and(|old| old.width == picture.width && old.height == picture.height);
+        if same_size {
+            self.images.remove(&id);
+        } else {
+            self.remove_image(id, term);
+        }
         let bytes = picture.width as usize * picture.height as usize * 4;
         while self.cache_size() + bytes > CACHE_BYTES || self.images.len() >= 256 {
             let Some(old) = self.images.keys().next().copied() else {

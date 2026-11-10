@@ -817,6 +817,9 @@ impl eframe::App for TerminalApp {
                 self.close_tab(index);
             }
         }
+        self.report_terminal_focus(
+            ctx.input(|input| input.focused) && !self.settings_open && !self.files_focused,
+        );
         self.poll_files(true);
         let profile_poll = poll_start.map(|start| start.elapsed());
         #[cfg(windows)]

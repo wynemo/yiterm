@@ -57,6 +57,8 @@ fn wake_ui() {}
 #[derive(Parser, Clone)]
 #[command(version, about = "A small native terminal with clipboard image paste")]
 struct Args {
+    #[command(flatten)]
+    screen_share: yiterm::screen_share::Options,
     /// Connect directly to this OpenSSH host (remote shell must be POSIX).
     #[arg(long, conflicts_with = "mosh")]
     ssh: Option<String>,
@@ -136,6 +138,7 @@ struct TerminalSession {
     selecting: bool,
     pending_clipboard: Option<String>,
     cursor_blink_started: Instant,
+    reported_focus: Option<bool>,
     cursor_settings: CursorSettings,
     font_settings: settings::FontSettings,
     status: String,
@@ -290,6 +293,7 @@ impl TerminalSession {
             selecting: false,
             pending_clipboard: None,
             cursor_blink_started: Instant::now(),
+            reported_focus: None,
             cursor_settings: CursorSettings::default(),
             font_settings: settings::FontSettings::default(),
             status: warning
@@ -847,6 +851,30 @@ struct TerminalApp {
 }
 
 impl TerminalApp {
+    fn report_terminal_focus(&mut self, window_focused: bool) {
+        for (tab_index, tab) in self.tabs.iter_mut().enumerate() {
+            for (pane_index, pane) in tab.panes.iter_mut().enumerate() {
+                if !pane.term.mode().contains(TermMode::FOCUS_IN_OUT) {
+                    pane.reported_focus = None;
+                    continue;
+                }
+                let focused =
+                    window_focused && tab_index == self.active && pane_index == tab.active;
+                if pane.reported_focus != Some(focused) {
+                    let bytes: &[u8] = if focused { b"\x1b[I" } else { b"\x1b[O" };
+                    if pane
+                        .writer
+                        .write_all(bytes)
+                        .and_then(|_| pane.writer.flush())
+                        .is_ok()
+                    {
+                        pane.reported_focus = Some(focused);
+                    }
+                }
+            }
+        }
+    }
+
     fn new(args: Args, logging: &logging::Logging) -> Result<Self> {
         let session = TerminalSession::new(&args, logging.warning.as_deref(), None)?;
         let path = args
@@ -1207,6 +1235,9 @@ fn main() -> Result<()> {
         return result;
     }
     let args = Args::parse();
+    if args.screen_share.share_screen {
+        return yiterm::screen_share::run(&args.screen_share);
+    }
     let logging = logging::init(args.config.as_deref(), args.log_filter.as_deref())?;
     let result = run(args, &logging);
     if let Err(error) = &result {

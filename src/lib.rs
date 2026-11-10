@@ -10,3 +10,4 @@ pub mod ssh;
 pub mod theme;
 pub mod update;
 pub mod vnc;
+pub mod screen_share;

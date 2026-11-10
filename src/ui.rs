@@ -550,6 +550,8 @@ impl TerminalUi {
             .is_some_and(|browser| browser.read(cx).maximized());
         #[cfg(not(windows))]
         let presented = true;
+        self.app
+            .report_terminal_focus(self.focused && !self.blocked() && presented);
         changed |= self.app.poll_files(presented);
         for tab in &mut self.app.tabs {
             for pane in &mut tab.panes {
