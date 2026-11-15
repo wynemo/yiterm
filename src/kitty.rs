@@ -19,6 +19,7 @@ enum Action {
     Command(Vec<u8>),
     Abort,
     CellSizeQuery,
+    PixelSizeQuery,
 }
 struct Transfer {
     controls: Controls,
@@ -154,6 +155,9 @@ impl Graphics {
         self.pixels = pixels;
         changed
     }
+    pub fn pixel_scale(&self) -> f32 {
+        self.scale
+    }
     pub fn cell_pixels(&self) -> [u16; 2] {
         self.cell
             .map(|v| (v * self.scale).round().clamp(1., u16::MAX as f32) as u16)
@@ -264,18 +268,25 @@ impl Graphics {
                     }
                 }
                 6 => {
-                    // VTE does not implement XTWINOPS 16. Keep its short prefix
+                    // Handle pixel-area and cell-size queries in graphics stream order.
+                    // Keep the short prefix
                     // across PTY reads and dispatch the query in stream order.
                     self.size_query.push(b);
-                    if self.size_query == b"\x1b[16t" {
+                    if self.size_query == b"\x1b[16t" || self.size_query == b"\x1b[14t" {
                         if !text.is_empty() {
                             self.actions
                                 .push_back(Action::Text(std::mem::take(&mut text)));
                         }
-                        self.actions.push_back(Action::CellSizeQuery);
+                        self.actions.push_back(if self.size_query == b"\x1b[16t" {
+                            Action::CellSizeQuery
+                        } else {
+                            Action::PixelSizeQuery
+                        });
                         self.size_query.clear();
                         self.state = 0;
-                    } else if !b"\x1b[16t".starts_with(&self.size_query) {
+                    } else if !b"\x1b[16t".starts_with(&self.size_query)
+                        && !b"\x1b[14t".starts_with(&self.size_query)
+                    {
                         if b == 0x1b {
                             self.size_query.pop();
                             self.state = 1;
@@ -323,6 +334,10 @@ impl Graphics {
             match action {
                 Action::Text(bytes) => parser.advance(term, &bytes),
                 Action::Abort => self.transfer = None,
+                Action::PixelSizeQuery => {
+                    let [width, height] = self.pixels;
+                    term.graphics_reply(format!("\x1b[4;{height};{width}t"));
+                }
                 Action::CellSizeQuery => {
                     let [width, height] = self.cell_pixels();
                     term.graphics_reply(format!("\x1b[6;{height};{width}t"));

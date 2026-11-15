@@ -1036,6 +1036,7 @@ impl TerminalUi {
             if let Some(button) = button
                 && let Some(bytes) = mouse_bytes(
                     pane.mouse_modes.protocol(*pane.term.mode()),
+                    pane.graphics.pixel_scale(),
                     geo.terminal,
                     cell,
                     pane.size,
@@ -1126,6 +1127,7 @@ impl TerminalUi {
                 let button = event.pressed_button.and_then(button_code).unwrap_or(3) + 32;
                 if let Some(bytes) = mouse_bytes(
                     pane.mouse_modes.protocol(mode),
+                    pane.graphics.pixel_scale(),
                     geo.terminal,
                     cell,
                     pane.size,
@@ -1163,6 +1165,7 @@ impl TerminalUi {
             && let Some(button) = pane.mouse_button.take()
             && let Some(bytes) = mouse_bytes(
                 pane.mouse_modes.protocol(*pane.term.mode()),
+                pane.graphics.pixel_scale(),
                 geo.terminal,
                 cell,
                 pane.size,
@@ -1198,6 +1201,7 @@ impl TerminalUi {
             for _ in 0..steps.unsigned_abs().min(128) {
                 if let Some(bytes) = mouse_bytes(
                     pane.mouse_modes.protocol(*pane.term.mode()),
+                    pane.graphics.pixel_scale(),
                     geo.terminal,
                     cell,
                     pane.size,
@@ -1532,9 +1536,19 @@ fn paint_graphics(pane: &TerminalSession, rect: Rect, above_text: bool, window: 
         }
         let [x, y, w, h] = draw.rect;
         let [u0, v0, u1, v1] = draw.uv;
-        let bounds = Bounds::new(rect.origin + point(px(x), px(y)), size(px(w), px(h)));
-        let source_width = w / (u1 - u0);
-        let source_height = h / (v1 - v0);
+        // Shared tile edges must land on the same device pixel. Fractional
+        // content masks otherwise leave hairline seams between adjacent images.
+        let scale = window.scale_factor();
+        let left = ((f32::from(rect.origin.x) + x) * scale).round() / scale;
+        let top = ((f32::from(rect.origin.y) + y) * scale).round() / scale;
+        let right = ((f32::from(rect.origin.x) + x + w) * scale).round() / scale;
+        let bottom = ((f32::from(rect.origin.y) + y + h) * scale).round() / scale;
+        let bounds = Bounds::new(
+            point(px(left), px(top)),
+            size(px(right - left), px(bottom - top)),
+        );
+        let source_width = (right - left) / (u1 - u0);
+        let source_height = (bottom - top) / (v1 - v0);
         let image_bounds = Bounds::new(
             bounds.origin - point(px(u0 * source_width), px(v0 * source_height)),
             size(px(source_width), px(source_height)),
@@ -1760,6 +1774,7 @@ fn button_code(button: MouseButton) -> Option<u8> {
 }
 fn mouse_bytes(
     protocol: mouse::Protocol,
+    pixel_scale: f32,
     rect: Rect,
     cell: gpui::Size<Pixels>,
     size: Size,
@@ -1771,9 +1786,25 @@ fn mouse_bytes(
         (((pos.x - rect.left()) / cell.width).floor().max(0.) as usize).min(size.cols - 1) + 1;
     let row =
         (((pos.y - rect.top()) / cell.height).floor().max(0.) as usize).min(size.rows - 1) + 1;
+    let (col, row) = if protocol.pixel {
+        (
+            ((f32::from(pos.x - rect.left()) * pixel_scale)
+                .floor()
+                .max(0.) as usize)
+                .min((size.cols as f32 * f32::from(cell.width) * pixel_scale).ceil() as usize - 1)
+                + 1,
+            ((f32::from(pos.y - rect.top()) * pixel_scale)
+                .floor()
+                .max(0.) as usize)
+                .min((size.rows as f32 * f32::from(cell.height) * pixel_scale).ceil() as usize - 1)
+                + 1,
+        )
+    } else {
+        (col, row)
+    };
     let (button, pressed) = action;
     let modifiers = u8::from(m.shift) * 4 + u8::from(m.alt) * 8 + u8::from(m.control) * 16;
-    if protocol.mode.contains(TermMode::SGR_MOUSE) {
+    if protocol.pixel || protocol.mode.contains(TermMode::SGR_MOUSE) {
         Some(
             format!(
                 "\x1b[<{};{col};{row}{}",

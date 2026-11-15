@@ -28,6 +28,7 @@ pub struct MouseModes {
 struct Requests {
     changes: Vec<(u16, bool)>,
     urxvt: bool,
+    pixel: bool,
 }
 
 impl Requests {
@@ -35,6 +36,9 @@ impl Requests {
         let mode = mode.raw();
         if mode == 1015 {
             self.urxvt = enabled;
+        }
+        if mode == 1016 {
+            self.pixel = enabled;
         }
         if matches!(mode, 1000..=1007 | 1015 | 1016 | 9001) {
             self.changes.push((mode, enabled));
@@ -53,6 +57,7 @@ impl Handler for Requests {
 
     fn reset_state(&mut self) {
         self.urxvt = false;
+        self.pixel = false;
     }
 }
 
@@ -60,11 +65,16 @@ impl Handler for Requests {
 pub struct Protocol {
     pub mode: TermMode,
     pub urxvt: bool,
+    pub pixel: bool,
 }
 
 impl From<TermMode> for Protocol {
     fn from(mode: TermMode) -> Self {
-        Self { mode, urxvt: false }
+        Self {
+            mode,
+            urxvt: false,
+            pixel: false,
+        }
     }
 }
 
@@ -78,6 +88,7 @@ impl MouseModes {
         Protocol {
             mode,
             urxvt: self.requests.urxvt && !mode.contains(TermMode::SGR_MOUSE),
+            pixel: self.requests.pixel,
         }
     }
 }

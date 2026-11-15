@@ -1,4 +1,4 @@
-//! Read-only macOS capture over the existing terminal byte stream.
+//! macOS capture over the existing terminal byte stream.
 use anyhow::{Result, bail};
 use clap::Args;
 
@@ -14,14 +14,24 @@ pub struct Options {
     pub share_display: Option<u32>,
     #[arg(long, requires = "share_screen")]
     pub share_window: Option<u32>,
-    /// Maximum capture width; does not change the terminal display area.
-    #[arg(long, requires = "share_screen", default_value = "1280", value_parser = clap::value_parser!(u32).range(160..=3840))]
+    /// Maximum capture width; 0 preserves native resolution (up to 3840 pixels).
+    #[arg(long, requires = "share_screen", default_value = "0", value_parser = clap::value_parser!(u32).range(0..=3840))]
     pub share_width: u32,
     #[arg(long, requires = "share_screen", default_value = "15", value_parser = clap::value_parser!(u32).range(1..=60))]
     pub share_fps: u32,
     /// Fix color quality instead of adapting to output pressure.
-    #[arg(long, requires = "share_screen", value_parser = ["lossless", "565", "555", "444"])]
+    #[arg(long, requires = "share_screen", value_parser = ["lossless", "auto", "565", "555", "444"])]
     pub share_quality: Option<String>,
+    /// Allow automatic resolution reduction under sustained output pressure.
+    #[arg(
+        long,
+        requires = "share_screen",
+        conflicts_with = "share_fixed_resolution"
+    )]
+    pub share_adaptive_resolution: bool,
+    /// View without remote mouse clicks or Accessibility permission.
+    #[arg(long, requires = "share_screen")]
+    pub share_read_only: bool,
     /// Disable adaptive resolution reduction (capture width remains fixed).
     #[arg(long, requires = "share_screen")]
     pub share_fixed_resolution: bool,
@@ -96,7 +106,9 @@ mod macos {
     impl Drop for Terminal {
         fn drop(&mut self) {
             let mut out = std::io::stdout();
-            let _ = out.write_all(b"\x1b[?2026l\x1b[?1004l\x1b[?25h\x1b[?1049l");
+            let _ = out.write_all(
+                b"\x1b[?2026l\x1b[?1000l\x1b[?1006l\x1b[?1016l\x1b[?1004l\x1b[?25h\x1b[?1049l",
+            );
             let _ = out.flush();
             unsafe {
                 libc::tcsetattr(0, libc::TCSANOW, &self.saved);
@@ -111,7 +123,11 @@ mod macos {
         h: usize,
         rgb: Vec<u8>,
     }
-    fn geometry(source: Option<(usize, usize)>) -> Result<(usize, usize)> {
+    fn geometry(
+        source: Option<(usize, usize)>,
+        measured_cell: Option<[usize; 2]>,
+        measured_area: Option<[usize; 2]>,
+    ) -> Result<(usize, usize)> {
         let mut size = unsafe { std::mem::zeroed::<libc::winsize>() };
         anyhow::ensure!(
             unsafe { libc::ioctl(1, libc::TIOCGWINSZ, &mut size) } == 0
@@ -123,12 +139,20 @@ mod macos {
         let rows = usize::from(size.ws_row).min(500);
         if let Some((w, h)) = source {
             // PTYs can omit pixel dimensions; use a conventional 1:2 cell as fallback.
-            let cell_w = if size.ws_xpixel > 0 {
+            let cell_w = if let Some(area) = measured_area {
+                area[0] as f64 / f64::from(size.ws_col)
+            } else if let Some(cell) = measured_cell {
+                cell[0] as f64
+            } else if size.ws_xpixel > 0 {
                 f64::from(size.ws_xpixel) / f64::from(size.ws_col)
             } else {
                 8.0
             };
-            let cell_h = if size.ws_ypixel > 0 {
+            let cell_h = if let Some(area) = measured_area {
+                area[1] as f64 / f64::from(size.ws_row)
+            } else if let Some(cell) = measured_cell {
+                cell[1] as f64
+            } else if size.ws_ypixel > 0 {
                 f64::from(size.ws_ypixel) / f64::from(size.ws_row)
             } else {
                 16.0
@@ -173,26 +197,28 @@ mod macos {
         compressed: bool,
     }
     fn encode(mut tile: Tile, quality: usize) -> Result<Encoded> {
-        let bits = match quality {
-            1 => [5, 6, 5],
-            2 => [5, 5, 5],
-            3 => [4, 4, 4],
-            _ => [8, 8, 8],
-        };
-        // Preserve flat/UI text tiles even when photographic tiles are quantized.
-        let mut colors = std::collections::HashSet::new();
-        for pixel in tile.rgb.chunks_exact(3) {
-            colors.insert([pixel[0], pixel[1], pixel[2]]);
-            if colors.len() > 128 {
-                break;
+        if quality > 0 {
+            let bits = match quality {
+                1 => [5, 6, 5],
+                2 => [5, 5, 5],
+                3 => [4, 4, 4],
+                _ => [8, 8, 8],
+            };
+            // Preserve flat/UI text tiles even when photographic tiles are quantized.
+            let mut colors = std::collections::HashSet::new();
+            for pixel in tile.rgb.chunks_exact(3) {
+                colors.insert([pixel[0], pixel[1], pixel[2]]);
+                if colors.len() > 128 {
+                    break;
+                }
             }
-        }
-        let bits = if colors.len() <= 128 { [8, 8, 8] } else { bits };
-        for pixel in tile.rgb.chunks_exact_mut(3) {
-            for c in 0..3 {
-                let shift = 8 - bits[c];
-                let value = pixel[c] >> shift;
-                pixel[c] = ((u16::from(value) * 255) / ((1u16 << bits[c]) - 1)) as u8;
+            let bits = if colors.len() <= 128 { [8, 8, 8] } else { bits };
+            for pixel in tile.rgb.chunks_exact_mut(3) {
+                for c in 0..3 {
+                    let shift = 8 - bits[c];
+                    let value = pixel[c] >> shift;
+                    pixel[c] = ((u16::from(value) * 255) / ((1u16 << bits[c]) - 1)) as u8;
+                }
             }
         }
         let mut encoder = ZlibEncoder::new(Vec::new(), Compression::fast());
@@ -246,6 +272,7 @@ mod macos {
             context: *mut libc::c_void,
         ) -> i32;
         fn yiterm_capture_stop();
+        fn yiterm_capture_click(x: f64, y: f64, button: i32, modifiers: i32);
     }
     unsafe extern "C" fn captured(
         data: *const u8,
@@ -290,7 +317,7 @@ mod macos {
                 std::io::stdin().is_terminal() && std::io::stdout().is_terminal(),
                 "Screen sharing requires a terminal; connect with ssh -t"
             );
-            geometry(None)?;
+            geometry(None, None, None)?;
         }
         let mut args = Vec::new();
         for (flag, value) in [("--display", o.share_display), ("--window", o.share_window)] {
@@ -306,6 +333,9 @@ mod macos {
         ]);
         if o.share_list {
             args.push("--list".into());
+        }
+        if !o.share_read_only {
+            args.push("--control".into());
         }
         let args: Vec<_> = args
             .into_iter()
@@ -360,16 +390,26 @@ mod macos {
     fn render(o: &Options, latest: Arc<Latest>) -> Result<()> {
         let _terminal = Terminal::enter()?;
         let mut out = std::io::stdout();
+        out.write_all(b"\x1b[14t\x1b[16t")?;
+        if !o.share_read_only {
+            out.write_all(b"\x1b[?1000h\x1b[?1006h\x1b[?1016h")?;
+        }
+        out.flush()?;
+        let query_started = Instant::now();
+        let mut last_query = Instant::now();
+        let mut measured_cell: Option<[usize; 2]> = None;
+        let mut measured_area: Option<[usize; 2]> = None;
         let mut previous: Option<Arc<Frame>> = None;
         let mut current: Option<Arc<Frame>> = None;
         let mut old_geometry = (0, 0);
         let mut count = 0;
-        let fixed = o.share_quality.as_deref().map(|s| match s {
-            "565" => 1,
-            "555" => 2,
-            "444" => 3,
-            _ => 0,
-        });
+        let fixed = match o.share_quality.as_deref().unwrap_or("lossless") {
+            "auto" => None,
+            "565" => Some(1),
+            "555" => Some(2),
+            "444" => Some(3),
+            _ => Some(0),
+        };
         let mut quality = fixed.unwrap_or(0);
         let mut last_adjust = Instant::now();
         let mut last_stats = Instant::now();
@@ -400,23 +440,123 @@ mod macos {
                     let n = std::io::stdin().read(&mut input)?;
                     input_pending.extend_from_slice(&input[..n]);
                     while !input_pending.is_empty() {
-                        if input_pending.starts_with(b"\x1b[I") {
-                            focused = true;
-                            previous = None;
-                            input_pending.drain(..3);
-                        } else if input_pending.starts_with(b"\x1b[O") {
-                            focused = false;
-                            input_pending.drain(..3);
-                        } else if b"\x1b[I".starts_with(&input_pending)
-                            || b"\x1b[O".starts_with(&input_pending)
-                        {
-                            break;
-                        } else {
+                        if input_pending[0] != 27 {
                             if input_pending.remove(0) == b'q' {
                                 STOP.store(true, Ordering::Relaxed);
                             }
+                            continue;
+                        }
+                        if input_pending.len() == 1 {
+                            break;
+                        }
+                        if input_pending[1] != b'[' {
+                            input_pending.drain(..2);
+                            continue;
+                        }
+                        let Some(end) = input_pending
+                            .iter()
+                            .enumerate()
+                            .skip(2)
+                            .find_map(|(i, b)| (0x40..=0x7e).contains(b).then_some(i))
+                        else {
+                            if input_pending.len() > 128 {
+                                input_pending.clear();
+                            }
+                            break;
+                        };
+                        let sequence: Vec<_> = input_pending.drain(..=end).collect();
+                        match sequence.last().copied() {
+                            Some(b'I') => {
+                                focused = true;
+                                previous = None;
+                            }
+                            Some(b'O') => focused = false,
+                            Some(b't') => {
+                                if let Ok(text) = std::str::from_utf8(&sequence[2..end]) {
+                                    let parts: Vec<_> = text
+                                        .split(';')
+                                        .filter_map(|n| n.parse::<usize>().ok())
+                                        .collect();
+                                    if let [4, h, w] = parts.as_slice() {
+                                        if (1..=65535).contains(w) && (1..=65535).contains(h) {
+                                            let area = [*w, *h];
+                                            if measured_area != Some(area) {
+                                                previous = None;
+                                            }
+                                            measured_area = Some(area);
+                                        }
+                                    }
+                                    if let [6, h, w] = parts.as_slice() {
+                                        if (1..=512).contains(w) && (1..=512).contains(h) {
+                                            let cell = [*w, *h];
+                                            if measured_cell != Some(cell) {
+                                                previous = None;
+                                            }
+                                            measured_cell = Some(cell);
+                                        }
+                                    }
+                                }
+                            }
+                            Some(b'M' | b'm')
+                                if !o.share_read_only && sequence.get(2) == Some(&b'<') =>
+                            {
+                                if sequence[end] == b'M' {
+                                    if let Ok(text) = std::str::from_utf8(&sequence[3..end]) {
+                                        let parts: Vec<_> = text
+                                            .split(';')
+                                            .filter_map(|n| n.parse::<usize>().ok())
+                                            .collect();
+                                        if let [button, x, y] = parts.as_slice() {
+                                            if focused
+                                                && previous.is_some()
+                                                && button & 0b1110_0000 == 0
+                                                && button & 3 < 3
+                                            {
+                                                if let Some([cw, ch]) = measured_cell {
+                                                    let (cols, rows) = old_geometry;
+                                                    let (all_cols, all_rows) =
+                                                        geometry(None, None, None)?;
+                                                    let (cw, ch) = measured_area
+                                                        .map(|area| {
+                                                            (
+                                                                area[0] as f64 / all_cols as f64,
+                                                                area[1] as f64 / all_rows as f64,
+                                                            )
+                                                        })
+                                                        .unwrap_or((cw as f64, ch as f64));
+                                                    let (width, height) =
+                                                        (cols as f64 * cw, rows as f64 * ch);
+                                                    if *x > 0
+                                                        && *y > 0
+                                                        && (*x as f64) <= width
+                                                        && (*y as f64) <= height
+                                                    {
+                                                        unsafe {
+                                                            yiterm_capture_click(
+                                                                (*x as f64 - 0.5) / width as f64,
+                                                                (*y as f64 - 0.5) / height as f64,
+                                                                (button & 3) as i32,
+                                                                (button & 28) as i32,
+                                                            );
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            _ => {}
                         }
                     }
+                }
+                if last_query.elapsed() >= Duration::from_secs(2) {
+                    out.write_all(b"\x1b[14t\x1b[16t")?;
+                    out.flush()?;
+                    last_query = Instant::now();
+                }
+                if measured_cell.is_none() && query_started.elapsed() < Duration::from_millis(750) {
+                    continue;
                 }
                 if last_frame.elapsed()
                     < Duration::from_secs_f64(1.0 / f64::from(if focused { fps } else { 1 }))
@@ -458,7 +598,7 @@ mod macos {
                 let Some(frame) = current.as_ref() else {
                     continue;
                 };
-                let geo = geometry(Some((frame.w, frame.h)))?;
+                let geo = geometry(Some((frame.w, frame.h)), measured_cell, measured_area)?;
                 let reset = geo != old_geometry
                     || previous
                         .as_ref()
@@ -570,7 +710,7 @@ mod macos {
                         previous = None;
                     } else if fps > 3 {
                         fps = (fps * 3 / 4).max(1);
-                    } else if !o.share_fixed_resolution && scale_div < 4 {
+                    } else if o.share_adaptive_resolution && scale_div < 4 {
                         scale_div += 1;
                     }
                     last_adjust = Instant::now();

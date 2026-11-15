@@ -251,6 +251,7 @@ impl TerminalSession {
                     for _ in 0..steps.unsigned_abs() {
                         if let Some(bytes) = mouse_bytes(
                             mouse_protocol,
+                            self.graphics.pixel_scale(),
                             rect,
                             cell,
                             size,
@@ -325,6 +326,7 @@ impl TerminalSession {
                     {
                         if let Some(bytes) = mouse_bytes(
                             mouse_protocol,
+                            self.graphics.pixel_scale(),
                             rect,
                             cell,
                             size,
@@ -358,6 +360,7 @@ impl TerminalSession {
                         let code = self.mouse_button.and_then(mouse_button_code).unwrap_or(3) + 32;
                         if let Some(bytes) = mouse_bytes(
                             mouse_protocol,
+                            self.graphics.pixel_scale(),
                             rect,
                             cell,
                             size,
@@ -1759,6 +1762,7 @@ fn mouse_button_code(button: egui::PointerButton) -> Option<u8> {
 
 fn mouse_bytes(
     protocol: mouse::Protocol,
+    pixel_scale: f32,
     rect: Rect,
     cell: Vec2,
     size: Size,
@@ -1770,9 +1774,17 @@ fn mouse_bytes(
     let (button, pressed) = action;
     let col = (((pos.x - rect.min.x) / cell.x).floor().max(0.0) as usize).min(size.cols - 1) + 1;
     let row = (((pos.y - rect.min.y) / cell.y).floor().max(0.0) as usize).min(size.rows - 1) + 1;
+    let (col, row) = if protocol.pixel {
+        (
+            ((pos.x - rect.min.x) * pixel_scale).floor().max(0.) as usize + 1,
+            ((pos.y - rect.min.y) * pixel_scale).floor().max(0.) as usize + 1,
+        )
+    } else {
+        (col, row)
+    };
     let modifiers =
         u8::from(modifiers.shift) * 4 + u8::from(modifiers.alt) * 8 + u8::from(modifiers.ctrl) * 16;
-    if mode.contains(TermMode::SGR_MOUSE) {
+    if protocol.pixel || mode.contains(TermMode::SGR_MOUSE) {
         let suffix = if pressed { 'M' } else { 'm' };
         Some(format!("\x1b[<{};{col};{row}{suffix}", button + modifiers).into_bytes())
     } else if protocol.urxvt {
