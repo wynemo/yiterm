@@ -1853,7 +1853,12 @@ fn key_bytes(key: Key, modifiers: egui::Modifiers, app_cursor: bool) -> Option<V
     if modifiers.ctrl && !modifiers.shift {
         let name = format!("{key:?}");
         if name.len() == 1 && name.as_bytes()[0].is_ascii_uppercase() {
-            return Some(vec![name.as_bytes()[0] - b'A' + 1]);
+            let code = name.as_bytes()[0] - b'A' + 1;
+            return Some(if modifiers.alt {
+                vec![27, code]
+            } else {
+                vec![code]
+            });
         }
     }
     let arrow = if app_cursor { "\x1bO" } else { "\x1b[" };
@@ -1873,9 +1878,26 @@ fn key_bytes(key: Key, modifiers: egui::Modifiers, app_cursor: bool) -> Option<V
         Key::Delete => "\x1b[3~".into(),
         Key::PageUp => "\x1b[5~".into(),
         Key::PageDown => "\x1b[6~".into(),
+        Key::F1 => "\x1bOP".into(),
+        Key::F2 => "\x1bOQ".into(),
+        Key::F3 => "\x1bOR".into(),
+        Key::F4 => "\x1bOS".into(),
+        Key::F5 => "\x1b[15~".into(),
+        Key::F6 => "\x1b[17~".into(),
+        Key::F7 => "\x1b[18~".into(),
+        Key::F8 => "\x1b[19~".into(),
+        Key::F9 => "\x1b[20~".into(),
+        Key::F10 => "\x1b[21~".into(),
+        Key::F11 => "\x1b[23~".into(),
+        Key::F12 => "\x1b[24~".into(),
         _ => return None,
     };
-    Some(text.into_bytes())
+    Some(yiterm::keyboard::modified(
+        text.into_bytes(),
+        modifiers.shift,
+        modifiers.alt,
+        modifiers.ctrl,
+    ))
 }
 
 pub(super) fn run(app: TerminalApp) -> Result<()> {

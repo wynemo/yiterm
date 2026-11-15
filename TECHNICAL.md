@@ -572,9 +572,9 @@ ssh --system -t 111 '/Users/tommygreen/Documents/work/yiterm/target/release/yite
 
 也可先执行 `ssh 111` 登录，再在远端运行 `/Users/tommygreen/Documents/work/yiterm/target/release/yiterm --share-screen`。新版内置 SSH 的 exec 支持需要更新 Windows 客户端后生效；此项 Windows CI 和 Windows 实机验证尚未运行。
 
-也可先 SSH 登录，再运行上述远端命令。按 `q` 或 Ctrl+C 退出，删除本会话图片、关闭同步刷新并恢复原终端。使用独立分栏观看；不支持在同一终端嵌套运行。直接 SSH 连接可用，不保证 tmux/screen 等中间终端会转发 Kitty APC。
+也可先 SSH 登录，再运行上述远端命令。交互模式按 **Ctrl+]** 退出；只读模式仍支持 `q`、Ctrl+C。退出会删除本会话图片、关闭同步刷新并恢复原终端。使用独立分栏观看；不支持在同一终端嵌套运行。直接 SSH 连接可用，不保证 tmux/screen 等中间终端会转发 Kitty APC。
 
-默认开启远端鼠标单击、双击（左键／中键／右键）；只读观看使用 `--share-read-only`。控制需要 Mac「隐私与安全性 → 辅助功能」授权，独立于屏幕录制权限；SSH 启动时可能需要授权 `/usr/libexec/sshd-keygen-wrapper`。权限不足会明确报错，用户可授权后重连或选择只读。辅助功能权限被撤销后停止投递点击。当前不转发键盘、滚轮和拖拽，鼠标按下时投递一对 down/up，不保留远端按住状态，断线时不会遗留按下的按钮。按 `q` 或 Ctrl+C 退出并恢复终端鼠标模式。Shift+点击仍由终端用于本地选择。
+默认开启远端键盘以及鼠标单击、双击（左键／中键／右键）；只读观看使用 `--share-read-only`，同时禁用键盘、鼠标和密码解锁。控制需要 Mac「隐私与安全性 → 辅助功能」授权，独立于屏幕录制权限；SSH 启动时可能需要授权 `/usr/libexec/sshd-keygen-wrapper`。权限不足会明确报错，用户可授权后重连或选择只读。辅助功能权限被撤销后停止投递输入。当前不转发滚轮和拖拽，鼠标及键盘均按次投递一对 down/up，不保留远端按住状态，断线时不会遗留按下的按钮或修饰键。交互模式按 **Ctrl+]** 退出并恢复终端模式；`q` 和 Ctrl+C 发送给远端应用。Shift+点击仍由终端用于本地选择。
 
 ```powershell
 # 默认高清画面及鼠标点击；远端路径按实际位置修改
@@ -582,6 +582,24 @@ ssh --system -t 111 '/Users/tommygreen/Documents/work/yiterm/target/release/yite
 # 不需要辅助功能权限的只读观看
 ssh --system -t 111 '/Users/tommygreen/Documents/work/yiterm/target/release/yiterm --share-screen --share-read-only'
 ```
+
+键盘支持普通 UTF-8 文本、本地输入法提交的中文／emoji、文本粘贴、Enter、Tab／Shift+Tab、Backspace、Delete、Insert、方向键、Home／End、PageUp／PageDown、F1–F12，以及 xterm 修饰键序列。Ctrl+字母按 Mac Control 投递；Alt+字符按 Option 投递；**Ctrl+Alt+字母** 映射为 Mac Command，便于 Windows/Linux 使用复制、粘贴、全选等 Mac 快捷键。方向／功能键保留 Shift、Alt、Ctrl 修饰；Ctrl+Alt 对应 Command。YiTerm 自身的标签页、分栏和复制粘贴快捷键仍由本地处理。部分传统终端编码存在固有歧义，例如 Ctrl+I 与 Tab、Ctrl+M 与 Enter 无法区分。
+
+终端输入解码保留跨 SSH 数据包的 UTF-8 和控制序列边界，独立处理焦点、尺寸及鼠标消息。交互模式关闭远端 PTY 的 ISIG 和软件流控，Ctrl+C、Ctrl+S 等进入远端输入处理；启用 bracketed paste，粘贴内容作为文本投递，内容中的退出字符不会触发本地退出。单独 Escape 在短暂等待后投递；未知控制序列丢弃。正常文字通过 Core Graphics 的 Unicode 键盘事件提交，控制键通过虚拟键码提交；单窗口共享仅向当前确实聚焦的原窗口发送键盘事件。键盘输入不写日志或文件。
+
+### macOS 锁屏与手动解锁
+
+实现参考 `/Users/tommygreen/Documents/work/myremoteapp/apps/remote-cli/src/unlock_macos.rs`，在同一个 `yiterm` 进程中调用系统接口，不释放或启动其他解锁程序。支持已登录的当前控制台用户会话；不支持开机登录、FileVault 磁盘解锁、其他用户会话或通过 root 代替用户登录。
+
+交互连接启动时发现锁屏，会先确认辅助功能权限、控制台用户和 Apple 签名的 `loginwindow`，识别当前用户的安全密码框后，才在现有 SSH 终端提示输入一次登录密码。输入不回显，Ctrl+C／Ctrl+]／Escape 取消，不接受命令行、环境变量、连接文件或钥匙串中的密码。只读模式和 `--share-list` 不索要密码；锁屏时需使用正常的交互共享命令解锁。
+
+密码通过既有加密 SSH 会话读取到有界缓冲区，Rust 临时缓冲区用 zeroize 清理。原生端再次检查登录窗口的路径、Apple 代码签名、用户标签、密码框标识／安全子角色及提交按钮所属关系，通过 AXValue 设置安全密码框并执行一次 AXPress。不会将密码投递为全局键盘事件；必要时只发一次不含秘密的 Return 展开已验证的锁屏界面。失败会尝试清空原安全密码框；系统未解锁就报错，不自动重试。同一进程每分钟最多三次提交、间隔至少五秒；macOS 自身的认证限制继续适用。
+
+运行中检测到锁屏会暂停采集、清除待显示画面并停止普通键鼠事件，提示手动解锁。成功后重新创建原屏幕／原窗口的采集流；等待首张有效画面，并观察至少一秒恢复稳定后继续显示和输入。原窗口已关闭或屏幕不存在时明确报错，不切换到其他采集源。恢复超时或再次锁屏不自动重复提交密码。系统安全密码框不可访问、身份无法确认或权限不足时明确返回不可解锁，不收集密码。
+
+密码缓冲和 SSH 输入均不写日志；Swift／系统认证组件中的临时字符串由运行时管理，不声称能清理系统内部的所有副本。仅完成 macOS Release 构建，未使用真实密码进行解锁验收，也未运行录屏、键盘输入或任何测试；Windows CI 尚未运行。
+
+### 显示与运行细节
 
 点击通过 SGR 像素坐标沿原 SSH 终端输入流回传，按实际显示区域映射到所选屏幕的 Core Graphics 坐标，支持 Retina 与多屏原点；点击留白不投递事件。单窗口控制先按窗口当前位置和尺寸查找对应的辅助功能窗口并置前；找不到匹配窗口时不投递点击。源窗口宽高比变化后需要重新启动共享，避免采集缓冲中的留白导致点击偏移。观看端也需更新 YiTerm，才能发送 SGR 像素鼠标坐标；旧客户端不保证坐标准确。Windows 相关接收与输入路径仍待 Windows CI／实机验证。
 
@@ -597,7 +615,7 @@ macOS 构建由 `build.rs` 调用 Xcode Command Line Tools 中的 `swiftc -O -em
 
 SSH 下如果仍收到 `SCStreamErrorDomain (-3801)`，仅授权 `yiterm` 可能不够：macOS TCC 会沿启动链选择 responsible process。本机失败日志明确记录 `accessing=…/yiterm`，但 `AUTHREQ_SUBJECT` 为 `/usr/libexec/sshd-keygen-wrapper`，且 `yiterm` 的既有授权路径及签名与当前程序一致。此时在 Mac「隐私与安全性 → 屏幕与系统音频录制」点击 `+`，按 Cmd+Shift+G 输入 `/usr/libexec/sshd-keygen-wrapper`，添加并允许后断开、重新连接 SSH。该授权针对 SSH 启动链；「完全磁盘访问」不能代替录屏授权。权限必须由用户通过 macOS 授予，程序不修改 TCC 数据库，也不自动授予系统权限。
 
-本次画质、比例及鼠标点击改动仅做本机 macOS Release 构建；未运行录屏或点击实机验证，Windows CI 尚未运行。
+本次键盘及解锁改动仅做本机 macOS Release 构建；未运行录屏、键盘、真实密码解锁或测试，Windows CI 尚未运行。
 
 当前已接入首帧全量、逐行及瓦片差分、最多四路并行 RGB/zlib 编码、4096 字符 Base64 分块、普通 Kitty placement、每四块一次同步刷新、按缓存预算放大瓦片、尺寸变化重绘、单槽最新帧队列和已发送状态基准。图片同尺寸替换保留接收端锚点；解码继续采用现有每分栏一个在途任务，保留终端控制序列顺序。传输区域优先按观看端实际像素尺寸适配源比例；没有查询回复及 PTY 像素尺寸时才按 1:2 字符格估算。
 
@@ -605,7 +623,7 @@ SSH 下如果仍收到 `SCStreamErrorDomain (-3801)`，仅授权 `yiterm` 可能
 
 ### 目标与范围
 
-两端使用 YiTerm，本地通过 SSH 连接远端 Mac，远端采集屏幕或窗口，本地在终端分栏中通过 Kitty 图形协议显示实时画面。现已实现单屏幕或单窗口观看及鼠标点击；音频、键盘、滚轮、拖拽、录像文件保存和多观看者调度后续另行设计。
+两端使用 YiTerm，本地通过 SSH 连接远端 Mac，远端采集屏幕或窗口，本地在终端分栏中通过 Kitty 图形协议显示实时画面。现已实现单屏幕或单窗口观看、键盘输入、鼠标点击和已登录 macOS 会话的手动密码解锁；音频、滚轮、拖拽、录像文件保存和多观看者调度后续另行设计。
 
 效率设计参考 H.264 的分块、帧间复用、量化和带宽自适应思想，不直接采用 H.264 编解码，不引入专用视频协议。图片数据走现有 SSH 终端流，不额外开端口或建立独立视频通道。
 

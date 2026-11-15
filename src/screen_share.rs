@@ -1,6 +1,10 @@
 //! macOS capture over the existing terminal byte stream.
 use anyhow::{Result, bail};
 use clap::Args;
+#[cfg(target_os = "macos")]
+mod input;
+#[cfg(target_os = "macos")]
+mod unlock;
 
 #[derive(Args, Clone, Debug)]
 pub struct Options {
@@ -66,8 +70,8 @@ mod macos {
         time::{Duration, Instant},
     };
 
-    static STOP: AtomicBool = AtomicBool::new(false);
-    extern "C" fn stop(_: libc::c_int) {
+    pub(super) static STOP: AtomicBool = AtomicBool::new(false);
+    pub(super) extern "C" fn stop(_: libc::c_int) {
         STOP.store(true, Ordering::Relaxed);
     }
     struct Terminal {
@@ -75,7 +79,7 @@ mod macos {
         signals: Vec<(i32, libc::sighandler_t)>,
     }
     impl Terminal {
-        fn enter() -> Result<Self> {
+        fn enter(read_only: bool) -> Result<Self> {
             let mut saved = unsafe { std::mem::zeroed::<libc::termios>() };
             anyhow::ensure!(
                 unsafe { libc::tcgetattr(0, &mut saved) } == 0,
@@ -83,6 +87,15 @@ mod macos {
             );
             let mut mode = saved;
             mode.c_lflag &= !(libc::ICANON | libc::ECHO);
+            if !read_only {
+                mode.c_lflag &= !(libc::ISIG | libc::IEXTEN);
+                mode.c_iflag &= !(libc::IXON
+                    | libc::IXOFF
+                    | libc::ICRNL
+                    | libc::INLCR
+                    | libc::IGNCR
+                    | libc::ISTRIP);
+            }
             mode.c_cc[libc::VMIN] = 0;
             mode.c_cc[libc::VTIME] = 0;
             anyhow::ensure!(
@@ -107,7 +120,7 @@ mod macos {
         fn drop(&mut self) {
             let mut out = std::io::stdout();
             let _ = out.write_all(
-                b"\x1b[?2026l\x1b[?1000l\x1b[?1006l\x1b[?1016l\x1b[?1004l\x1b[?25h\x1b[?1049l",
+                b"\x1b[?2026l\x1b[?1000l\x1b[?1006l\x1b[?1016l\x1b[?1004l\x1b[?2004l\x1b[?25h\x1b[?1049l",
             );
             let _ = out.flush();
             unsafe {
@@ -261,7 +274,7 @@ mod macos {
         )?;
         Ok(image.data.len())
     }
-    type Latest = Mutex<(Option<Frame>, Option<String>)>;
+    type Latest = Mutex<(Option<Frame>, Option<String>, bool)>;
     type FrameCallback =
         unsafe extern "C" fn(*const u8, usize, i32, i32, *const libc::c_char, *mut libc::c_void);
     unsafe extern "C" {
@@ -273,6 +286,8 @@ mod macos {
         ) -> i32;
         fn yiterm_capture_stop();
         fn yiterm_capture_click(x: f64, y: f64, button: i32, modifiers: i32);
+        fn yiterm_capture_key(code: u32, modifiers: u32);
+        fn yiterm_capture_text(bytes: *const u8, len: usize);
     }
     unsafe extern "C" fn captured(
         data: *const u8,
@@ -292,6 +307,11 @@ mod macos {
                     .to_string_lossy()
                     .into_owned(),
             );
+        } else if w == -1 {
+            slot.2 = h == 1;
+            if slot.2 {
+                slot.0 = None;
+            }
         } else if !data.is_null() {
             let (w, h) = (w as usize, h as usize);
             if w == 0
@@ -319,6 +339,13 @@ mod macos {
             );
             geometry(None, None, None)?;
         }
+        if super::unlock::locked() {
+            anyhow::ensure!(
+                !o.share_list,
+                "Mac is locked; run --share-screen in an interactive SSH terminal to unlock before listing sources"
+            );
+            super::unlock::submit_once(o.share_read_only)?;
+        }
         let mut args = Vec::new();
         for (flag, value) in [("--display", o.share_display), ("--window", o.share_window)] {
             if let Some(value) = value {
@@ -342,7 +369,7 @@ mod macos {
             .map(std::ffi::CString::new)
             .collect::<std::result::Result<_, _>>()?;
         let pointers: Vec<_> = args.iter().map(|s| s.as_ptr()).collect();
-        let latest = Arc::new(Mutex::new((None, None)));
+        let latest = Arc::new(Mutex::new((None, None, false)));
         let context = Arc::as_ptr(&latest).cast_mut().cast::<libc::c_void>();
         std::thread::scope(|scope| -> Result<()> {
             let encoder = if o.share_list {
@@ -388,11 +415,11 @@ mod macos {
         })
     }
     fn render(o: &Options, latest: Arc<Latest>) -> Result<()> {
-        let _terminal = Terminal::enter()?;
+        let _terminal = Terminal::enter(o.share_read_only)?;
         let mut out = std::io::stdout();
         out.write_all(b"\x1b[14t\x1b[16t")?;
         if !o.share_read_only {
-            out.write_all(b"\x1b[?1000h\x1b[?1006h\x1b[?1016h")?;
+            out.write_all(b"\x1b[?1000h\x1b[?1006h\x1b[?1016h\x1b[?2004h")?;
         }
         out.flush()?;
         let query_started = Instant::now();
@@ -420,8 +447,10 @@ mod macos {
         let mut scale_div = 1;
         let mut applied_scale = 1;
         let mut focused = true;
-        let mut input_pending = Vec::new();
+        let mut input_decoder = super::input::Decoder::new();
         let mut source: Option<Arc<Frame>> = None;
+        let mut unlock_wait: Option<Instant> = None;
+        let mut unlock_fresh_since: Option<Instant> = None;
         let result = (|| -> Result<()> {
             while !STOP.load(Ordering::Relaxed) {
                 let mut poll = libc::pollfd {
@@ -435,119 +464,119 @@ mod macos {
                 if poll.revents & (libc::POLLHUP | libc::POLLERR) != 0 {
                     break;
                 }
+                let locked = latest.lock().unwrap().2;
+                if locked && unlock_wait.is_none() {
+                    delete(&mut out, count)?;
+                    out.write_all(b"\x1b[2J\x1b[H\x1b[?2004l")?;
+                    out.flush()?;
+                    previous = None;
+                    current = None;
+                    source = None;
+                    input_decoder = super::input::Decoder::new();
+                    super::unlock::submit_once(o.share_read_only)?;
+                    unlock_wait = Some(Instant::now());
+                    out.write_all(b"\x1b[?2004h")?;
+                    out.flush()?;
+                }
+                if let Some(wait) = unlock_wait {
+                    if wait.elapsed() > Duration::from_secs(15) {
+                        bail!(
+                            "Mac unlock did not restore fresh capture in time; no password resubmitted"
+                        );
+                    }
+                    if locked {
+                        unlock_fresh_since = None;
+                        continue;
+                    }
+                    let fresh_since = unlock_fresh_since.get_or_insert_with(Instant::now);
+                    if fresh_since.elapsed() < Duration::from_secs(1) {
+                        continue;
+                    }
+                    unlock_wait = None;
+                    unlock_fresh_since = None;
+                    out.write_all(b"\x1b[2J\x1b[H")?;
+                    out.flush()?;
+                    input_decoder = super::input::Decoder::new();
+                }
                 if poll.revents & libc::POLLIN != 0 {
                     let mut input = [0; 128];
                     let n = std::io::stdin().read(&mut input)?;
-                    input_pending.extend_from_slice(&input[..n]);
-                    while !input_pending.is_empty() {
-                        if input_pending[0] != 27 {
-                            if input_pending.remove(0) == b'q' {
-                                STOP.store(true, Ordering::Relaxed);
+                    input_decoder.push(&input[..n]);
+                }
+                while let Some(event) = input_decoder.next() {
+                    use super::input::Event;
+                    let control = !o.share_read_only && focused && previous.is_some();
+                    match event {
+                        Event::Exit => {
+                            STOP.store(true, Ordering::Relaxed);
+                        }
+                        Event::Text(text) => {
+                            if o.share_read_only {
+                                if text.contains('q') {
+                                    STOP.store(true, Ordering::Relaxed);
+                                }
+                            } else if control {
+                                unsafe {
+                                    yiterm_capture_text(text.as_ptr(), text.len());
+                                }
                             }
-                            continue;
                         }
-                        if input_pending.len() == 1 {
-                            break;
-                        }
-                        if input_pending[1] != b'[' {
-                            input_pending.drain(..2);
-                            continue;
-                        }
-                        let Some(end) = input_pending
-                            .iter()
-                            .enumerate()
-                            .skip(2)
-                            .find_map(|(i, b)| (0x40..=0x7e).contains(b).then_some(i))
-                        else {
-                            if input_pending.len() > 128 {
-                                input_pending.clear();
-                            }
-                            break;
-                        };
-                        let sequence: Vec<_> = input_pending.drain(..=end).collect();
-                        match sequence.last().copied() {
-                            Some(b'I') => {
-                                focused = true;
+                        Event::Key(code, modifiers) if control => unsafe {
+                            yiterm_capture_key(code, modifiers);
+                        },
+                        Event::Focus(value) => {
+                            focused = value;
+                            if value {
                                 previous = None;
                             }
-                            Some(b'O') => focused = false,
-                            Some(b't') => {
-                                if let Ok(text) = std::str::from_utf8(&sequence[2..end]) {
-                                    let parts: Vec<_> = text
-                                        .split(';')
-                                        .filter_map(|n| n.parse::<usize>().ok())
-                                        .collect();
-                                    if let [4, h, w] = parts.as_slice() {
-                                        if (1..=65535).contains(w) && (1..=65535).contains(h) {
-                                            let area = [*w, *h];
-                                            if measured_area != Some(area) {
-                                                previous = None;
-                                            }
-                                            measured_area = Some(area);
-                                        }
-                                    }
-                                    if let [6, h, w] = parts.as_slice() {
-                                        if (1..=512).contains(w) && (1..=512).contains(h) {
-                                            let cell = [*w, *h];
-                                            if measured_cell != Some(cell) {
-                                                previous = None;
-                                            }
-                                            measured_cell = Some(cell);
-                                        }
-                                    }
-                                }
-                            }
-                            Some(b'M' | b'm')
-                                if !o.share_read_only && sequence.get(2) == Some(&b'<') =>
-                            {
-                                if sequence[end] == b'M' {
-                                    if let Ok(text) = std::str::from_utf8(&sequence[3..end]) {
-                                        let parts: Vec<_> = text
-                                            .split(';')
-                                            .filter_map(|n| n.parse::<usize>().ok())
-                                            .collect();
-                                        if let [button, x, y] = parts.as_slice() {
-                                            if focused
-                                                && previous.is_some()
-                                                && button & 0b1110_0000 == 0
-                                                && button & 3 < 3
-                                            {
-                                                if let Some([cw, ch]) = measured_cell {
-                                                    let (cols, rows) = old_geometry;
-                                                    let (all_cols, all_rows) =
-                                                        geometry(None, None, None)?;
-                                                    let (cw, ch) = measured_area
-                                                        .map(|area| {
-                                                            (
-                                                                area[0] as f64 / all_cols as f64,
-                                                                area[1] as f64 / all_rows as f64,
-                                                            )
-                                                        })
-                                                        .unwrap_or((cw as f64, ch as f64));
-                                                    let (width, height) =
-                                                        (cols as f64 * cw, rows as f64 * ch);
-                                                    if *x > 0
-                                                        && *y > 0
-                                                        && (*x as f64) <= width
-                                                        && (*y as f64) <= height
-                                                    {
-                                                        unsafe {
-                                                            yiterm_capture_click(
-                                                                (*x as f64 - 0.5) / width as f64,
-                                                                (*y as f64 - 0.5) / height as f64,
-                                                                (button & 3) as i32,
-                                                                (button & 28) as i32,
-                                                            );
-                                                        }
-                                                    }
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                            _ => {}
                         }
+                        Event::Size(kind, w, h) => {
+                            let limit = if kind == 4 { 65535 } else { 512 };
+                            if (1..=limit).contains(&w) && (1..=limit).contains(&h) {
+                                let target = if kind == 4 {
+                                    Some(&mut measured_area)
+                                } else if kind == 6 {
+                                    Some(&mut measured_cell)
+                                } else {
+                                    None
+                                };
+                                if let Some(target) = target {
+                                    let size = [w, h];
+                                    if *target != Some(size) {
+                                        previous = None;
+                                    }
+                                    *target = Some(size);
+                                }
+                            }
+                        }
+                        Event::Mouse(button, x, y, true)
+                            if control && button & 0b1110_0000 == 0 && button & 3 < 3 =>
+                        {
+                            if let Some([cw, ch]) = measured_cell {
+                                let (cols, rows) = old_geometry;
+                                let (all_cols, all_rows) = geometry(None, None, None)?;
+                                let (cw, ch) = measured_area
+                                    .map(|area| {
+                                        (
+                                            area[0] as f64 / all_cols as f64,
+                                            area[1] as f64 / all_rows as f64,
+                                        )
+                                    })
+                                    .unwrap_or((cw as f64, ch as f64));
+                                let (width, height) = (cols as f64 * cw, rows as f64 * ch);
+                                if x > 0 && y > 0 && x as f64 <= width && y as f64 <= height {
+                                    unsafe {
+                                        yiterm_capture_click(
+                                            (x as f64 - 0.5) / width,
+                                            (y as f64 - 0.5) / height,
+                                            (button & 3) as i32,
+                                            (button & 28) as i32,
+                                        );
+                                    }
+                                }
+                            }
+                        }
+                        _ => {}
                     }
                 }
                 if last_query.elapsed() >= Duration::from_secs(2) {

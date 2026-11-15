@@ -1839,10 +1839,14 @@ pub(super) fn key_bytes(key: &str, m: Modifiers, app_cursor: bool) -> Option<Vec
     if m.control && key.len() == 1 {
         let c = key.as_bytes()[0].to_ascii_uppercase();
         if (b'@'..=b'_').contains(&c) {
-            return Some(vec![c & 0x1f]);
+            return Some(if m.alt {
+                vec![27, c & 0x1f]
+            } else {
+                vec![c & 0x1f]
+            });
         }
         if key == " " {
-            return Some(vec![0]);
+            return Some(if m.alt { vec![27, 0] } else { vec![0] });
         }
     }
     let arrow = if app_cursor { "\x1bO" } else { "\x1b[" };
@@ -1877,7 +1881,12 @@ pub(super) fn key_bytes(key: &str, m: Modifiers, app_cursor: bool) -> Option<Vec
         _ if m.alt && !m.platform && !m.control && key.chars().count() == 1 => format!("\x1b{key}"),
         _ => return None,
     };
-    Some(text.into_bytes())
+    Some(yiterm::keyboard::modified(
+        text.into_bytes(),
+        m.shift,
+        m.alt,
+        m.control,
+    ))
 }
 
 impl Focusable for TerminalUi {

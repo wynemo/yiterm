@@ -1,13 +1,14 @@
 pub mod backend;
+pub mod keyboard;
 pub mod logging;
 pub mod mosh;
 pub mod mouse;
 pub mod native_ssh;
 pub mod paste;
+pub mod screen_share;
 pub mod settings;
 pub mod shell_directory;
 pub mod ssh;
 pub mod theme;
 pub mod update;
 pub mod vnc;
-pub mod screen_share;

@@ -1,5 +1,6 @@
 fn main() {
     println!("cargo:rerun-if-changed=native/ScreenCapture.swift");
+    println!("cargo:rerun-if-changed=native/ScreenUnlock.swift");
     #[cfg(target_os = "macos")]
     {
         let output = std::path::PathBuf::from(std::env::var_os("OUT_DIR").unwrap())
@@ -21,6 +22,7 @@ fn main() {
                 "-swift-version",
                 "5",
                 "native/ScreenCapture.swift",
+                "native/ScreenUnlock.swift",
                 "-o",
             ])
             .arg(&output)

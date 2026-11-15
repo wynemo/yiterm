@@ -23,6 +23,10 @@ func reportFailure(_ message: String) {
 final class Capture: NSObject, SCStreamOutput, SCStreamDelegate {
     let queue = DispatchQueue(label: "yiterm.capture")
     var stream: SCStream?
+    var configuration: SCStreamConfiguration?
+    var sessionPaused = false // main thread
+    var paused = false // capture queue
+    var announceRecovery = false // capture queue
     var pixels = [UInt8]()
     var displayID: CGDirectDisplayID?
     var windowID: CGWindowID?
@@ -31,11 +35,12 @@ final class Capture: NSObject, SCStreamOutput, SCStreamDelegate {
     var sourceAspect = 1.0
     var lastClick: (Int32, CGPoint, TimeInterval, Int64)?
     func stream(_ stream: SCStream, didStopWithError error: Error) {
+        if sessionLockState() == 1 { return }
         reportFailure("Capture stopped: \(error.localizedDescription)")
     }
     func stream(_ stream: SCStream, didOutputSampleBuffer sample: CMSampleBuffer,
                 of type: SCStreamOutputType) {
-        guard type == .screen, sample.isValid,
+        guard !paused, sessionLockState() != 1, type == .screen, sample.isValid,
               let attachments = CMSampleBufferGetSampleAttachmentsArray(sample, createIfNecessary: false) as? [[SCStreamFrameInfo: Any]],
               let status = attachments.first?[.status] as? Int,
               status == SCFrameStatus.complete.rawValue,
@@ -52,6 +57,10 @@ final class Capture: NSObject, SCStreamOutput, SCStreamDelegate {
                 let s = y * stride + x * 4, d = (y * w + x) * 3
                 pixels[d] = source[s + 2]; pixels[d + 1] = source[s + 1]; pixels[d + 2] = source[s]
             }
+        }
+        if announceRecovery {
+            frameCallback?(nil, 0, -1, 0, nil, callbackContext)
+            announceRecovery = false
         }
         pixels.withUnsafeBufferPointer {
             frameCallback?($0.baseAddress, $0.count, Int32(w), Int32(h), nil, callbackContext)
@@ -80,9 +89,10 @@ final class Capture: NSObject, SCStreamOutput, SCStreamDelegate {
         }
         let control = args.contains("--control")
         if control {
+            guard sessionLockState() >= 0 else { throw CaptureFailure(message: "Remote control requires the current logged-in console user") }
             let options = [kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true] as CFDictionary
             guard AXIsProcessTrustedWithOptions(options) else {
-                throw CaptureFailure(message: "Remote clicks require Accessibility permission. In System Settings > Privacy & Security > Accessibility authorize the application responsible for this session (for SSH this may be /usr/libexec/sshd-keygen-wrapper), then reconnect. Screen Recording alone does not permit control. Use --share-read-only for viewing without remote clicks.")
+                throw CaptureFailure(message: "Remote control requires Accessibility permission. In System Settings > Privacy & Security > Accessibility authorize the application responsible for this session (for SSH this may be /usr/libexec/sshd-keygen-wrapper), then reconnect. Screen Recording alone does not permit control. Use --share-read-only for viewing without remote input.")
             }
         }
         let filter: SCContentFilter
@@ -119,6 +129,7 @@ final class Capture: NSObject, SCStreamOutput, SCStreamDelegate {
         let capture = Capture()
         capture.displayID = selectedDisplay; capture.windowID = selectedWindow; capture.windowPID = selectedPID; capture.controlEnabled = control
         capture.sourceAspect = Double(width) / Double(height)
+        capture.configuration = config
         let stream = SCStream(filter: filter, configuration: config, delegate: capture)
         capture.stream = stream
         try stream.addStreamOutput(capture, type: .screen, sampleHandlerQueue: capture.queue)
@@ -126,6 +137,43 @@ final class Capture: NSObject, SCStreamOutput, SCStreamDelegate {
         if Task.isCancelled { try? await stream.stopCapture(); return }
         // Keep delegate and stream alive while AppKit's main run loop services ScreenCaptureKit.
         activeCapture = capture
+        monitorTask = Task { @MainActor in
+            while !Task.isCancelled && !stopping {
+                try? await Task.sleep(nanoseconds: 500_000_000)
+                if Task.isCancelled || stopping { break }
+                if sessionLockState() == 1 && !capture.sessionPaused {
+                    capture.sessionPaused = true
+                    capture.queue.sync {
+                        capture.paused = true
+                        frameCallback?(nil, 0, -1, 1, nil, callbackContext)
+                    }
+                    try? await capture.stream?.stopCapture()
+                    capture.stream = nil
+                } else if sessionLockState() == 0 && capture.sessionPaused {
+                    do {
+                        let sources = try await SCShareableContent.excludingDesktopWindows(true, onScreenWindowsOnly: true)
+                        guard !Task.isCancelled && !stopping else { break }
+                        let filter: SCContentFilter
+                        if let id = capture.displayID, let source = sources.displays.first(where: { $0.displayID == id }) {
+                            filter = SCContentFilter(display: source, excludingWindows: [])
+                        } else if let id = capture.windowID, let source = sources.windows.first(where: { $0.windowID == id }) {
+                            filter = SCContentFilter(desktopIndependentWindow: source)
+                        } else { throw CaptureFailure(message: "Original capture source no longer exists after unlock; restart and select it again") }
+                        guard let config = capture.configuration else { throw CaptureFailure(message: "Missing capture configuration") }
+                        let stream = SCStream(filter: filter, configuration: config, delegate: capture)
+                        capture.stream = stream
+                        capture.queue.sync { capture.paused = false; capture.announceRecovery = true }
+                        try stream.addStreamOutput(capture, type: .screen, sampleHandlerQueue: capture.queue)
+                        try await stream.startCapture()
+                        capture.sessionPaused = false
+                    } catch {
+                        if sessionLockState() == 1 { continue }
+                        reportFailure("Could not restore original capture after unlock: \(error.localizedDescription)")
+                        break
+                    }
+                }
+            }
+        }
     } catch {
         let ns = error as NSError
         var message = "\(ns.domain) (\(ns.code)): \(error.localizedDescription)"
@@ -142,6 +190,7 @@ final class Capture: NSObject, SCStreamOutput, SCStreamDelegate {
 }
 var activeCapture: AnyObject?
 var captureTask: Task<Void, Never>?
+var monitorTask: Task<Void, Never>?
 var stopping = false
 
 // Rust calls this on the process main thread; AppKit services ScreenCaptureKit
@@ -170,6 +219,9 @@ public func stopCapture() {
         guard !stopping else { return }
         stopping = true
         Task { @MainActor in
+            monitorTask?.cancel()
+            await monitorTask?.value
+            monitorTask = nil
             captureTask?.cancel()
             await captureTask?.value
             captureTask = nil
@@ -195,7 +247,7 @@ public func stopCapture() {
 public func clickCapture(_ x: Double, _ y: Double, _ button: Int32, _ modifiers: Int32) {
     guard x.isFinite, y.isFinite, x >= 0, x < 1, y >= 0, y < 1, (0...2).contains(button) else { return }
     DispatchQueue.main.async {
-        guard #available(macOS 13.0, *), !stopping,
+        guard #available(macOS 13.0, *), !stopping, sessionLockState() == 0,
               let capture = activeCapture as? Capture, capture.controlEnabled,
               AXIsProcessTrusted() else { return }
         let bounds: CGRect
@@ -256,5 +308,103 @@ public func clickCapture(_ x: Double, _ y: Double, _ button: Int32, _ modifiers:
             event.setIntegerValueField(.mouseEventClickState, value: clicks)
             event.post(tap: .cghidEventTap)
         }
+    }
+}
+
+@available(macOS 13.0, *)
+func keyboardAllowed() -> Bool {
+    guard !stopping, sessionLockState() == 0, let capture = activeCapture as? Capture, capture.controlEnabled,
+          AXIsProcessTrusted() else { return false }
+    // A window share only types into that application's already-focused window.
+    if let pid = capture.windowPID {
+        guard NSWorkspace.shared.frontmostApplication?.processIdentifier == pid,
+              let id = capture.windowID,
+              let infos = CGWindowListCopyWindowInfo(.optionIncludingWindow, id) as? [[String: Any]],
+              let dict = infos.first?[kCGWindowBounds as String] as? [String: Any],
+              let expected = CGRect(dictionaryRepresentation: dict as CFDictionary) else { return false }
+        let app = AXUIElementCreateApplication(pid)
+        var focused: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(app, kAXFocusedWindowAttribute as CFString, &focused) == .success,
+              let focused, CFGetTypeID(focused) == AXUIElementGetTypeID() else { return false }
+        let window = unsafeBitCast(focused, to: AXUIElement.self)
+        var position: CFTypeRef?, size: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(window, kAXPositionAttribute as CFString, &position) == .success,
+              AXUIElementCopyAttributeValue(window, kAXSizeAttribute as CFString, &size) == .success,
+              let position, let size, CFGetTypeID(position) == AXValueGetTypeID(), CFGetTypeID(size) == AXValueGetTypeID() else { return false }
+        var origin = CGPoint.zero, extent = CGSize.zero
+        guard AXValueGetValue(unsafeBitCast(position, to: AXValue.self), .cgPoint, &origin),
+              AXValueGetValue(unsafeBitCast(size, to: AXValue.self), .cgSize, &extent),
+              abs(origin.x-expected.minX) < 2, abs(origin.y-expected.minY) < 2,
+              abs(extent.width-expected.width) < 2, abs(extent.height-expected.height) < 2 else { return false }
+    }
+    return true
+}
+func keyboardFlags(_ modifiers: UInt32) -> CGEventFlags {
+    var flags = CGEventFlags()
+    if modifiers & 1 != 0 { flags.insert(.maskShift) }
+    if modifiers & 2 != 0 { flags.insert(.maskAlternate) }
+    if modifiers & 4 != 0 { flags.insert(.maskControl) }
+    if modifiers & 8 != 0 { flags.insert(.maskCommand) }
+    return flags
+}
+func postKey(_ code: CGKeyCode, _ flags: CGEventFlags) {
+    guard let down = CGEvent(keyboardEventSource: nil, virtualKey: code, keyDown: true),
+          let up = CGEvent(keyboardEventSource: nil, virtualKey: code, keyDown: false) else { return }
+    for event in [down, up] { event.flags = flags; event.post(tap: .cghidEventTap) }
+}
+// UTF-16 chunks never split a surrogate pair. No clipboard or credential storage.
+func postText(_ text: String, _ flags: CGEventFlags = []) {
+    let utf16 = Array(text.utf16)
+    var offset = 0
+    while offset < utf16.count {
+        guard #available(macOS 13.0, *), keyboardAllowed() else { return }
+        var end = min(offset + 20, utf16.count)
+        if end < utf16.count && (0xD800...0xDBFF).contains(utf16[end-1]) { end -= 1 }
+        let chunk = Array(utf16[offset..<end])
+        guard let down = CGEvent(keyboardEventSource: nil, virtualKey: 0, keyDown: true),
+              let up = CGEvent(keyboardEventSource: nil, virtualKey: 0, keyDown: false) else { return }
+        for event in [down, up] {
+            event.flags = flags
+            chunk.withUnsafeBufferPointer { event.keyboardSetUnicodeString(stringLength: $0.count, unicodeString: $0.baseAddress!) }
+            event.post(tap: .cghidEventTap)
+        }
+        offset = end
+    }
+}
+@_cdecl("yiterm_capture_text")
+public func textCapture(_ bytes: UnsafePointer<UInt8>, _ length: Int) {
+    guard length > 0, length <= 65536, let text = String(bytes: UnsafeBufferPointer(start: bytes, count: length), encoding: .utf8) else { return }
+    DispatchQueue.main.async {
+        guard #available(macOS 13.0, *), keyboardAllowed() else { return }
+        postText(text)
+    }
+}
+@_cdecl("yiterm_capture_key")
+public func keyCapture(_ code: UInt32, _ modifiers: UInt32) {
+    guard modifiers <= 15 else { return }
+    DispatchQueue.main.async {
+        guard #available(macOS 13.0, *), keyboardAllowed() else { return }
+        var flags = keyboardFlags(modifiers)
+        let special: [UInt32: CGKeyCode] = [
+            0xe000:53, 0xe001:36, 0xe002:48, 0xe003:51, 0xe004:117, 0xe005:114,
+            0xe006:115, 0xe007:119, 0xe008:116, 0xe009:121,
+            0xe00a:126, 0xe00b:125, 0xe00c:123, 0xe00d:124,
+            0xe010:122, 0xe011:120, 0xe012:99, 0xe013:118, 0xe014:96, 0xe015:97,
+            0xe016:98, 0xe017:100, 0xe018:101, 0xe019:109, 0xe01a:103, 0xe01b:111]
+        if let key = special[code] { postKey(key, flags); return }
+        guard let scalar = UnicodeScalar(code) else { return }
+        var character = Character(scalar)
+        if character.isUppercase { character = Character(String(character).lowercased()); flags.insert(.maskShift) }
+        let shifted = Array("~!@#$%^&*()_+{}|:\"<>?")
+        let unshifted = Array("`1234567890-=[]\\;',./")
+        if let index = shifted.firstIndex(of: character) { character = unshifted[index]; flags.insert(.maskShift) }
+        let keys: [Character: CGKeyCode] = [
+            "a":0,"s":1,"d":2,"f":3,"h":4,"g":5,"z":6,"x":7,"c":8,"v":9,"b":11,
+            "q":12,"w":13,"e":14,"r":15,"y":16,"t":17,"1":18,"2":19,"3":20,"4":21,
+            "6":22,"5":23,"=":24,"9":25,"7":26,"-":27,"8":28,"0":29,
+            "]":30,"o":31,"u":32,"[":33,"i":34,"p":35,"l":37,"j":38,"'":39,"k":40,
+            ";":41,"\\":42,",":43,"/":44,"n":45,"m":46,".":47," ":49,"`":50]
+        if let key = keys[character] { postKey(key, flags) }
+        else { postText(String(scalar), flags) }
     }
 }
