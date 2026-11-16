@@ -300,14 +300,19 @@ async fn serve_socks_control(
     }
 }
 
+pub struct TerminalRequest {
+    pub bytes: Vec<u8>,
+    pub direct: bool,
+    pub drained: Option<mpsc::SyncSender<()>>,
+}
 pub struct ClipboardRequests {
-    receiver: mpsc::Receiver<Vec<u8>>,
+    receiver: mpsc::Receiver<TerminalRequest>,
     shutdown: tokio::sync::watch::Sender<bool>,
     _thread: thread::JoinHandle<()>,
 }
 
 impl ClipboardRequests {
-    pub fn listen(pipe_name: String) -> Result<Self> {
+    pub fn listen(pipe_name: String, wake: fn()) -> Result<Self> {
         let (sender, receiver) = mpsc::sync_channel(16);
         let (ready_sender, ready_receiver) = mpsc::sync_channel(1);
         let (shutdown, shutdown_receiver) = tokio::sync::watch::channel(false);
@@ -331,6 +336,7 @@ impl ClipboardRequests {
                     sender,
                     ready_sender,
                     shutdown_receiver,
+                    wake,
                 )) {
                     tracing::error!(error = %format!("{error:#}"), "OSC 52 pipe listener stopped");
                 }
@@ -347,7 +353,7 @@ impl ClipboardRequests {
         }
     }
 
-    pub fn try_recv(&self) -> std::result::Result<Vec<u8>, mpsc::TryRecvError> {
+    pub fn try_recv(&self) -> std::result::Result<TerminalRequest, mpsc::TryRecvError> {
         self.receiver.try_recv()
     }
 }
@@ -360,17 +366,35 @@ impl Drop for ClipboardRequests {
 
 async fn serve_clipboard_requests(
     pipe_name: String,
-    sender: mpsc::SyncSender<Vec<u8>>,
+    sender: mpsc::SyncSender<TerminalRequest>,
     ready: mpsc::SyncSender<std::result::Result<(), String>>,
     mut shutdown: tokio::sync::watch::Receiver<bool>,
+    wake: fn(),
 ) -> Result<()> {
     use tokio::io::AsyncWriteExt;
 
     let security = PipeSecurity::new()?;
     let mut pipe = security.server(&pipe_name, true)?;
     drop(security);
+    let terminal_pipe = create_pipe_server(&format!("{pipe_name}-terminal"), true)?;
+    let terminal_sender = sender.clone();
+    let terminal_shutdown = shutdown.clone();
+    let terminal_name = format!("{pipe_name}-terminal");
+    tokio::spawn(async move {
+        if let Err(error) = serve_terminal_stream(
+            terminal_name,
+            terminal_pipe,
+            terminal_sender,
+            terminal_shutdown,
+            wake,
+        )
+        .await
+        {
+            tracing::warn!(%error,"Direct SSH terminal pipe stopped");
+        }
+    });
     let _ = ready.send(Ok(()));
-    tracing::info!("OSC 52 named pipe listener ready");
+    tracing::info!("SSH clipboard and direct terminal listeners ready");
 
     loop {
         tokio::select! {
@@ -390,7 +414,16 @@ async fn serve_clipboard_requests(
         };
         match request {
             Ok(bytes) => {
-                let accepted = sender.send(bytes).is_ok();
+                let accepted = sender
+                    .send(TerminalRequest {
+                        bytes,
+                        direct: false,
+                        drained: None,
+                    })
+                    .is_ok();
+                if accepted {
+                    wake();
+                }
                 pipe.write_u8(u8::from(!accepted)).await?;
                 pipe.flush().await?;
                 if !accepted {
@@ -404,6 +437,103 @@ async fn serve_clipboard_requests(
             }
         }
         pipe = next_pipe;
+    }
+}
+
+// Direct, ordered terminal bytes never enter ConPTY's screen buffer. A
+// resize therefore cannot splice a console repaint into a Kitty APC payload.
+struct TerminalEnd {
+    sender: mpsc::SyncSender<TerminalRequest>,
+    wake: fn(),
+    finished: bool,
+}
+impl Drop for TerminalEnd {
+    fn drop(&mut self) {
+        if !self.finished {
+            let (done, _) = mpsc::sync_channel(1);
+            let _ = self.sender.send(TerminalRequest {
+                bytes: Vec::new(),
+                direct: true,
+                drained: Some(done),
+            });
+            (self.wake)();
+        }
+    }
+}
+async fn serve_terminal_stream(
+    name: String,
+    mut pipe: NamedPipeServer,
+    sender: mpsc::SyncSender<TerminalRequest>,
+    mut shutdown: tokio::sync::watch::Receiver<bool>,
+    wake: fn(),
+) -> Result<()> {
+    loop {
+        tokio::select! { r=pipe.connect()=>r?, _=shutdown.changed()=>return Ok(()) }
+        let next = create_pipe_server(&name, false)?;
+        let mut end = TerminalEnd {
+            sender: sender.clone(),
+            wake,
+            finished: false,
+        };
+        loop {
+            let length = tokio::select! { r=pipe.read_u32_le()=>match r { Ok(n)=>n as usize,Err(_)=>break }, _=shutdown.changed()=>return Ok(()) };
+            ensure!(length <= 65536, "Direct terminal frame too large");
+            let mut bytes = vec![0; length];
+            tokio::select! { r=pipe.read_exact(&mut bytes)=>{r?;}, _=shutdown.changed()=>return Ok(()) }
+            let (done, ack) = if length == 0 {
+                let (tx, rx) = mpsc::sync_channel(1);
+                (Some(tx), Some(rx))
+            } else {
+                (None, None)
+            };
+            if sender
+                .send(TerminalRequest {
+                    bytes,
+                    direct: true,
+                    drained: done,
+                })
+                .is_err()
+            {
+                return Ok(());
+            }
+            wake();
+            if let Some(ack) = ack {
+                let result = tokio::task::spawn_blocking(move || ack.recv()).await?;
+                ensure!(result.is_ok(), "Terminal closed before output drained");
+                end.finished = true;
+                pipe.write_u8(0).await?;
+            }
+        }
+        drop(end);
+        pipe = next;
+    }
+}
+struct TerminalBridge {
+    pipe: tokio::net::windows::named_pipe::NamedPipeClient,
+}
+impl TerminalBridge {
+    async fn connect(name: &str) -> Result<Self> {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let pipe = loop {
+            match ClientOptions::new().open(format!("{name}-terminal")) {
+                Ok(pipe)=>break pipe,
+                Err(error) if matches!(error.raw_os_error(),Some(2|231)) && Instant::now()<deadline=>tokio::time::sleep(Duration::from_millis(10)).await,
+                Err(error)=>return Err(error).context("Cannot connect direct SSH terminal pipe; update the complete YiTerm Windows release"),
+            }
+        };
+        Ok(Self { pipe })
+    }
+    async fn write(&mut self, bytes: &[u8]) -> Result<()> {
+        for chunk in bytes.chunks(65536) {
+            self.pipe.write_u32_le(chunk.len() as u32).await?;
+            self.pipe.write_all(chunk).await?;
+        }
+        Ok(())
+    }
+    async fn finish(&mut self) -> Result<()> {
+        self.pipe.write_u32_le(0).await?;
+        tokio::time::timeout(Duration::from_secs(15), self.pipe.read_u8()).await??;
+        Ok(())
     }
 }
 
@@ -815,7 +945,8 @@ fn run_inner(real_ssh: &Path, directory: &Path, args: Vec<OsString>, mosh: bool)
                     output(&terminal)
                 }).await;
             }
-            let mut terminal_output = super::output::Output::default();
+            let mut terminal_output=TerminalBridge::connect(&osc52_pipe).await?;
+            let terminal_result=async {
             let mut channel = super::session(&handle, size.0, size.1, remote_command.as_deref(), request_pty).await?;
             loop {
                 tokio::select! {
@@ -843,28 +974,12 @@ fn run_inner(real_ssh: &Path, directory: &Path, args: Vec<OsString>, mosh: bool)
                                                 );
                                             }
                                         }
-                                        let (terminal_bytes, requests) = osc52_filter.advance(&data);
-                                        for request in requests {
-                                            match forward_osc52_request(&osc52_pipe, &request).await {
-                                                Ok(()) => tracing::info!(bytes = request.len(), "Forwarded OSC 52 request to YiTerm"),
-                                                Err(error) => {
-                                                    tracing::warn!(bytes = request.len(), error = %format!("{error:#}"), "Could not forward OSC 52 request to YiTerm");
-                                                    output(&request)?;
-                                                }
-                                            }
-                                        }
-                                        for part in terminal_output.advance(&terminal_bytes) {
-                                            output(&part)?;
-                                        }
+                                        terminal_output.write(&data).await?;
                                     }
                                     russh::ChannelMsg::ExitStatus { exit_status: status } => exit_status = status as i32,
                                     russh::ChannelMsg::ExitSignal { .. } => exit_status = 128,
                                     russh::ChannelMsg::Close if session_reply_pending => bail!("SSH channel closed before the session request was accepted"),
                                     russh::ChannelMsg::Close => {
-                                        for part in terminal_output.advance(&osc52_filter.finish()) {
-                                            output(&part)?;
-                                        }
-                                        output(&terminal_output.finish())?;
                                         break;
                                     }
                                     _ => {},
@@ -872,10 +987,6 @@ fn run_inner(real_ssh: &Path, directory: &Path, args: Vec<OsString>, mosh: bool)
                             }
                             None if session_reply_pending => bail!("SSH channel closed before the session request was accepted"),
                             None => {
-                                for part in terminal_output.advance(&osc52_filter.finish()) {
-                                    output(&part)?;
-                                }
-                                output(&terminal_output.finish())?;
                                 break;
                             }
                         }
@@ -886,7 +997,10 @@ fn run_inner(real_ssh: &Path, directory: &Path, args: Vec<OsString>, mosh: bool)
                     }
                 }
             }
-            Ok(exit_status)
+            Ok::<i32,anyhow::Error>(exit_status)
+            }.await;
+            let drained=terminal_output.finish().await;
+            match terminal_result { Ok(code)=>{drained?;Ok(code)},Err(error)=>Err(error) }
         }.await;
         uploads.abort();
         let _ = uploads.await;

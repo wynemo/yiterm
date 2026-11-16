@@ -6,6 +6,7 @@ use std::{
     collections::{BTreeMap, VecDeque},
     io::Read,
     sync::{Arc, mpsc},
+    time::{Duration, Instant},
 };
 
 const MAX_BYTES: usize = 64 * 1024 * 1024;
@@ -27,7 +28,10 @@ struct Transfer {
 }
 struct Pending {
     controls: Controls,
-    result: mpsc::Receiver<Result<Picture, &'static str>>,
+}
+struct Decoder {
+    jobs: mpsc::SyncSender<(Vec<u8>, Controls)>,
+    results: mpsc::Receiver<Result<Picture, &'static str>>,
 }
 pub struct Picture {
     pub width: u32,
@@ -108,6 +112,7 @@ pub struct Graphics {
     actions: VecDeque<Action>,
     transfer: Option<Transfer>,
     pending: Option<Pending>,
+    decoder: Option<Decoder>,
     resume_sync: bool,
     images: BTreeMap<u32, Arc<Picture>>,
     placements: Vec<Placement>,
@@ -130,6 +135,7 @@ impl Graphics {
             actions: VecDeque::new(),
             transfer: None,
             pending: None,
+            decoder: None,
             resume_sync: false,
             images: BTreeMap::new(),
             placements: Vec::new(),
@@ -165,6 +171,14 @@ impl Graphics {
     #[cfg(not(target_os = "linux"))]
     pub fn render_images(&self) -> impl Iterator<Item = Arc<gpui::RenderImage>> + '_ {
         self.images.values().map(|picture| picture.render.clone())
+    }
+    #[cfg(windows)]
+    pub fn end_stream(&mut self) {
+        self.state = 0;
+        self.apc.clear();
+        self.size_query.clear();
+        self.transfer = None;
+        self.resume_sync = false;
     }
     pub fn busy(&self) -> bool {
         self.pending.is_some() || !self.actions.is_empty()
@@ -245,26 +259,32 @@ impl Graphics {
                         }
                         self.state = 0;
                     } else {
-                        // ESC aborts the APC and starts a new VT escape sequence.
                         self.actions.push_back(Action::Abort);
-                        self.state = 1;
                         if b == b'_' {
                             self.apc.clear();
                             self.overflow = false;
                             self.state = 4;
-                        } else if b == b'[' {
-                            self.size_query.extend_from_slice(b"\x1b[");
-                            self.state = 6;
                         } else {
-                            text.extend_from_slice(&[0x1b, b]);
-                            self.state = match b {
-                                b'[' => 6,
-                                b']' => 2,
-                                b'P' | b'X' | b'^' => 7,
-                                0x1b => 1,
-                                _ => 0,
-                            };
+                            self.state = 10;
                         }
+                    }
+                }
+                10 => {
+                    if b == 0x1b {
+                        self.state = 11;
+                    } else if matches!(b, 0x18 | 0x1a) {
+                        self.state = 0;
+                    }
+                }
+                11 => {
+                    if b == b'\\' {
+                        self.state = 0;
+                    } else if b == b'_' {
+                        self.apc.clear();
+                        self.overflow = false;
+                        self.state = 4;
+                    } else if b != 0x1b {
+                        self.state = 10;
                     }
                 }
                 6 => {
@@ -316,8 +336,9 @@ impl Graphics {
         }
     }
     pub fn advance(&mut self, parser: &mut Processor, term: &mut Term<Listener>) {
+        let started = Instant::now();
         if let Some(pending) = self.pending.take() {
-            match pending.result.try_recv() {
+            match self.decoder.as_ref().unwrap().results.try_recv() {
                 Ok(result) => self.finish(pending.controls, result, term),
                 Err(mpsc::TryRecvError::Empty) => {
                     self.pending = Some(pending);
@@ -330,7 +351,14 @@ impl Graphics {
             parser.advance(term, b"\x1b[?2026h");
             self.resume_sync = false;
         }
-        while let Some(action) = self.actions.pop_front() {
+        while !self.actions.is_empty() {
+            if started.elapsed() >= Duration::from_millis(4) {
+                self.repaint
+                    .store(true, std::sync::atomic::Ordering::Release);
+                super::wake_ui();
+                return;
+            }
+            let action = self.actions.pop_front().unwrap();
             match action {
                 Action::Text(bytes) => parser.advance(term, &bytes),
                 Action::Abort => self.transfer = None,
@@ -450,21 +478,48 @@ impl Graphics {
             self.transfer = Some(Transfer { controls: c, data });
             return;
         }
-        let (tx, rx) = mpsc::sync_channel(1);
-        let options = c.clone();
-        // A single in-flight decoder per pane, with PTY backpressure. Later VT
-        // bytes wait so query replies and cursor positions remain in wire order.
-        let repaint = self.repaint.clone();
-        std::thread::spawn(move || {
-            let _ = tx.send(decode(data, &options).map(Picture::new));
-            repaint.store(true, std::sync::atomic::Ordering::Release);
-            super::wake_ui();
-        });
-        self.pending = Some(Pending {
-            controls: c,
-            result: rx,
-        });
+        // Small raw-color tiles are cheap enough to consume in the current
+        // bounded UI slice. Avoid one UI wake/frame per tile during a refresh.
+        let pixels = (get(&c, b's', 0) as u64).saturating_mul(get(&c, b'v', 0) as u64);
+        if matches!(get(&c, b'f', 32), 24 | 32)
+            && (1..=131072).contains(&pixels)
+            && data.len() <= 512 * 1024
+        {
+            let image = decode(data, &c).map(Picture::new);
+            self.finish(c, image, term);
+            return;
+        }
+        // One persistent decoder per pane, with one in-flight image. Preserve
+        // VT/image ordering without creating a new OS thread for every tile.
+        if self.decoder.is_none() {
+            let (jobs, work) = mpsc::sync_channel::<(Vec<u8>, Controls)>(1);
+            let (done, results) = mpsc::sync_channel(1);
+            let repaint = self.repaint.clone();
+            std::thread::spawn(move || {
+                while let Ok((data, options)) = work.recv() {
+                    if done.send(decode(data, &options).map(Picture::new)).is_err() {
+                        break;
+                    }
+                    repaint.store(true, std::sync::atomic::Ordering::Release);
+                    super::wake_ui();
+                }
+            });
+            self.decoder = Some(Decoder { jobs, results });
+        }
+        if self
+            .decoder
+            .as_ref()
+            .unwrap()
+            .jobs
+            .send((data, c.clone()))
+            .is_err()
+        {
+            reply(term, &c, "EIO:decoder stopped");
+            return;
+        }
+        self.pending = Some(Pending { controls: c });
     }
+
     fn finish(
         &mut self,
         mut c: Controls,
@@ -762,12 +817,21 @@ fn decode(mut data: Vec<u8>, c: &Controls) -> Decoded {
         if *compression != b'z' as i64 {
             return Err("ENOTSUP:compression");
         }
+        let limit = if get(c, b'f', 32) == 100 {
+            MAX_BYTES as u64
+        } else {
+            let (w, h) = (get(c, b's', 0) as u64, get(c, b'v', 0) as u64);
+            if w == 0 || h == 0 || w > 8192 || h > 8192 || w * h * 4 > MAX_BYTES as u64 {
+                return Err("EINVAL:image dimensions");
+            }
+            w * h * if get(c, b'f', 32) == 24 { 3 } else { 4 }
+        };
         let mut decoded = Vec::new();
         flate2::read::ZlibDecoder::new(data.as_slice())
-            .take(MAX_BYTES as u64 + 1)
+            .take(limit + 1)
             .read_to_end(&mut decoded)
             .map_err(|_| "EINVAL:zlib data")?;
-        if decoded.len() > MAX_BYTES {
+        if decoded.len() as u64 > limit {
             return Err("E2BIG:decompressed image");
         }
         data = decoded;

@@ -130,6 +130,8 @@ struct TerminalSession {
     integration: ssh::Integration,
     #[cfg(windows)]
     clipboard_requests: yiterm::native_ssh::ClipboardRequests,
+    #[cfg(windows)]
+    direct_ssh_graphics: Option<bool>,
     paste_result: mpsc::Receiver<Result<PasteResult>>,
     paste_sender: mpsc::Sender<Result<PasteResult>>,
     paste_busy: bool,
@@ -162,7 +164,7 @@ impl TerminalSession {
         );
         let integration = ssh::Integration::new(&std::env::current_exe()?)?;
         #[cfg(windows)]
-        let clipboard_requests = integration.listen_for_osc52()?;
+        let clipboard_requests = integration.listen_for_osc52(wake_ui)?;
         if let Some(host) = args.ssh.as_ref().or(args.mosh.as_ref()) {
             ssh::parse(std::slice::from_ref(host))?;
         }
@@ -285,6 +287,8 @@ impl TerminalSession {
             integration,
             #[cfg(windows)]
             clipboard_requests,
+            #[cfg(windows)]
+            direct_ssh_graphics: None,
             paste_result,
             paste_sender,
             paste_busy: false,
@@ -541,6 +545,12 @@ impl TerminalSession {
                 self.reported_directory = Some(directory);
             }
             let bytes = output.bytes;
+            #[cfg(windows)]
+            if self.direct_ssh_graphics.is_some() {
+                // Console resizes/repaints belong to the local shell. They must
+                // never be interleaved into the direct SSH VT/APC stream.
+                continue;
+            }
             self.output_revision = self.output_revision.wrapping_add(1);
             let previous_mode = *self.term.mode();
             let requests = self.mouse_modes.observe(&bytes);
@@ -584,12 +594,37 @@ impl TerminalSession {
             }
         }
         #[cfg(windows)]
-        while let Ok(sequence) = self.clipboard_requests.try_recv() {
-            tracing::info!(
-                bytes = sequence.len(),
-                "Received OSC 52 request from built-in SSH"
-            );
-            self.parser.advance(&mut self.term, &sequence);
+        while !self.graphics.busy() {
+            let Ok(request) = self.clipboard_requests.try_recv() else {
+                break;
+            };
+            if request.direct {
+                if !request.bytes.is_empty() && self.direct_ssh_graphics.is_none() {
+                    self.direct_ssh_graphics = Some(self.graphics.enabled);
+                    self.graphics.enabled = true;
+                }
+                self.mouse_modes.observe(&request.bytes);
+                self.graphics.feed(&request.bytes);
+                self.graphics.advance(&mut self.parser, &mut self.term);
+            } else {
+                self.parser.advance(&mut self.term, &request.bytes);
+            }
+            if let Some(drained) = request.drained {
+                // The SSH shim waits for this barrier before it exits, so no
+                // real shell prompt can be in the PTY queue yet.
+                while self.output.try_recv().is_ok() {}
+                self.graphics.end_stream();
+                self.parser.stop_sync(&mut self.term);
+                let reset=b"\x18\x1b[?2026l\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1004l\x1b[?1006l\x1b[?1016l\x1b[?2004l\x1b[?25h\x1b[?1049l";
+                self.mouse_modes.observe(reset);
+                self.parser.advance(&mut self.term, reset);
+                if let Some(enabled) = self.direct_ssh_graphics.take() {
+                    self.graphics.enabled = enabled;
+                }
+                let _ = drained.send(());
+            }
+            self.repaint.store(true, Ordering::Release);
+            wake_ui();
         }
         while let Ok(event) = self.events.try_recv() {
             match event {

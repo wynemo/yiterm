@@ -120,7 +120,7 @@ mod macos {
         fn drop(&mut self) {
             let mut out = std::io::stdout();
             let _ = out.write_all(
-                b"\x1b[?2026l\x1b[?1000l\x1b[?1006l\x1b[?1016l\x1b[?1004l\x1b[?2004l\x1b[?25h\x1b[?1049l",
+                b"\x1b[?2026l\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l\x1b[?1016l\x1b[?1004l\x1b[?2004l\x1b[?25h\x1b[?1049l",
             );
             let _ = out.flush();
             unsafe {
@@ -134,7 +134,7 @@ mod macos {
     struct Frame {
         w: usize,
         h: usize,
-        rgb: Vec<u8>,
+        pixels: Vec<u8>, // Packed BGRA, borrowed/copy-once from ScreenCaptureKit.
     }
     fn geometry(
         source: Option<(usize, usize)>,
@@ -184,15 +184,9 @@ mod macos {
         }
         Ok(())
     }
-    // Tiles are aligned to character cells. Enlarge tiles if necessary to stay below
-    // the receiver's 256-image budget (with room for unrelated terminal graphics).
+    // Fixed source grid: resizing changes placements, not pixel boundaries.
     fn layout(cols: usize, rows: usize) -> (usize, usize) {
-        let (mut cw, mut ch) = (8, 4);
-        while cols.div_ceil(cw) * rows.div_ceil(ch) > 240 {
-            cw *= 2;
-            ch *= 2;
-        }
-        (cw, ch)
+        (cols.min(16), rows.min(8))
     }
     struct Tile {
         id: usize,
@@ -245,15 +239,86 @@ mod macos {
             compressed,
         })
     }
+    struct EncoderPool {
+        jobs: Option<std::sync::mpsc::SyncSender<(Tile, usize)>>,
+        results: std::sync::mpsc::Receiver<Result<Encoded>>,
+        workers: Vec<std::thread::JoinHandle<()>>,
+    }
+    impl EncoderPool {
+        fn new() -> Self {
+            let (jobs, work) = std::sync::mpsc::sync_channel::<(Tile, usize)>(4);
+            let work = Arc::new(Mutex::new(work));
+            let (done, results) = std::sync::mpsc::sync_channel(4);
+            let workers = (0..4)
+                .map(|_| {
+                    let work = work.clone();
+                    let done = done.clone();
+                    std::thread::spawn(move || {
+                        loop {
+                            let job = work.lock().unwrap().recv();
+                            let Ok((tile, quality)) = job else { break };
+                            if done.send(encode(tile, quality)).is_err() {
+                                break;
+                            }
+                        }
+                    })
+                })
+                .collect();
+            Self {
+                jobs: Some(jobs),
+                results,
+                workers,
+            }
+        }
+        fn batch(&self, tiles: &mut [Tile], quality: usize) -> Result<Vec<Encoded>> {
+            for t in tiles.iter_mut() {
+                let tile = Tile {
+                    id: t.id,
+                    col: t.col,
+                    row: t.row,
+                    cols: t.cols,
+                    rows: t.rows,
+                    w: t.w,
+                    h: t.h,
+                    rgb: std::mem::take(&mut t.rgb),
+                };
+                self.jobs
+                    .as_ref()
+                    .unwrap()
+                    .send((tile, quality))
+                    .map_err(|_| anyhow::anyhow!("Encoder stopped"))?;
+            }
+            let mut encoded = (0..tiles.len())
+                .map(|_| {
+                    self.results
+                        .recv()
+                        .map_err(|_| anyhow::anyhow!("Encoder stopped"))?
+                })
+                .collect::<Result<Vec<_>>>()?;
+            encoded.sort_by_key(|e| e.tile.id);
+            Ok(encoded)
+        }
+    }
+    impl Drop for EncoderPool {
+        fn drop(&mut self) {
+            self.jobs.take();
+            for worker in self.workers.drain(..) {
+                let _ = worker.join();
+            }
+        }
+    }
+
     fn send(out: &mut impl Write, image: Encoded) -> Result<usize> {
         let t = image.tile;
         write!(out, "\x1b[{};{}H", t.row + 1, t.col + 1)?;
-        let chunks = image.data.as_bytes().chunks(4096);
+        let chunks = image.data.as_bytes().chunks(3072);
         let n = chunks.len();
+        let mut sequence = Vec::with_capacity(4096);
         for (index, chunk) in chunks.enumerate() {
+            sequence.clear();
             if index == 0 {
                 write!(
-                    out,
+                    sequence,
                     "\x1b_Ga=t,f=24,s={},v={},i={},q=2,m={}{};",
                     t.w,
                     t.h,
@@ -262,10 +327,11 @@ mod macos {
                     if image.compressed { ",o=z" } else { "" }
                 )?;
             } else {
-                write!(out, "\x1b_Gm={},q=2;", usize::from(index + 1 < n))?;
+                write!(sequence, "\x1b_Gm={},q=2;", usize::from(index + 1 < n))?;
             }
-            out.write_all(chunk)?;
-            out.write_all(b"\x1b\\")?;
+            sequence.extend_from_slice(chunk);
+            sequence.extend_from_slice(b"\x1b\\");
+            out.write_all(&sequence)?;
         }
         write!(
             out,
@@ -285,7 +351,7 @@ mod macos {
             context: *mut libc::c_void,
         ) -> i32;
         fn yiterm_capture_stop();
-        fn yiterm_capture_click(x: f64, y: f64, button: i32, modifiers: i32);
+        fn yiterm_capture_pointer(x: f64, y: f64, button: i32, phase: i32, modifiers: i32);
         fn yiterm_capture_key(code: u32, modifiers: u32);
         fn yiterm_capture_text(bytes: *const u8, len: usize);
     }
@@ -318,19 +384,29 @@ mod macos {
                 || h == 0
                 || w > 3840
                 || h > 16384
-                || len > 64 * 1024 * 1024
-                || len != w * h * 3
+                || len > 128 * 1024 * 1024
+                || len % h != 0
+                || len / h < w * 4
+                || w * h * 4 > 96 * 1024 * 1024
             {
                 slot.1 = Some("Capture frame exceeds memory budget".into());
                 return;
             }
-            slot.0 = Some(Frame {
-                w,
-                h,
-                rgb: unsafe { std::slice::from_raw_parts(data, len) }.to_vec(),
-            });
+            let bytes = unsafe { std::slice::from_raw_parts(data, len) };
+            let stride = len / h;
+            let pixels = if stride == w * 4 {
+                bytes.to_vec()
+            } else {
+                let mut packed = Vec::with_capacity(w * h * 4);
+                for row in bytes.chunks_exact(stride).take(h) {
+                    packed.extend_from_slice(&row[..w * 4]);
+                }
+                packed
+            };
+            slot.0 = Some(Frame { w, h, pixels });
         }
     }
+
     pub fn run(o: &Options) -> Result<()> {
         if !o.share_list {
             anyhow::ensure!(
@@ -414,22 +490,187 @@ mod macos {
             Ok(())
         })
     }
+    #[derive(Clone, Default)]
+    struct InputView {
+        focused: bool,
+        ready: bool,
+        geo: (usize, usize),
+        cell: Option<[usize; 2]>,
+        area: Option<[usize; 2]>,
+    }
+    struct InputPump {
+        view: Arc<Mutex<InputView>>,
+        gate: Arc<Mutex<()>>,
+        stop: Arc<std::sync::atomic::AtomicBool>,
+        reset: Arc<std::sync::atomic::AtomicBool>,
+        worker: Option<std::thread::JoinHandle<()>>,
+    }
+    impl InputPump {
+        fn new(read_only: bool) -> Self {
+            let view = Arc::new(Mutex::new(InputView {
+                focused: true,
+                ..Default::default()
+            }));
+            let gate = Arc::new(Mutex::new(()));
+            let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let reset = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let (v, g, s, r) = (view.clone(), gate.clone(), stop.clone(), reset.clone());
+            let worker = std::thread::spawn(move || {
+                let mut decoder = super::input::Decoder::new();
+                while !s.load(Ordering::Relaxed) && !STOP.load(Ordering::Relaxed) {
+                    {
+                        let _gate = g.lock().unwrap();
+                        if r.swap(false, Ordering::Relaxed) {
+                            decoder = super::input::Decoder::new();
+                        }
+                        let mut poll = libc::pollfd {
+                            fd: 0,
+                            events: libc::POLLIN,
+                            revents: 0,
+                        };
+                        unsafe {
+                            libc::poll(&mut poll, 1, 5);
+                        }
+                        if poll.revents & (libc::POLLHUP | libc::POLLERR) != 0 {
+                            STOP.store(true, Ordering::Relaxed);
+                            break;
+                        }
+                        if poll.revents & libc::POLLIN != 0 {
+                            let mut bytes = [0; 4096];
+                            match std::io::stdin().read(&mut bytes) {
+                                Ok(n) => decoder.push(&bytes[..n]),
+                                Err(_) => {
+                                    STOP.store(true, Ordering::Relaxed);
+                                    break;
+                                }
+                            }
+                        }
+                        while let Some(event) = decoder.next() {
+                            use super::input::Event;
+                            let state = v.lock().unwrap().clone();
+                            let control = !read_only && state.focused && state.ready;
+                            match event {
+                                Event::Exit => STOP.store(true, Ordering::Relaxed),
+                                Event::Text(text) if read_only => {
+                                    if text.contains('q') {
+                                        STOP.store(true, Ordering::Relaxed);
+                                    }
+                                }
+                                Event::Text(text) if control => unsafe {
+                                    yiterm_capture_text(text.as_ptr(), text.len());
+                                },
+                                Event::Key(code, mods) if control => unsafe {
+                                    yiterm_capture_key(code, mods);
+                                },
+                                Event::Focus(focused) => {
+                                    v.lock().unwrap().focused = focused;
+                                    if !focused {
+                                        unsafe {
+                                            yiterm_capture_pointer(0., 0., 0, 3, 0);
+                                        }
+                                    }
+                                }
+                                Event::Size(kind, w, h) => {
+                                    let limit = if kind == 4 { 65535 } else { 512 };
+                                    if (1..=limit).contains(&w) && (1..=limit).contains(&h) {
+                                        let mut view = v.lock().unwrap();
+                                        if kind == 4 {
+                                            view.area = Some([w, h]);
+                                        } else if kind == 6 {
+                                            view.cell = Some([w, h]);
+                                        }
+                                    }
+                                }
+                                Event::Mouse(button, x, y, pressed)
+                                    if control && button & 64 == 0 =>
+                                {
+                                    if let Some([cw, ch]) = state.cell {
+                                        if let Ok((cols, rows)) = geometry(None, None, None) {
+                                            let (cw, ch) = state
+                                                .area
+                                                .map(|a| {
+                                                    (
+                                                        a[0] as f64 / cols as f64,
+                                                        a[1] as f64 / rows as f64,
+                                                    )
+                                                })
+                                                .unwrap_or((cw as f64, ch as f64));
+                                            let (w, h) =
+                                                (state.geo.0 as f64 * cw, state.geo.1 as f64 * ch);
+                                            let motion = button & 32 != 0;
+                                            let phase = if motion {
+                                                0
+                                            } else if pressed {
+                                                1
+                                            } else {
+                                                2
+                                            };
+                                            if w > 0.
+                                                && h > 0.
+                                                && (phase == 2
+                                                    || (x > 0
+                                                        && y > 0
+                                                        && x as f64 <= w
+                                                        && y as f64 <= h))
+                                            {
+                                                unsafe {
+                                                    yiterm_capture_pointer(
+                                                        ((x as f64 - 0.5) / w).clamp(0., 0.999999),
+                                                        ((y as f64 - 0.5) / h).clamp(0., 0.999999),
+                                                        (button & 3) as i32,
+                                                        phase,
+                                                        (button & 28) as i32,
+                                                    );
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
+                    std::thread::sleep(Duration::from_millis(1));
+                }
+            });
+            Self {
+                view,
+                gate,
+                stop,
+                reset,
+                worker: Some(worker),
+            }
+        }
+    }
+    impl Drop for InputPump {
+        fn drop(&mut self) {
+            self.stop.store(true, Ordering::Relaxed);
+            if let Some(worker) = self.worker.take() {
+                let _ = worker.join();
+            }
+            unsafe {
+                yiterm_capture_pointer(0., 0., 0, 3, 0);
+            }
+        }
+    }
+
     fn render(o: &Options, latest: Arc<Latest>) -> Result<()> {
         let _terminal = Terminal::enter(o.share_read_only)?;
         let mut out = std::io::stdout();
+        let encoders = EncoderPool::new();
         out.write_all(b"\x1b[14t\x1b[16t")?;
         if !o.share_read_only {
-            out.write_all(b"\x1b[?1000h\x1b[?1006h\x1b[?1016h\x1b[?2004h")?;
+            out.write_all(b"\x1b[?1003h\x1b[?1006h\x1b[?1016h\x1b[?2004h")?;
         }
         out.flush()?;
         let query_started = Instant::now();
         let mut last_query = Instant::now();
-        let mut measured_cell: Option<[usize; 2]> = None;
-        let mut measured_area: Option<[usize; 2]> = None;
+        let mut terminal_size = geometry(None, None, None)?;
         let mut previous: Option<Arc<Frame>> = None;
         let mut current: Option<Arc<Frame>> = None;
         let mut old_geometry = (0, 0);
         let mut count = 0;
+        let mut old_grid = (0, 0);
         let fixed = match o.share_quality.as_deref().unwrap_or("lossless") {
             "auto" => None,
             "565" => Some(1),
@@ -446,24 +687,17 @@ mod macos {
         let mut fps = o.share_fps;
         let mut scale_div = 1;
         let mut applied_scale = 1;
-        let mut focused = true;
-        let mut input_decoder = super::input::Decoder::new();
+        let input_pump = InputPump::new(o.share_read_only);
         let mut source: Option<Arc<Frame>> = None;
         let mut unlock_wait: Option<Instant> = None;
         let mut unlock_fresh_since: Option<Instant> = None;
         let result = (|| -> Result<()> {
             while !STOP.load(Ordering::Relaxed) {
-                let mut poll = libc::pollfd {
-                    fd: 0,
-                    events: libc::POLLIN,
-                    revents: 0,
-                };
-                unsafe {
-                    libc::poll(&mut poll, 1, 10);
-                }
-                if poll.revents & (libc::POLLHUP | libc::POLLERR) != 0 {
-                    break;
-                }
+                std::thread::sleep(Duration::from_millis(2));
+                let input = input_pump.view.lock().unwrap().clone();
+                let focused = input.focused;
+                let measured_cell = input.cell;
+                let measured_area = input.area;
                 let locked = latest.lock().unwrap().2;
                 if locked && unlock_wait.is_none() {
                     delete(&mut out, count)?;
@@ -472,8 +706,12 @@ mod macos {
                     previous = None;
                     current = None;
                     source = None;
-                    input_decoder = super::input::Decoder::new();
-                    super::unlock::submit_once(o.share_read_only)?;
+                    input_pump.view.lock().unwrap().ready = false;
+                    {
+                        let _exclusive = input_pump.gate.lock().unwrap();
+                        super::unlock::submit_once(o.share_read_only)?;
+                    }
+                    input_pump.reset.store(true, Ordering::Relaxed);
                     unlock_wait = Some(Instant::now());
                     out.write_all(b"\x1b[?2004h")?;
                     out.flush()?;
@@ -496,90 +734,12 @@ mod macos {
                     unlock_fresh_since = None;
                     out.write_all(b"\x1b[2J\x1b[H")?;
                     out.flush()?;
-                    input_decoder = super::input::Decoder::new();
+                    input_pump.reset.store(true, Ordering::Relaxed);
                 }
-                if poll.revents & libc::POLLIN != 0 {
-                    let mut input = [0; 128];
-                    let n = std::io::stdin().read(&mut input)?;
-                    input_decoder.push(&input[..n]);
-                }
-                while let Some(event) = input_decoder.next() {
-                    use super::input::Event;
-                    let control = !o.share_read_only && focused && previous.is_some();
-                    match event {
-                        Event::Exit => {
-                            STOP.store(true, Ordering::Relaxed);
-                        }
-                        Event::Text(text) => {
-                            if o.share_read_only {
-                                if text.contains('q') {
-                                    STOP.store(true, Ordering::Relaxed);
-                                }
-                            } else if control {
-                                unsafe {
-                                    yiterm_capture_text(text.as_ptr(), text.len());
-                                }
-                            }
-                        }
-                        Event::Key(code, modifiers) if control => unsafe {
-                            yiterm_capture_key(code, modifiers);
-                        },
-                        Event::Focus(value) => {
-                            focused = value;
-                            if value {
-                                previous = None;
-                            }
-                        }
-                        Event::Size(kind, w, h) => {
-                            let limit = if kind == 4 { 65535 } else { 512 };
-                            if (1..=limit).contains(&w) && (1..=limit).contains(&h) {
-                                let target = if kind == 4 {
-                                    Some(&mut measured_area)
-                                } else if kind == 6 {
-                                    Some(&mut measured_cell)
-                                } else {
-                                    None
-                                };
-                                if let Some(target) = target {
-                                    let size = [w, h];
-                                    if *target != Some(size) {
-                                        previous = None;
-                                    }
-                                    *target = Some(size);
-                                }
-                            }
-                        }
-                        Event::Mouse(button, x, y, true)
-                            if control && button & 0b1110_0000 == 0 && button & 3 < 3 =>
-                        {
-                            if let Some([cw, ch]) = measured_cell {
-                                let (cols, rows) = old_geometry;
-                                let (all_cols, all_rows) = geometry(None, None, None)?;
-                                let (cw, ch) = measured_area
-                                    .map(|area| {
-                                        (
-                                            area[0] as f64 / all_cols as f64,
-                                            area[1] as f64 / all_rows as f64,
-                                        )
-                                    })
-                                    .unwrap_or((cw as f64, ch as f64));
-                                let (width, height) = (cols as f64 * cw, rows as f64 * ch);
-                                if x > 0 && y > 0 && x as f64 <= width && y as f64 <= height {
-                                    unsafe {
-                                        yiterm_capture_click(
-                                            (x as f64 - 0.5) / width,
-                                            (y as f64 - 0.5) / height,
-                                            (button & 3) as i32,
-                                            (button & 28) as i32,
-                                        );
-                                    }
-                                }
-                            }
-                        }
-                        _ => {}
-                    }
-                }
-                if last_query.elapsed() >= Duration::from_secs(2) {
+                let next_terminal_size = geometry(None, None, None)?;
+                let resized = next_terminal_size != terminal_size;
+                terminal_size = next_terminal_size;
+                if resized || last_query.elapsed() >= Duration::from_secs(2) {
                     out.write_all(b"\x1b[14t\x1b[16t")?;
                     out.flush()?;
                     last_query = Instant::now();
@@ -610,16 +770,17 @@ mod macos {
                         } else {
                             let w = (source.w / scale_div).max(1);
                             let h = (source.h / scale_div).max(1);
-                            let mut rgb = vec![0; w * h * 3];
+                            let mut pixels = vec![0; w * h * 4];
                             for y in 0..h {
                                 for x in 0..w {
                                     let from =
-                                        ((y * source.h / h) * source.w + x * source.w / w) * 3;
-                                    let to = (y * w + x) * 3;
-                                    rgb[to..to + 3].copy_from_slice(&source.rgb[from..from + 3]);
+                                        ((y * source.h / h) * source.w + x * source.w / w) * 4;
+                                    let to = (y * w + x) * 4;
+                                    pixels[to..to + 4]
+                                        .copy_from_slice(&source.pixels[from..from + 4]);
                                 }
                             }
-                            Arc::new(Frame { w, h, rgb })
+                            Arc::new(Frame { w, h, pixels })
                         });
                         applied_scale = scale_div;
                     }
@@ -628,59 +789,121 @@ mod macos {
                     continue;
                 };
                 let geo = geometry(Some((frame.w, frame.h)), measured_cell, measured_area)?;
-                let reset = geo != old_geometry
+                let grid = layout(geo.0, geo.1);
+                let layout_changed = geo != old_geometry;
+                let reset = grid != old_grid
                     || previous
                         .as_ref()
                         .is_none_or(|p| p.w != frame.w || p.h != frame.h);
-                if !new_frame && !reset {
+                if !new_frame && !reset && !layout_changed {
+                    let mut view = input_pump.view.lock().unwrap();
+                    view.geo = geo;
+                    view.ready = true;
                     continue;
                 }
                 let started = Instant::now();
                 if reset {
                     delete(&mut out, count)?;
                     previous = None;
-                    old_geometry = geo;
                 }
+                old_geometry = geo;
+                old_grid = grid;
                 let (cols, rows) = geo;
-                let (cw, ch) = layout(cols, rows);
-                let changed_rows: Vec<bool> = (0..frame.h)
-                    .map(|y| {
-                        previous.as_ref().is_none_or(|p| {
-                            p.rgb[y * frame.w * 3..(y + 1) * frame.w * 3]
-                                != frame.rgb[y * frame.w * 3..(y + 1) * frame.w * 3]
-                        })
-                    })
-                    .collect();
+                let (nx, ny) = grid;
+                if layout_changed && !new_frame && !reset {
+                    // A pure viewport resize only reuses cached image IDs.
+                    let mut placements = Vec::with_capacity(nx * ny * 64);
+                    placements.extend_from_slice(b"\x1b[?2026h");
+                    for iy in 0..ny {
+                        for ix in 0..nx {
+                            let (col, row) = (ix * cols / nx, iy * rows / ny);
+                            write!(
+                                placements,
+                                "\x1b[{};{}H\x1b_Ga=p,i={},p=1,c={},r={},C=1,q=2;\x1b\\",
+                                row + 1,
+                                col + 1,
+                                iy * nx + ix + 1,
+                                (ix + 1) * cols / nx - col,
+                                (iy + 1) * rows / ny - row
+                            )?;
+                        }
+                    }
+                    placements.extend_from_slice(b"\x1b[?2026l");
+                    out.write_all(&placements)?;
+                    out.flush()?;
+                    let mut view = input_pump.view.lock().unwrap();
+                    view.geo = geo;
+                    view.ready = true;
+                    continue;
+                }
+                // krd-style single row scan: only inspect tile columns still
+                // clean, and stop a tile band as soon as every column is dirty.
+                let mut dirty_tiles = vec![previous.is_none(); nx * ny];
+                if let Some(previous) = previous.as_ref() {
+                    for iy in 0..ny {
+                        for y in iy * frame.h / ny..(iy + 1) * frame.h / ny {
+                            if dirty_tiles[iy * nx..(iy + 1) * nx]
+                                .iter()
+                                .all(|dirty| *dirty)
+                            {
+                                break;
+                            }
+                            let row = y * frame.w * 4;
+                            if previous.pixels[row..row + frame.w * 4]
+                                == frame.pixels[row..row + frame.w * 4]
+                            {
+                                continue;
+                            }
+                            for ix in 0..nx {
+                                let index = iy * nx + ix;
+                                if dirty_tiles[index] {
+                                    continue;
+                                }
+                                let left = row + ix * frame.w / nx * 4;
+                                let right = row + (ix + 1) * frame.w / nx * 4;
+                                dirty_tiles[index] =
+                                    previous.pixels[left..right] != frame.pixels[left..right];
+                            }
+                        }
+                    }
+                }
                 let mut tiles = Vec::new();
                 let mut id = 0;
-                for row in (0..rows).step_by(ch) {
-                    for col in (0..cols).step_by(cw) {
+                for iy in 0..ny {
+                    for ix in 0..nx {
                         id += 1;
-                        let right = (col + cw).min(cols);
-                        let bottom = (row + ch).min(rows);
-                        let x = col * frame.w / cols;
-                        let y = row * frame.h / rows;
-                        let w = right * frame.w / cols - x;
-                        let h = bottom * frame.h / rows - y;
+                        let col = ix * cols / nx;
+                        let row = iy * rows / ny;
+                        let right = (ix + 1) * cols / nx;
+                        let bottom = (iy + 1) * rows / ny;
+                        let x = ix * frame.w / nx;
+                        let y = iy * frame.h / ny;
+                        let w = (ix + 1) * frame.w / nx - x;
+                        let h = (iy + 1) * frame.h / ny - y;
                         if w == 0 || h == 0 {
                             continue;
                         }
-                        let dirty = previous.as_ref().is_none_or(|p| {
-                            (y..y + h).any(|line| {
-                                if !changed_rows[line] {
-                                    return false;
-                                }
-                                let start = (line * frame.w + x) * 3;
-                                p.rgb[start..start + w * 3] != frame.rgb[start..start + w * 3]
-                            })
-                        });
+                        let dirty = dirty_tiles[iy * nx + ix];
                         if !dirty {
+                            if layout_changed {
+                                write!(
+                                    out,
+                                    "\x1b[{};{}H\x1b_Ga=p,i={},p=1,c={},r={},C=1,q=2;\x1b\\",
+                                    row + 1,
+                                    col + 1,
+                                    id,
+                                    right - col,
+                                    bottom - row
+                                )?;
+                            }
                             continue;
                         }
                         let mut rgb = Vec::with_capacity(w * h * 3);
                         for line in y..y + h {
-                            let start = (line * frame.w + x) * 3;
-                            rgb.extend_from_slice(&frame.rgb[start..start + w * 3]);
+                            let start = (line * frame.w + x) * 4;
+                            for pixel in frame.pixels[start..start + w * 4].chunks_exact(4) {
+                                rgb.extend_from_slice(&[pixel[2], pixel[1], pixel[0]]);
+                            }
                         }
                         tiles.push(Tile {
                             id,
@@ -697,27 +920,7 @@ mod macos {
                 count = id;
                 // At most four workers and four compressed tiles resident at once.
                 for batch in tiles.chunks_mut(4) {
-                    let encoded = std::thread::scope(|scope| {
-                        let jobs: Vec<_> = batch
-                            .iter_mut()
-                            .map(|tile| {
-                                let tile = Tile {
-                                    id: tile.id,
-                                    col: tile.col,
-                                    row: tile.row,
-                                    cols: tile.cols,
-                                    rows: tile.rows,
-                                    w: tile.w,
-                                    h: tile.h,
-                                    rgb: std::mem::take(&mut tile.rgb),
-                                };
-                                scope.spawn(move || encode(tile, quality))
-                            })
-                            .collect();
-                        jobs.into_iter()
-                            .map(|j| j.join().expect("tile encoder panicked"))
-                            .collect::<Result<Vec<_>>>()
-                    })?;
+                    let encoded = encoders.batch(batch, quality)?;
                     out.write_all(b"\x1b[?2026h")?;
                     for image in encoded {
                         total_bytes += send(&mut out, image)?;
@@ -729,8 +932,14 @@ mod macos {
                         return Ok(());
                     }
                 }
+                out.flush()?;
                 // Commit only after every dirty tile was written successfully.
                 previous = current.clone();
+                {
+                    let mut view = input_pump.view.lock().unwrap();
+                    view.geo = geo;
+                    view.ready = true;
+                }
                 let elapsed = started.elapsed();
                 let budget = Duration::from_secs_f64(1.0 / f64::from(o.share_fps));
                 if elapsed > budget * 2 && last_adjust.elapsed() > Duration::from_secs(2) {
@@ -758,7 +967,7 @@ mod macos {
                     eprintln!(
                         "share: base64_bytes={total_bytes} tiles={total_tiles} encode_write_ms={} fps={fps} quality={quality} scale_div={scale_div} frame_bytes={} latest_queue<=1",
                         elapsed.as_millis(),
-                        previous.as_ref().map_or(0, |p| p.rgb.len())
+                        previous.as_ref().map_or(0, |p| p.pixels.len())
                     );
                     last_stats = Instant::now();
                 }

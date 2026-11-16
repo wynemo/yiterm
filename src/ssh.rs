@@ -190,10 +190,11 @@ impl Integration {
         Ok(())
     }
 
-    pub fn listen_for_osc52(&self) -> Result<crate::native_ssh::ClipboardRequests> {
-        crate::native_ssh::ClipboardRequests::listen(crate::native_ssh::osc52_pipe_name(
-            self.directory.path(),
-        )?)
+    pub fn listen_for_osc52(&self, wake: fn()) -> Result<crate::native_ssh::ClipboardRequests> {
+        crate::native_ssh::ClipboardRequests::listen(
+            crate::native_ssh::osc52_pipe_name(self.directory.path())?,
+            wake,
+        )
     }
     pub fn shell(&self, shell: &str) -> Result<portable_pty::CommandBuilder> {
         self.shell_with_directory(shell, None)

@@ -27,12 +27,13 @@ final class Capture: NSObject, SCStreamOutput, SCStreamDelegate {
     var sessionPaused = false // main thread
     var paused = false // capture queue
     var announceRecovery = false // capture queue
-    var pixels = [UInt8]()
     var displayID: CGDirectDisplayID?
     var windowID: CGWindowID?
     var windowPID: pid_t?
     var controlEnabled = false
     var sourceAspect = 1.0
+    var heldButtons = Set<Int32>()
+    var lastPointer = CGPoint.zero
     var lastClick: (Int32, CGPoint, TimeInterval, Int64)?
     func stream(_ stream: SCStream, didStopWithError error: Error) {
         if sessionLockState() == 1 { return }
@@ -50,21 +51,13 @@ final class Capture: NSObject, SCStreamOutput, SCStreamDelegate {
         guard let base = CVPixelBufferGetBaseAddress(buffer) else { return }
         let w = CVPixelBufferGetWidth(buffer), h = CVPixelBufferGetHeight(buffer)
         let stride = CVPixelBufferGetBytesPerRow(buffer)
-        if pixels.count != w * h * 3 { pixels = [UInt8](repeating: 0, count: w * h * 3) }
-        let source = base.assumingMemoryBound(to: UInt8.self)
-        for y in 0..<h {
-            for x in 0..<w {
-                let s = y * stride + x * 4, d = (y * w + x) * 3
-                pixels[d] = source[s + 2]; pixels[d + 1] = source[s + 1]; pixels[d + 2] = source[s]
-            }
-        }
+        // Borrow ScreenCaptureKit's BGRA storage while locked. Rust copies it
+        // once; only dirty tiles are converted to RGB by the encoder workers.
         if announceRecovery {
             frameCallback?(nil, 0, -1, 0, nil, callbackContext)
             announceRecovery = false
         }
-        pixels.withUnsafeBufferPointer {
-            frameCallback?($0.baseAddress, $0.count, Int32(w), Int32(h), nil, callbackContext)
-        }
+        frameCallback?(base.assumingMemoryBound(to: UInt8.self), stride*h, Int32(w), Int32(h), nil, callbackContext)
     }
 }
 @available(macOS 13.0, *)
@@ -124,7 +117,7 @@ final class Capture: NSObject, SCStreamOutput, SCStreamDelegate {
         config.pixelFormat = kCVPixelFormatType_32BGRA
         config.colorSpaceName = CGColorSpace.sRGB
         config.minimumFrameInterval = CMTime(value: 1, timescale: Int32(value("--fps") ?? "15") ?? 15)
-        config.queueDepth = 3; config.showsCursor = true; config.capturesAudio = false
+        config.queueDepth = 3; config.showsCursor = !control; config.capturesAudio = false
         if #available(macOS 14.0, *) { config.scalesToFit = true; config.ignoreShadowsSingleWindow = true }
         let capture = Capture()
         capture.displayID = selectedDisplay; capture.windowID = selectedWindow; capture.windowPID = selectedPID; capture.controlEnabled = control
@@ -142,6 +135,7 @@ final class Capture: NSObject, SCStreamOutput, SCStreamDelegate {
                 try? await Task.sleep(nanoseconds: 500_000_000)
                 if Task.isCancelled || stopping { break }
                 if sessionLockState() == 1 && !capture.sessionPaused {
+                    releasePointer(capture)
                     capture.sessionPaused = true
                     capture.queue.sync {
                         capture.paused = true
@@ -226,6 +220,7 @@ public func stopCapture() {
             await captureTask?.value
             captureTask = nil
             if #available(macOS 13.0, *), let capture = activeCapture as? Capture {
+                releasePointer(capture)
                 try? await capture.stream?.stopCapture()
                 capture.queue.sync {} // Drain frame callbacks before Rust releases their context.
                 activeCapture = nil
@@ -243,13 +238,41 @@ public func stopCapture() {
 
 // The renderer passes normalized positions in the displayed image. Use global
 // Core Graphics points, not Retina pixels, to reach the selected display.
-@_cdecl("yiterm_capture_click")
-public func clickCapture(_ x: Double, _ y: Double, _ button: Int32, _ modifiers: Int32) {
-    guard x.isFinite, y.isFinite, x >= 0, x < 1, y >= 0, y < 1, (0...2).contains(button) else { return }
-    DispatchQueue.main.async {
-        guard #available(macOS 13.0, *), !stopping, sessionLockState() == 0,
-              let capture = activeCapture as? Capture, capture.controlEnabled,
-              AXIsProcessTrusted() else { return }
+@available(macOS 13.0, *)
+func releasePointer(_ capture: Capture) {
+    for button in capture.heldButtons {
+        let type: CGEventType = button == 0 ? .leftMouseUp : (button == 2 ? .rightMouseUp : .otherMouseUp)
+        let mouse: CGMouseButton = button == 0 ? .left : (button == 2 ? .right : .center)
+        if let event=CGEvent(mouseEventSource:nil,mouseType:type,mouseCursorPosition:capture.lastPointer,mouseButton:mouse) {
+            event.flags=[]; event.post(tap:.cghidEventTap)
+        }
+    }
+    capture.heldButtons.removeAll()
+}
+private let pointerLock=NSLock()
+private var pendingPointer:(Double,Double,Int32,Int32)?
+private var pointerScheduled=false
+@_cdecl("yiterm_capture_pointer")
+public func pointerCapture(_ x:Double,_ y:Double,_ button:Int32,_ phase:Int32,_ modifiers:Int32) {
+    guard x.isFinite,y.isFinite,(0...3).contains(phase) else { return }
+    if phase == 0 {
+        pointerLock.lock()
+        pendingPointer=(x,y,button,modifiers)
+        let schedule = !pointerScheduled
+        pointerScheduled=true
+        pointerLock.unlock()
+        if schedule { DispatchQueue.main.async {
+            pointerLock.lock(); let point=pendingPointer; pendingPointer=nil; pointerScheduled=false; pointerLock.unlock()
+            if let point { applyPointer(point.0,point.1,point.2,0,point.3) }
+        } }
+    } else { DispatchQueue.main.async { applyPointer(x,y,button,phase,modifiers) } }
+}
+private func applyPointer(_ x:Double,_ y:Double,_ button:Int32,_ phase:Int32,_ modifiers:Int32) {
+        guard #available(macOS 13.0,*), let capture=activeCapture as? Capture else { return }
+        if phase == 3 { releasePointer(capture); return }
+        guard !stopping,sessionLockState()==0,capture.controlEnabled,AXIsProcessTrusted(),x>=0,x<1,y>=0,y<1 else {
+            if phase == 2 { releasePointer(capture) }; return
+        }
         let bounds: CGRect
         if let display = capture.displayID {
             guard CGDisplayIsActive(display) != 0 else { return }
@@ -261,6 +284,7 @@ public func clickCapture(_ x: Double, _ y: Double, _ button: Int32, _ modifiers:
             // A resized window can be letterboxed in the fixed capture buffer.
             // Ignore clicks until restarted rather than map to the wrong target.
             guard abs(frame.width / frame.height - capture.sourceAspect) < 0.01 else { return }
+            if phase == 1 {
             // Raise the matching AX window before posting a click. Captured
             // windows can be occluded; never click through an unrelated window.
             let app = AXUIElementCreateApplication(pid)
@@ -284,31 +308,41 @@ public func clickCapture(_ x: Double, _ y: Double, _ button: Int32, _ modifiers:
             }
             guard raised else { return }
             NSRunningApplication(processIdentifier: pid)?.activate(options: .activateIgnoringOtherApps)
+            }
             bounds = frame
         } else { return }
-        let point = CGPoint(x: bounds.minX + x * bounds.width, y: bounds.minY + y * bounds.height)
-        let mouseButton: CGMouseButton = button == 0 ? .left : (button == 2 ? .right : .center)
-        let downType: CGEventType = button == 0 ? .leftMouseDown : (button == 2 ? .rightMouseDown : .otherMouseDown)
-        let upType: CGEventType = button == 0 ? .leftMouseUp : (button == 2 ? .rightMouseUp : .otherMouseUp)
-        let now = ProcessInfo.processInfo.systemUptime
-        var clicks: Int64 = 1
-        if let last = capture.lastClick, last.0 == button, now - last.2 <= NSEvent.doubleClickInterval,
-           hypot(point.x-last.1.x, point.y-last.1.y) <= 4 {
-            clicks = min(last.3 + 1, 3)
+        let point=CGPoint(x:bounds.minX+x*bounds.width,y:bounds.minY+y*bounds.height)
+        capture.lastPointer=point
+        var flags=CGEventFlags()
+        if modifiers&4 != 0 { flags.insert(.maskShift) }
+        if modifiers&8 != 0 { flags.insert(.maskAlternate) }
+        if modifiers&16 != 0 { flags.insert(.maskControl) }
+        let actual: Int32
+        let type: CGEventType
+        if phase == 0 {
+            actual=capture.heldButtons.sorted().first ?? 0
+            type=capture.heldButtons.isEmpty ? .mouseMoved : (actual==0 ? .leftMouseDragged : (actual==2 ? .rightMouseDragged : .otherMouseDragged))
+        } else {
+            guard (0...2).contains(button) else { if phase==2 { releasePointer(capture) }; return }
+            actual=button
+            if phase==1 {
+                if capture.heldButtons.contains(button) { return }
+                capture.heldButtons.insert(button)
+                let now=ProcessInfo.processInfo.systemUptime
+                var clicks:Int64=1
+                if let last=capture.lastClick,last.0==button,now-last.2<=NSEvent.doubleClickInterval,hypot(point.x-last.1.x,point.y-last.1.y)<=4 { clicks=min(last.3+1,3) }
+                capture.lastClick=(button,point,now,clicks)
+            } else {
+                guard capture.heldButtons.remove(button) != nil else { return }
+            }
+            type=phase==1 ? (actual==0 ? .leftMouseDown : (actual==2 ? .rightMouseDown : .otherMouseDown)) : (actual==0 ? .leftMouseUp : (actual==2 ? .rightMouseUp : .otherMouseUp))
         }
-        capture.lastClick = (button, point, now, clicks)
-        var flags = CGEventFlags()
-        if modifiers & 4 != 0 { flags.insert(.maskShift) }
-        if modifiers & 8 != 0 { flags.insert(.maskAlternate) }
-        if modifiers & 16 != 0 { flags.insert(.maskControl) }
-        guard let down = CGEvent(mouseEventSource: nil, mouseType: downType, mouseCursorPosition: point, mouseButton: mouseButton),
-              let up = CGEvent(mouseEventSource: nil, mouseType: upType, mouseCursorPosition: point, mouseButton: mouseButton) else { return }
-        for event in [down, up] {
-            event.flags = flags
-            event.setIntegerValueField(.mouseEventClickState, value: clicks)
-            event.post(tap: .cghidEventTap)
+        let mouse:CGMouseButton=actual==0 ? .left : (actual==2 ? .right : .center)
+        if let event=CGEvent(mouseEventSource:nil,mouseType:type,mouseCursorPosition:point,mouseButton:mouse) {
+            event.flags=flags
+            if phase != 0 { event.setIntegerValueField(.mouseEventClickState,value:capture.lastClick?.3 ?? 1) }
+            event.post(tap:.cghidEventTap)
         }
-    }
 }
 
 @available(macOS 13.0, *)
