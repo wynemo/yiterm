@@ -21,6 +21,7 @@ enum Action {
     Abort,
     CellSizeQuery,
     PixelSizeQuery,
+    CellCountQuery,
 }
 struct Transfer {
     controls: Controls,
@@ -292,20 +293,26 @@ impl Graphics {
                     // Keep the short prefix
                     // across PTY reads and dispatch the query in stream order.
                     self.size_query.push(b);
-                    if self.size_query == b"\x1b[16t" || self.size_query == b"\x1b[14t" {
+                    if matches!(
+                        self.size_query.as_slice(),
+                        b"\x1b[16t" | b"\x1b[14t" | b"\x1b[18t"
+                    ) {
                         if !text.is_empty() {
                             self.actions
                                 .push_back(Action::Text(std::mem::take(&mut text)));
                         }
                         self.actions.push_back(if self.size_query == b"\x1b[16t" {
                             Action::CellSizeQuery
-                        } else {
+                        } else if self.size_query == b"\x1b[14t" {
                             Action::PixelSizeQuery
+                        } else {
+                            Action::CellCountQuery
                         });
                         self.size_query.clear();
                         self.state = 0;
                     } else if !b"\x1b[16t".starts_with(&self.size_query)
                         && !b"\x1b[14t".starts_with(&self.size_query)
+                        && !b"\x1b[18t".starts_with(&self.size_query)
                     {
                         if b == 0x1b {
                             self.size_query.pop();
@@ -362,6 +369,13 @@ impl Graphics {
             match action {
                 Action::Text(bytes) => parser.advance(term, &bytes),
                 Action::Abort => self.transfer = None,
+                Action::CellCountQuery => {
+                    term.graphics_reply(format!(
+                        "\x1b[8;{};{}t",
+                        term.screen_lines(),
+                        term.columns()
+                    ));
+                }
                 Action::PixelSizeQuery => {
                     let [width, height] = self.pixels;
                     term.graphics_reply(format!("\x1b[4;{height};{width}t"));

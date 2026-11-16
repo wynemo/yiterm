@@ -140,6 +140,7 @@ mod macos {
         source: Option<(usize, usize)>,
         measured_cell: Option<[usize; 2]>,
         measured_area: Option<[usize; 2]>,
+        measured_grid: Option<[usize; 2]>,
     ) -> Result<(usize, usize)> {
         let mut size = unsafe { std::mem::zeroed::<libc::winsize>() };
         anyhow::ensure!(
@@ -148,12 +149,14 @@ mod macos {
                 && size.ws_row > 0,
             "Cannot determine terminal dimensions; use ssh -t"
         );
-        let cols = usize::from(size.ws_col).min(1000);
-        let rows = usize::from(size.ws_row).min(500);
+        let [grid_cols, grid_rows] =
+            measured_grid.unwrap_or([usize::from(size.ws_col), usize::from(size.ws_row)]);
+        let cols = grid_cols.min(1000);
+        let rows = grid_rows.min(500);
         if let Some((w, h)) = source {
             // PTYs can omit pixel dimensions; use a conventional 1:2 cell as fallback.
             let cell_w = if let Some(area) = measured_area {
-                area[0] as f64 / f64::from(size.ws_col)
+                area[0] as f64 / grid_cols as f64
             } else if let Some(cell) = measured_cell {
                 cell[0] as f64
             } else if size.ws_xpixel > 0 {
@@ -162,7 +165,7 @@ mod macos {
                 8.0
             };
             let cell_h = if let Some(area) = measured_area {
-                area[1] as f64 / f64::from(size.ws_row)
+                area[1] as f64 / grid_rows as f64
             } else if let Some(cell) = measured_cell {
                 cell[1] as f64
             } else if size.ws_ypixel > 0 {
@@ -413,7 +416,7 @@ mod macos {
                 std::io::stdin().is_terminal() && std::io::stdout().is_terminal(),
                 "Screen sharing requires a terminal; connect with ssh -t"
             );
-            geometry(None, None, None)?;
+            geometry(None, None, None, None)?;
         }
         if super::unlock::locked() {
             anyhow::ensure!(
@@ -495,6 +498,10 @@ mod macos {
         focused: bool,
         ready: bool,
         geo: (usize, usize),
+        origin: (usize, usize),
+        grid: Option<[usize; 2]>,
+        staged_area: Option<[usize; 2]>,
+        staged_cell: Option<[usize; 2]>,
         cell: Option<[usize; 2]>,
         area: Option<[usize; 2]>,
     }
@@ -571,13 +578,40 @@ mod macos {
                                     }
                                 }
                                 Event::Size(kind, w, h) => {
-                                    let limit = if kind == 4 { 65535 } else { 512 };
+                                    let limit = if kind == 4 {
+                                        65535
+                                    } else if kind == 8 {
+                                        4096
+                                    } else {
+                                        512
+                                    };
                                     if (1..=limit).contains(&w) && (1..=limit).contains(&h) {
                                         let mut view = v.lock().unwrap();
-                                        if kind == 4 {
-                                            view.area = Some([w, h]);
-                                        } else if kind == 6 {
-                                            view.cell = Some([w, h]);
+                                        match kind {
+                                            4 => {
+                                                view.staged_area = Some([w, h]);
+                                                if view.grid.is_none() {
+                                                    view.area = Some([w, h]);
+                                                }
+                                            }
+                                            6 => {
+                                                view.staged_cell = Some([w, h]);
+                                                if view.grid.is_none() {
+                                                    view.cell = Some([w, h]);
+                                                }
+                                            }
+                                            8 => {
+                                                // Publish pixel area, cell pitch and cell count
+                                                // from one ordered query batch together.
+                                                view.grid = Some([w, h]);
+                                                if let Some(area) = view.staged_area.take() {
+                                                    view.area = Some(area);
+                                                }
+                                                if let Some(cell) = view.staged_cell.take() {
+                                                    view.cell = Some(cell);
+                                                }
+                                            }
+                                            _ => {}
                                         }
                                     }
                                 }
@@ -585,7 +619,9 @@ mod macos {
                                     if control && button & 64 == 0 =>
                                 {
                                     if let Some([cw, ch]) = state.cell {
-                                        if let Ok((cols, rows)) = geometry(None, None, None) {
+                                        if let Ok((cols, rows)) =
+                                            geometry(None, None, None, state.grid)
+                                        {
                                             let (cw, ch) = state
                                                 .area
                                                 .map(|a| {
@@ -597,6 +633,10 @@ mod macos {
                                                 .unwrap_or((cw as f64, ch as f64));
                                             let (w, h) =
                                                 (state.geo.0 as f64 * cw, state.geo.1 as f64 * ch);
+                                            let local_x =
+                                                x as f64 - 0.5 - state.origin.0 as f64 * cw;
+                                            let local_y =
+                                                y as f64 - 0.5 - state.origin.1 as f64 * ch;
                                             let motion = button & 32 != 0;
                                             let phase = if motion {
                                                 0
@@ -608,15 +648,15 @@ mod macos {
                                             if w > 0.
                                                 && h > 0.
                                                 && (phase == 2
-                                                    || (x > 0
-                                                        && y > 0
-                                                        && x as f64 <= w
-                                                        && y as f64 <= h))
+                                                    || (local_x >= 0.
+                                                        && local_y >= 0.
+                                                        && local_x < w
+                                                        && local_y < h))
                                             {
                                                 unsafe {
                                                     yiterm_capture_pointer(
-                                                        ((x as f64 - 0.5) / w).clamp(0., 0.999999),
-                                                        ((y as f64 - 0.5) / h).clamp(0., 0.999999),
+                                                        (local_x / w).clamp(0., 0.999999),
+                                                        (local_y / h).clamp(0., 0.999999),
                                                         (button & 3) as i32,
                                                         phase,
                                                         (button & 28) as i32,
@@ -658,17 +698,18 @@ mod macos {
         let _terminal = Terminal::enter(o.share_read_only)?;
         let mut out = std::io::stdout();
         let encoders = EncoderPool::new();
-        out.write_all(b"\x1b[14t\x1b[16t")?;
+        out.write_all(b"\x1b[14t\x1b[16t\x1b[18t")?;
         if !o.share_read_only {
             out.write_all(b"\x1b[?1003h\x1b[?1006h\x1b[?1016h\x1b[?2004h")?;
         }
         out.flush()?;
         let query_started = Instant::now();
         let mut last_query = Instant::now();
-        let mut terminal_size = geometry(None, None, None)?;
+        let mut terminal_size = geometry(None, None, None, None)?;
         let mut previous: Option<Arc<Frame>> = None;
         let mut current: Option<Arc<Frame>> = None;
         let mut old_geometry = (0, 0);
+        let mut old_origin = (0, 0);
         let mut count = 0;
         let mut old_grid = (0, 0);
         let fixed = match o.share_quality.as_deref().unwrap_or("lossless") {
@@ -736,11 +777,11 @@ mod macos {
                     out.flush()?;
                     input_pump.reset.store(true, Ordering::Relaxed);
                 }
-                let next_terminal_size = geometry(None, None, None)?;
+                let next_terminal_size = geometry(None, None, None, None)?;
                 let resized = next_terminal_size != terminal_size;
                 terminal_size = next_terminal_size;
                 if resized || last_query.elapsed() >= Duration::from_secs(2) {
-                    out.write_all(b"\x1b[14t\x1b[16t")?;
+                    out.write_all(b"\x1b[14t\x1b[16t\x1b[18t")?;
                     out.flush()?;
                     last_query = Instant::now();
                 }
@@ -788,9 +829,34 @@ mod macos {
                 let Some(frame) = current.as_ref() else {
                     continue;
                 };
-                let geo = geometry(Some((frame.w, frame.h)), measured_cell, measured_area)?;
+                let geo = geometry(
+                    Some((frame.w, frame.h)),
+                    measured_cell,
+                    measured_area,
+                    input.grid,
+                )?;
                 let grid = layout(geo.0, geo.1);
-                let layout_changed = geo != old_geometry;
+                let (available_cols, available_rows) = geometry(None, None, None, input.grid)?;
+                let origin = (
+                    available_cols.saturating_sub(geo.0) / 2,
+                    available_rows.saturating_sub(geo.1) / 2,
+                );
+                let layout_changed = geo != old_geometry || origin != old_origin;
+                if layout_changed && o.share_stats {
+                    eprintln!(
+                        "share layout: source={}x{} viewer_grid={}x{} viewport={:?} cell={:?} picture_cells={}x{} origin={},{}",
+                        frame.w,
+                        frame.h,
+                        available_cols,
+                        available_rows,
+                        measured_area,
+                        measured_cell,
+                        geo.0,
+                        geo.1,
+                        origin.0,
+                        origin.1
+                    );
+                }
                 let reset = grid != old_grid
                     || previous
                         .as_ref()
@@ -798,6 +864,7 @@ mod macos {
                 if !new_frame && !reset && !layout_changed {
                     let mut view = input_pump.view.lock().unwrap();
                     view.geo = geo;
+                    view.origin = origin;
                     view.ready = true;
                     continue;
                 }
@@ -807,6 +874,7 @@ mod macos {
                     previous = None;
                 }
                 old_geometry = geo;
+                old_origin = origin;
                 old_grid = grid;
                 let (cols, rows) = geo;
                 let (nx, ny) = grid;
@@ -820,8 +888,8 @@ mod macos {
                             write!(
                                 placements,
                                 "\x1b[{};{}H\x1b_Ga=p,i={},p=1,c={},r={},C=1,q=2;\x1b\\",
-                                row + 1,
-                                col + 1,
+                                row + origin.1 + 1,
+                                col + origin.0 + 1,
                                 iy * nx + ix + 1,
                                 (ix + 1) * cols / nx - col,
                                 (iy + 1) * rows / ny - row
@@ -833,6 +901,7 @@ mod macos {
                     out.flush()?;
                     let mut view = input_pump.view.lock().unwrap();
                     view.geo = geo;
+                    view.origin = origin;
                     view.ready = true;
                     continue;
                 }
@@ -889,8 +958,8 @@ mod macos {
                                 write!(
                                     out,
                                     "\x1b[{};{}H\x1b_Ga=p,i={},p=1,c={},r={},C=1,q=2;\x1b\\",
-                                    row + 1,
-                                    col + 1,
+                                    row + origin.1 + 1,
+                                    col + origin.0 + 1,
                                     id,
                                     right - col,
                                     bottom - row
@@ -907,8 +976,8 @@ mod macos {
                         }
                         tiles.push(Tile {
                             id,
-                            col,
-                            row,
+                            col: col + origin.0,
+                            row: row + origin.1,
                             cols: right - col,
                             rows: bottom - row,
                             w,
@@ -938,6 +1007,7 @@ mod macos {
                 {
                     let mut view = input_pump.view.lock().unwrap();
                     view.geo = geo;
+                    view.origin = origin;
                     view.ready = true;
                 }
                 let elapsed = started.elapsed();

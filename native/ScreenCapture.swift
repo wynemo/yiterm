@@ -89,7 +89,7 @@ final class Capture: NSObject, SCStreamOutput, SCStreamDelegate {
             }
         }
         let filter: SCContentFilter
-        let width: Int, height: Int
+        var width: Int, height: Int
         var selectedDisplay: CGDirectDisplayID?
         var selectedWindow: CGWindowID?
         var selectedPID: pid_t?
@@ -108,6 +108,12 @@ final class Capture: NSObject, SCStreamOutput, SCStreamDelegate {
             selectedDisplay = display.displayID
             width = CGDisplayPixelsWide(display.displayID); height = CGDisplayPixelsHigh(display.displayID)
         }
+        if #available(macOS 14.0, *) {
+            let rect=filter.contentRect
+            let pixelScale=Double(filter.pointPixelScale)
+            guard rect.width>0,rect.height>0,pixelScale>0 else { throw CaptureFailure(message:"Invalid source capture dimensions") }
+            width=max(1,Int(rect.width*pixelScale)); height=max(1,Int(rect.height*pixelScale))
+        }
         let requestedWidth = Int(value("--width") ?? "0") ?? 0
         let maxWidth = requestedWidth == 0 ? 3840 : requestedWidth
         let scale = min(1.0, Double(maxWidth) / Double(width), 16384.0 / Double(height),
@@ -118,7 +124,7 @@ final class Capture: NSObject, SCStreamOutput, SCStreamDelegate {
         config.colorSpaceName = CGColorSpace.sRGB
         config.minimumFrameInterval = CMTime(value: 1, timescale: Int32(value("--fps") ?? "15") ?? 15)
         config.queueDepth = 3; config.showsCursor = !control; config.capturesAudio = false
-        if #available(macOS 14.0, *) { config.scalesToFit = true; config.ignoreShadowsSingleWindow = true }
+        if #available(macOS 14.0, *) { config.scalesToFit = true; config.preservesAspectRatio = true; config.ignoreShadowsSingleWindow = true }
         let capture = Capture()
         capture.displayID = selectedDisplay; capture.windowID = selectedWindow; capture.windowPID = selectedPID; capture.controlEnabled = control
         capture.sourceAspect = Double(width) / Double(height)
