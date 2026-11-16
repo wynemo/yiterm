@@ -22,6 +22,7 @@ enum Action {
     CellSizeQuery,
     PixelSizeQuery,
     CellCountQuery,
+    CanvasQuery,
 }
 struct Transfer {
     controls: Controls,
@@ -80,6 +81,12 @@ impl Picture {
             .id()
     }
 }
+struct Canvas {
+    width: u32,
+    height: u32,
+    x: u32,
+    y: u32,
+}
 struct Placement {
     anchor: u64,
     image: u32,
@@ -93,6 +100,7 @@ struct Placement {
     dx: u32,
     dy: u32,
     z: i32,
+    canvas: Option<Canvas>,
 }
 pub struct Draw<'a> {
     pub picture: &'a Picture,
@@ -295,7 +303,7 @@ impl Graphics {
                     self.size_query.push(b);
                     if matches!(
                         self.size_query.as_slice(),
-                        b"\x1b[16t" | b"\x1b[14t" | b"\x1b[18t"
+                        b"\x1b[16t" | b"\x1b[14t" | b"\x1b[18t" | b"\x1b[?9002$p"
                     ) {
                         if !text.is_empty() {
                             self.actions
@@ -305,14 +313,17 @@ impl Graphics {
                             Action::CellSizeQuery
                         } else if self.size_query == b"\x1b[14t" {
                             Action::PixelSizeQuery
-                        } else {
+                        } else if self.size_query == b"\x1b[18t" {
                             Action::CellCountQuery
+                        } else {
+                            Action::CanvasQuery
                         });
                         self.size_query.clear();
                         self.state = 0;
                     } else if !b"\x1b[16t".starts_with(&self.size_query)
                         && !b"\x1b[14t".starts_with(&self.size_query)
                         && !b"\x1b[18t".starts_with(&self.size_query)
+                        && !b"\x1b[?9002$p".starts_with(&self.size_query)
                     {
                         if b == 0x1b {
                             self.size_query.pop();
@@ -369,6 +380,12 @@ impl Graphics {
             match action {
                 Action::Text(bytes) => parser.advance(term, &bytes),
                 Action::Abort => self.transfer = None,
+                Action::CanvasQuery => {
+                    term.graphics_reply(format!(
+                        "\x1b[?9002;{}$y",
+                        if self.enabled { 1 } else { 0 }
+                    ));
+                }
                 Action::CellCountQuery => {
                     term.graphics_reply(format!(
                         "\x1b[8;{};{}t",
@@ -638,6 +655,45 @@ impl Graphics {
         {
             return Err("EINVAL:placement dimensions");
         }
+        let canvas = if [b'D', b'E', b'N', b'O']
+            .iter()
+            .any(|key| c.contains_key(key))
+        {
+            if ![b'D', b'E', b'N', b'O']
+                .iter()
+                .all(|key| c.contains_key(key))
+            {
+                return Err("EINVAL:incomplete canvas");
+            }
+            let (width, height, cx, cy) = (
+                get(c, b'D', 0) as u32,
+                get(c, b'E', 0) as u32,
+                get(c, b'N', 0) as u32,
+                get(c, b'O', 0) as u32,
+            );
+            if width == 0
+                || height == 0
+                || width > 65535
+                || height > 65535
+                || x != 0
+                || y != 0
+                || cols == 0
+                || rows == 0
+                || get(c, b'C', 0) != 1
+                || u64::from(cx) + u64::from(w) > u64::from(width)
+                || u64::from(cy) + u64::from(h) > u64::from(height)
+            {
+                return Err("EINVAL:canvas dimensions");
+            }
+            Some(Canvas {
+                width,
+                height,
+                x: cx,
+                y: cy,
+            })
+        } else {
+            None
+        };
         let pid = get(c, b'p', 0) as u32;
         self.placements.retain(|p| {
             if p.image == id && pid != 0 && p.id == pid {
@@ -665,6 +721,7 @@ impl Graphics {
             dx,
             dy,
             z: get(c, b'z', 0) as i32,
+            canvas,
         };
         let [width, height] = self.extent(&placement);
         tracing::debug!(target: "yiterm::graphics", image = id, placement = pid,
@@ -689,7 +746,15 @@ impl Graphics {
         self.placements.push(placement);
         Ok(())
     }
+    fn canvas_scale(&self, p: &Placement, canvas: &Canvas) -> f64 {
+        (p.cols as f64 * self.cell[0] as f64 / canvas.width as f64)
+            .min(p.rows as f64 * self.cell[1] as f64 / canvas.height as f64)
+    }
     fn extent(&self, p: &Placement) -> [f32; 2] {
+        if let Some(canvas) = &p.canvas {
+            let scale = self.canvas_scale(p, canvas);
+            return [(p.w as f64 * scale) as f32, (p.h as f64 * scale) as f32];
+        }
         match (p.cols, p.rows) {
             (0, 0) => [p.w as f32 / self.scale, p.h as f32 / self.scale],
             (c, 0) => {
@@ -746,8 +811,25 @@ impl Graphics {
                 continue;
             };
             let [w, h] = self.extent(p);
-            let x = point.column.0 as f32 * self.cell[0] + p.dx as f32 / self.scale;
-            let y = (point.line.0 as f32 + offset) * self.cell[1] + p.dy as f32 / self.scale;
+            let base_x =
+                point.column.0 as f64 * self.cell[0] as f64 + p.dx as f64 / self.scale as f64;
+            let base_y = (point.line.0 as f64 + offset as f64) * self.cell[1] as f64
+                + p.dy as f64 / self.scale as f64;
+            let (x, y, w, h) = if let Some(canvas) = &p.canvas {
+                let scale = self.canvas_scale(p, canvas);
+                let left = base_x + canvas.x as f64 * scale;
+                let top = base_y + canvas.y as f64 * scale;
+                let right = base_x + (u64::from(canvas.x) + u64::from(p.w)) as f64 * scale;
+                let bottom = base_y + (u64::from(canvas.y) + u64::from(p.h)) as f64 * scale;
+                (
+                    left as f32,
+                    top as f32,
+                    (right - left) as f32,
+                    (bottom - top) as f32,
+                )
+            } else {
+                (base_x as f32, base_y as f32, w, h)
+            };
             if y + h <= 0. || y >= term.screen_lines() as f32 * self.cell[1] {
                 continue;
             }

@@ -199,6 +199,7 @@ mod macos {
         rows: usize,
         w: usize,
         h: usize,
+        canvas: Option<[usize; 4]>,
         rgb: Vec<u8>,
     }
     struct Encoded {
@@ -283,6 +284,7 @@ mod macos {
                     rows: t.rows,
                     w: t.w,
                     h: t.h,
+                    canvas: t.canvas,
                     rgb: std::mem::take(&mut t.rgb),
                 };
                 self.jobs
@@ -311,9 +313,55 @@ mod macos {
         }
     }
 
+    fn tile_layout(
+        id: usize,
+        ix: usize,
+        iy: usize,
+        grid: (usize, usize),
+        geo: (usize, usize),
+        origin: (usize, usize),
+        source: (usize, usize),
+        canvas: bool,
+    ) -> Tile {
+        let (nx, ny) = grid;
+        let (cols, rows) = geo;
+        let (sw, sh) = source;
+        let (x, y) = (ix * sw / nx, iy * sh / ny);
+        let (col, row) = (ix * cols / nx, iy * rows / ny);
+        Tile {
+            id,
+            col: origin.0 + if canvas { 0 } else { col },
+            row: origin.1 + if canvas { 0 } else { row },
+            cols: if canvas {
+                cols
+            } else {
+                (ix + 1) * cols / nx - col
+            },
+            rows: if canvas { rows } else { 0 },
+            w: (ix + 1) * sw / nx - x,
+            h: (iy + 1) * sh / ny - y,
+            canvas: canvas.then_some([sw, sh, x, y]),
+            rgb: Vec::new(),
+        }
+    }
+    fn place(out: &mut impl Write, t: &Tile) -> Result<()> {
+        write!(
+            out,
+            "\x1b[{};{}H\x1b_Ga=p,i={},p=1,c={},r={},C=1,q=2",
+            t.row + 1,
+            t.col + 1,
+            t.id,
+            t.cols,
+            t.rows
+        )?;
+        if let Some([w, h, x, y]) = t.canvas {
+            write!(out, ",D={w},E={h},N={x},O={y}")?;
+        }
+        out.write_all(b";\x1b\\")?;
+        Ok(())
+    }
     fn send(out: &mut impl Write, image: Encoded) -> Result<usize> {
         let t = image.tile;
-        write!(out, "\x1b[{};{}H", t.row + 1, t.col + 1)?;
         let chunks = image.data.as_bytes().chunks(3072);
         let n = chunks.len();
         let mut sequence = Vec::with_capacity(4096);
@@ -336,11 +384,7 @@ mod macos {
             sequence.extend_from_slice(b"\x1b\\");
             out.write_all(&sequence)?;
         }
-        write!(
-            out,
-            "\x1b_Ga=p,i={},p=1,c={},r={},C=1,q=2;\x1b\\",
-            t.id, t.cols, t.rows
-        )?;
+        place(out, &t)?;
         Ok(image.data.len())
     }
     type Latest = Mutex<(Option<Frame>, Option<String>, bool)>;
@@ -497,6 +541,8 @@ mod macos {
     struct InputView {
         focused: bool,
         ready: bool,
+        canvas: Option<bool>,
+        source: (usize, usize),
         geo: (usize, usize),
         origin: (usize, usize),
         grid: Option<[usize; 2]>,
@@ -577,6 +623,9 @@ mod macos {
                                         }
                                     }
                                 }
+                                Event::Canvas(supported) => {
+                                    v.lock().unwrap().canvas = Some(supported)
+                                }
                                 Event::Size(kind, w, h) => {
                                     let limit = if kind == 4 {
                                         65535
@@ -631,8 +680,18 @@ mod macos {
                                                     )
                                                 })
                                                 .unwrap_or((cw as f64, ch as f64));
-                                            let (w, h) =
+                                            let (box_w, box_h) =
                                                 (state.geo.0 as f64 * cw, state.geo.1 as f64 * ch);
+                                            let (sw, sh) = state.source;
+                                            if sw == 0 || sh == 0 {
+                                                continue;
+                                            }
+                                            let scale = if state.canvas == Some(true) {
+                                                (box_w / sw as f64).min(box_h / sh as f64)
+                                            } else {
+                                                box_w / sw as f64
+                                            };
+                                            let (w, h) = (sw as f64 * scale, sh as f64 * scale);
                                             let local_x =
                                                 x as f64 - 0.5 - state.origin.0 as f64 * cw;
                                             let local_y =
@@ -698,7 +757,7 @@ mod macos {
         let _terminal = Terminal::enter(o.share_read_only)?;
         let mut out = std::io::stdout();
         let encoders = EncoderPool::new();
-        out.write_all(b"\x1b[14t\x1b[16t\x1b[18t")?;
+        out.write_all(b"\x1b[14t\x1b[16t\x1b[18t\x1b[?9002$p")?;
         if !o.share_read_only {
             out.write_all(b"\x1b[?1003h\x1b[?1006h\x1b[?1016h\x1b[?2004h")?;
         }
@@ -712,6 +771,7 @@ mod macos {
         let mut old_origin = (0, 0);
         let mut count = 0;
         let mut old_grid = (0, 0);
+        let mut old_canvas = false;
         let fixed = match o.share_quality.as_deref().unwrap_or("lossless") {
             "auto" => None,
             "565" => Some(1),
@@ -781,11 +841,13 @@ mod macos {
                 let resized = next_terminal_size != terminal_size;
                 terminal_size = next_terminal_size;
                 if resized || last_query.elapsed() >= Duration::from_secs(2) {
-                    out.write_all(b"\x1b[14t\x1b[16t\x1b[18t")?;
+                    out.write_all(b"\x1b[14t\x1b[16t\x1b[18t\x1b[?9002$p")?;
                     out.flush()?;
                     last_query = Instant::now();
                 }
-                if measured_cell.is_none() && query_started.elapsed() < Duration::from_millis(750) {
+                if (measured_cell.is_none() || input.canvas.is_none())
+                    && query_started.elapsed() < Duration::from_millis(750)
+                {
                     continue;
                 }
                 if last_frame.elapsed()
@@ -835,7 +897,8 @@ mod macos {
                     measured_area,
                     input.grid,
                 )?;
-                let grid = layout(geo.0, geo.1);
+                let canvas = input.canvas == Some(true);
+                let grid = if canvas { layout(geo.0, geo.1) } else { (1, 1) };
                 let (available_cols, available_rows) = geometry(None, None, None, input.grid)?;
                 let origin = (
                     available_cols.saturating_sub(geo.0) / 2,
@@ -857,13 +920,15 @@ mod macos {
                         origin.1
                     );
                 }
-                let reset = grid != old_grid
+                let reset = canvas != old_canvas
+                    || grid != old_grid
                     || previous
                         .as_ref()
                         .is_none_or(|p| p.w != frame.w || p.h != frame.h);
                 if !new_frame && !reset && !layout_changed {
                     let mut view = input_pump.view.lock().unwrap();
                     view.geo = geo;
+                    view.source = (frame.w, frame.h);
                     view.origin = origin;
                     view.ready = true;
                     continue;
@@ -876,7 +941,7 @@ mod macos {
                 old_geometry = geo;
                 old_origin = origin;
                 old_grid = grid;
-                let (cols, rows) = geo;
+                old_canvas = canvas;
                 let (nx, ny) = grid;
                 if layout_changed && !new_frame && !reset {
                     // A pure viewport resize only reuses cached image IDs.
@@ -884,16 +949,17 @@ mod macos {
                     placements.extend_from_slice(b"\x1b[?2026h");
                     for iy in 0..ny {
                         for ix in 0..nx {
-                            let (col, row) = (ix * cols / nx, iy * rows / ny);
-                            write!(
-                                placements,
-                                "\x1b[{};{}H\x1b_Ga=p,i={},p=1,c={},r={},C=1,q=2;\x1b\\",
-                                row + origin.1 + 1,
-                                col + origin.0 + 1,
+                            let tile = tile_layout(
                                 iy * nx + ix + 1,
-                                (ix + 1) * cols / nx - col,
-                                (iy + 1) * rows / ny - row
-                            )?;
+                                ix,
+                                iy,
+                                grid,
+                                geo,
+                                origin,
+                                (frame.w, frame.h),
+                                canvas,
+                            );
+                            place(&mut placements, &tile)?;
                         }
                     }
                     placements.extend_from_slice(b"\x1b[?2026l");
@@ -901,6 +967,7 @@ mod macos {
                     out.flush()?;
                     let mut view = input_pump.view.lock().unwrap();
                     view.geo = geo;
+                    view.source = (frame.w, frame.h);
                     view.origin = origin;
                     view.ready = true;
                     continue;
@@ -941,10 +1008,6 @@ mod macos {
                 for iy in 0..ny {
                     for ix in 0..nx {
                         id += 1;
-                        let col = ix * cols / nx;
-                        let row = iy * rows / ny;
-                        let right = (ix + 1) * cols / nx;
-                        let bottom = (iy + 1) * rows / ny;
                         let x = ix * frame.w / nx;
                         let y = iy * frame.h / ny;
                         let w = (ix + 1) * frame.w / nx - x;
@@ -955,15 +1018,17 @@ mod macos {
                         let dirty = dirty_tiles[iy * nx + ix];
                         if !dirty {
                             if layout_changed {
-                                write!(
-                                    out,
-                                    "\x1b[{};{}H\x1b_Ga=p,i={},p=1,c={},r={},C=1,q=2;\x1b\\",
-                                    row + origin.1 + 1,
-                                    col + origin.0 + 1,
+                                let tile = tile_layout(
                                     id,
-                                    right - col,
-                                    bottom - row
-                                )?;
+                                    ix,
+                                    iy,
+                                    grid,
+                                    geo,
+                                    origin,
+                                    (frame.w, frame.h),
+                                    canvas,
+                                );
+                                place(&mut out, &tile)?;
                             }
                             continue;
                         }
@@ -974,16 +1039,10 @@ mod macos {
                                 rgb.extend_from_slice(&[pixel[2], pixel[1], pixel[0]]);
                             }
                         }
-                        tiles.push(Tile {
-                            id,
-                            col: col + origin.0,
-                            row: row + origin.1,
-                            cols: right - col,
-                            rows: bottom - row,
-                            w,
-                            h,
-                            rgb,
-                        });
+                        let mut tile =
+                            tile_layout(id, ix, iy, grid, geo, origin, (frame.w, frame.h), canvas);
+                        tile.rgb = rgb;
+                        tiles.push(tile);
                     }
                 }
                 count = id;
@@ -1007,6 +1066,7 @@ mod macos {
                 {
                     let mut view = input_pump.view.lock().unwrap();
                     view.geo = geo;
+                    view.source = (frame.w, frame.h);
                     view.origin = origin;
                     view.ready = true;
                 }

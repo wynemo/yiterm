@@ -18,6 +18,7 @@ pub const RIGHT: u32 = 0xe00d;
 pub const F1: u32 = 0xe010;
 
 pub enum Event {
+    Canvas(bool),
     Text(String),
     Key(u32, u32), // Shift=1, Option=2, Control=4, Command=8.
     Focus(bool),
@@ -129,6 +130,9 @@ impl Decoder {
                         return Some(Event::Mouse(button, x, y, final_byte == b'M'));
                     }
                     continue;
+                }
+                if final_byte == b'y' && text.starts_with("?9002;") {
+                    return Some(Event::Canvas(matches!(text, "?9002;1$" | "?9002;2$")));
                 }
                 if final_byte == b't' {
                     if let Some([kind, h, w]) = numbers::<3>(text) {
