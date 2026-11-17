@@ -791,8 +791,8 @@ impl PaneLayout {
 }
 struct TerminalTab {
     files: files::FileState,
-    #[cfg(windows)]
     id: u64,
+    custom_title: Option<String>,
     panes: Vec<TerminalSession>,
     layout: PaneLayout,
     active: usize,
@@ -802,11 +802,10 @@ struct TerminalTab {
 
 impl TerminalTab {
     fn new(session: TerminalSession) -> Self {
-        #[cfg(windows)]
         static NEXT_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
         Self {
-            #[cfg(windows)]
             id: NEXT_ID.fetch_add(1, Ordering::Relaxed),
+            custom_title: None,
             files: Default::default(),
             panes: vec![session],
             layout: PaneLayout::Leaf(0),
@@ -814,6 +813,12 @@ impl TerminalTab {
             #[cfg(windows)]
             browser: None,
         }
+    }
+
+    fn title(&self) -> &str {
+        self.custom_title
+            .as_deref()
+            .unwrap_or(&self.focused().title)
     }
 
     fn focused(&self) -> &TerminalSession {
@@ -874,6 +879,7 @@ struct TerminalApp {
     about_licenses: bool,
     updater: yiterm::update::Controller,
     settings_open: bool,
+    rename_tab: Option<(u64, String)>,
     theme: ThemeMode,
     cursor_settings: CursorSettings,
     font_settings: settings::FontSettings,
@@ -886,6 +892,23 @@ struct TerminalApp {
 }
 
 impl TerminalApp {
+    fn begin_rename_tab(&mut self, id: u64) {
+        self.rename_tab = self
+            .tabs
+            .iter()
+            .find(|tab| tab.id == id)
+            .map(|tab| (id, tab.title().to_owned()));
+    }
+
+    fn finish_rename_tab(&mut self) {
+        if let Some((id, title)) = self.rename_tab.take()
+            && let Some(tab) = self.tabs.iter_mut().find(|tab| tab.id == id)
+        {
+            let title = title.trim();
+            tab.custom_title = (!title.is_empty()).then(|| title.to_owned());
+        }
+    }
+
     fn report_terminal_focus(&mut self, window_focused: bool) {
         for (tab_index, tab) in self.tabs.iter_mut().enumerate() {
             for (pane_index, pane) in tab.panes.iter_mut().enumerate() {
@@ -934,6 +957,7 @@ impl TerminalApp {
             about_licenses: false,
             updater,
             settings_open: false,
+            rename_tab: None,
             theme: settings::load_theme(&path)?,
             cursor_settings,
             font_settings: settings::load_font(&path)?,
@@ -1110,6 +1134,13 @@ impl TerminalApp {
     }
 
     fn close_tab(&mut self, index: usize) {
+        if self
+            .rename_tab
+            .as_ref()
+            .is_some_and(|(id, _)| *id == self.tabs[index].id)
+        {
+            self.rename_tab = None;
+        }
         let was_active = index == self.active;
         self.tabs.remove(index);
         self.active = active_after_close(self.active, index, self.tabs.len());

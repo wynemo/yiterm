@@ -812,7 +812,7 @@ impl eframe::App for TerminalApp {
         }
         let profile_start = self.profile.as_ref().map(|_| Instant::now());
         ctx.set_visuals(self.theme.visuals());
-        if !self.settings_open && !self.files_focused {
+        if !self.settings_open && self.rename_tab.is_none() && !self.files_focused {
             reserve_terminal_keyboard(ctx);
         }
         let poll_start = self.profile.as_ref().map(|_| Instant::now());
@@ -850,7 +850,7 @@ impl eframe::App for TerminalApp {
         let composing = ctx.input(|input| {
             ime_owns_keyboard(&self.tabs[self.active].focused().ime_preedit, &input.events)
         });
-        if !composing && !self.about_open && !self.settings_open {
+        if !composing && !self.about_open && !self.settings_open && self.rename_tab.is_none() {
             let split = ctx.input_mut(|input| {
                 let modifiers = egui::Modifiers::CTRL | egui::Modifiers::SHIFT;
                 if input.consume_key(modifiers, Key::O) {
@@ -876,6 +876,7 @@ impl eframe::App for TerminalApp {
                 self.select((self.active + if previous { count - 1 } else { 1 }) % count);
             }
         }
+        let mut rename = None;
         let mut selected = None;
         let mut closed = None;
         let mut new = false;
@@ -962,18 +963,23 @@ impl eframe::App for TerminalApp {
                     ui.horizontal(|ui| {
                         for (index, session) in self.tabs.iter().enumerate() {
                             ui.push_id(index, |ui| {
-                                if ui
+                                let response = ui
                                     .add_sized(
                                         [180.0, ui.spacing().interact_size.y],
                                         egui::Button::selectable(
                                             index == self.active,
-                                            format!("{}: {}", index + 1, session.focused().title),
+                                            format!("{}: {}", index + 1, session.title()),
                                         )
                                         .truncate(),
                                     )
-                                    .on_hover_text(&session.focused().title)
-                                    .clicked()
-                                {
+                                    .on_hover_text(session.title());
+                                response.context_menu(|ui| {
+                                    if ui.button("Rename Tab…").clicked() {
+                                        rename = Some(session.id);
+                                        ui.close();
+                                    }
+                                });
+                                if response.clicked() {
                                     selected = Some(index);
                                 }
                                 if ui.small_button("×").on_hover_text("Close tab").clicked() {
@@ -988,6 +994,10 @@ impl eframe::App for TerminalApp {
                 ui.colored_label(self.theme.palette(1), error);
             }
         });
+        let rename_started = rename.is_some();
+        if let Some(id) = rename {
+            self.begin_rename_tab(id);
+        }
         if let Some(index) = selected {
             self.select(index);
         }
@@ -1001,11 +1011,7 @@ impl eframe::App for TerminalApp {
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
             return;
         }
-        update_window_title(
-            ctx,
-            &mut self.window_title,
-            &self.tabs[self.active].focused().title,
-        );
+        update_window_title(ctx, &mut self.window_title, self.tabs[self.active].title());
         if let Some(direction) = split {
             self.split_pane(direction);
         }
@@ -1101,6 +1107,30 @@ impl eframe::App for TerminalApp {
                 self.about_open = false;
             }
         }
+        let renaming = self.rename_tab.is_some();
+        if let Some((id, draft)) = &mut self.rename_tab {
+            let modal = egui::Modal::new(egui::Id::new(("rename-tab", *id))).show(ctx, |ui| {
+                ui.set_width(320.0);
+                ui.heading("Rename Tab");
+                let response =
+                    ui.add(egui::TextEdit::singleline(draft).desired_width(f32::INFINITY));
+                if rename_started {
+                    response.request_focus();
+                }
+                ui.label("Leave empty to restore the automatic title.");
+                let enter =
+                    ui.input_mut(|input| input.consume_key(egui::Modifiers::NONE, Key::Enter));
+                let (save, cancel) = ui
+                    .horizontal(|ui| (ui.button("Save").clicked(), ui.button("Cancel").clicked()))
+                    .inner;
+                (save || enter, cancel)
+            });
+            if modal.inner.1 || modal.should_close() {
+                self.rename_tab = None;
+            } else if modal.inner.0 {
+                self.finish_rename_tab();
+            }
+        }
         egui::TopBottomPanel::bottom("status").show(ctx, |ui| {
             let session = self.tabs[self.active].focused_mut();
             ui.horizontal(|ui| {
@@ -1124,7 +1154,7 @@ impl eframe::App for TerminalApp {
                         ctx.memory_mut(|m| m.surrender_focus(id));
                     }
                 }
-                self.tabs[self.active].show(ctx, ui, !self.files_focused);
+                self.tabs[self.active].show(ctx, ui, !self.files_focused && !renaming);
             });
         // PTY output wakes the UI directly. Keep a low-frequency fallback for
         // child exit, asynchronous paste results and Windows clipboard IPC.

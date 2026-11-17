@@ -257,6 +257,8 @@ pub(super) struct TerminalUi {
     focused: bool,
     hover: Option<(usize, TerminalLink)>,
     context_menu: bool,
+    tab_context: Option<u64>,
+    rename_input: gpui::Entity<InputState>,
     font_select: gpui::Entity<SelectState<SearchableVec<String>>>,
     font_size: gpui::Entity<InputState>,
     fallback_selects: Vec<gpui::Entity<SelectState<SearchableVec<String>>>>,
@@ -454,6 +456,21 @@ impl TerminalUi {
                 cx.notify();
             }
         }));
+        let rename_input = cx.new(|cx| InputState::new(window, cx));
+        settings_subscriptions.push(cx.subscribe_in(
+            &rename_input,
+            window,
+            |this, input, event, window, cx| {
+                if let Some((_, draft)) = &mut this.app.rename_tab {
+                    *draft = input.read(cx).value().to_string();
+                    if matches!(event, InputEvent::PressEnter { .. }) {
+                        this.app.finish_rename_tab();
+                        this.focus.focus(window);
+                    }
+                    cx.notify();
+                }
+            },
+        ));
         let files_focus = cx.focus_handle();
         let files_split = cx.new(|_| gpui_component::resizable::ResizableState::default());
         Self {
@@ -478,6 +495,8 @@ impl TerminalUi {
             focused: true,
             hover: None,
             context_menu: false,
+            tab_context: None,
+            rename_input,
             font_select,
             font_size,
             fallback_selects: Vec::new(),
@@ -602,6 +621,8 @@ impl TerminalUi {
         self.app.settings_open
             || self.app.about_open
             || self.context_menu
+            || self.tab_context.is_some()
+            || self.app.rename_tab.is_some()
             || self.menu.is_some()
             || self.viewer_open()
     }
@@ -812,6 +833,8 @@ impl TerminalUi {
                 self.app.settings_open = false;
                 self.app.about_open = false;
                 self.context_menu = false;
+                self.tab_context = None;
+                self.app.rename_tab = None;
                 self.menu = None;
                 self.focus.focus(window);
                 cx.notify();
@@ -1907,7 +1930,7 @@ impl Render for TerminalUi {
         if self.shutting_down {
             return div().size_full().child("Closing…").into_any_element();
         }
-        let title = self.app.tabs[self.app.active].focused().title.clone();
+        let title = self.app.tabs[self.app.active].title().to_owned();
         if title != self.app.window_title {
             window.set_window_title(&title);
             self.app.window_title = title;
@@ -1994,9 +2017,22 @@ impl Render for TerminalUi {
             .overflow_x_scroll()
             .flex_shrink_0();
         for (index, tab) in self.app.tabs.iter().enumerate() {
+            let tab_id = tab.id;
             tabs = tabs.child(
                 div()
                     .id(("tab", index))
+                    .on_mouse_down(
+                        MouseButton::Right,
+                        cx.listener(move |this, event: &MouseDownEvent, window, cx| {
+                            this.menu = None;
+                            this.context_menu = false;
+                            this.tab_context = Some(tab_id);
+                            this.context_anchor = event.position;
+                            this.focus.focus(window);
+                            cx.stop_propagation();
+                            cx.notify();
+                        }),
+                    )
                     .flex()
                     .items_center()
                     .gap(px(8.))
@@ -2019,7 +2055,7 @@ impl Render for TerminalUi {
                             .child(div().overflow_hidden().text_ellipsis().child(format!(
                                 "{}: {}",
                                 index + 1,
-                                tab.focused().title
+                                tab.title()
                             )))
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 this.select_tab(index, cx);
@@ -2352,7 +2388,7 @@ impl Render for TerminalUi {
                     .child(items),
             );
         }
-        if self.context_menu {
+        if self.context_menu || self.tab_context.is_some() {
             let pane = self.app.tabs[self.app.active].focused();
             let can_copy = pane
                 .term
@@ -2368,7 +2404,7 @@ impl Render for TerminalUi {
                     .y
                     .min((viewport.height - px(50.)).max(px(0.))),
             );
-            let items = div()
+            let mut items = div()
                 .id("context-menu")
                 .occlude()
                 .absolute()
@@ -2385,34 +2421,55 @@ impl Render for TerminalUi {
                 .shadow_md()
                 .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                 .on_mouse_down(MouseButton::Right, |_, _, cx| cx.stop_propagation())
-                .on_mouse_down(MouseButton::Middle, |_, _, cx| cx.stop_propagation())
-                .child(self.menu_button_enabled(
-                    "menu-copy",
-                    "Copy",
-                    can_copy,
+                .on_mouse_down(MouseButton::Middle, |_, _, cx| cx.stop_propagation());
+            if let Some(tab_id) = self.tab_context {
+                items = items.child(self.menu_button(
+                    "rename-tab",
+                    "Rename Tab…",
                     cx,
-                    |this, window, _| {
-                        this.session().copy_selection();
-                        this.context_menu = false;
-                        this.focus.focus(window);
-                    },
-                ))
-                .child(self.menu_button_enabled(
-                    "menu-paste",
-                    "Paste",
-                    can_paste,
-                    cx,
-                    |this, window, _| {
-                        this.session().paste();
-                        this.context_menu = false;
-                        this.focus.focus(window);
+                    move |this, window, cx| {
+                        this.tab_context = None;
+                        this.app.begin_rename_tab(tab_id);
+                        if let Some((_, title)) = &this.app.rename_tab {
+                            let title = title.clone();
+                            this.rename_input.update(cx, |input, cx| {
+                                input.set_value(title, window, cx);
+                                input.focus(window, cx);
+                            });
+                        }
                     },
                 ));
+            } else {
+                items = items
+                    .child(self.menu_button_enabled(
+                        "menu-copy",
+                        "Copy",
+                        can_copy,
+                        cx,
+                        |this, window, _| {
+                            this.session().copy_selection();
+                            this.context_menu = false;
+                            this.focus.focus(window);
+                        },
+                    ))
+                    .child(self.menu_button_enabled(
+                        "menu-paste",
+                        "Paste",
+                        can_paste,
+                        cx,
+                        |this, window, _| {
+                            this.session().paste();
+                            this.context_menu = false;
+                            this.focus.focus(window);
+                        },
+                    ));
+            }
             let dismiss = |this: &mut Self,
                            _: &MouseDownEvent,
                            window: &mut Window,
                            cx: &mut ViewContext<Self>| {
                 this.context_menu = false;
+                this.tab_context = None;
                 this.focus.focus(window);
                 cx.stop_propagation();
                 cx.notify();
@@ -2452,6 +2509,58 @@ impl Render for TerminalUi {
                         cx.listener(|this, _, _, cx| {
                             this.app.settings_open = false;
                             this.app.about_open = false;
+                            cx.notify();
+                        }),
+                    )
+                    .child(panel),
+            );
+        }
+        if self.app.rename_tab.is_some() {
+            let panel = div()
+                .w(px(360.))
+                .max_w_full()
+                .p(px(16.))
+                .flex()
+                .flex_col()
+                .gap(px(12.))
+                .bg(theme.surface())
+                .border_1()
+                .border_color(theme.border())
+                .rounded(px(6.))
+                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                .child("Rename Tab")
+                .child(Input::new(&self.rename_input))
+                .child("Leave empty to restore the automatic title.")
+                .child(
+                    div()
+                        .flex()
+                        .gap(px(8.))
+                        .child(self.button("save-tab-name", "Save", cx, |this, window, _| {
+                            this.app.finish_rename_tab();
+                            this.focus.focus(window);
+                        }))
+                        .child(
+                            self.button("cancel-tab-name", "Cancel", cx, |this, window, _| {
+                                this.app.rename_tab = None;
+                                this.focus.focus(window);
+                            }),
+                        ),
+                );
+            root = root.child(
+                div()
+                    .absolute()
+                    .inset_0()
+                    .occlude()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .p(px(8.))
+                    .bg(gpui::rgba(0x00000066))
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|this, _, window, cx| {
+                            this.app.rename_tab = None;
+                            this.focus.focus(window);
                             cx.notify();
                         }),
                     )
