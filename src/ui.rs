@@ -359,7 +359,9 @@ impl TerminalUi {
             InputState::new(window, cx)
                 .multi_line(true)
                 .rows(4)
-                .placeholder("NAME=value\nANOTHER_NAME=value")
+                // gpui-component 0.5 reuses the full placeholder run length for
+                // each line; a multiline placeholder panics in Windows DirectWrite.
+                .placeholder("NAME=value")
                 .default_value(app.shell_settings.environment.clone())
         });
         let git_message = cx.new(|cx| {
