@@ -266,6 +266,8 @@ pub(super) struct TerminalUi {
     font_chain_subscriptions: Vec<gpui::Subscription>,
     shell_select: gpui::Entity<SelectState<SearchableVec<ShellChoice>>>,
     shell_program: gpui::Entity<InputState>,
+    shell_environment: gpui::Entity<InputState>,
+    shell_environment_error: Option<String>,
     _settings_subscriptions: Vec<gpui::Subscription>,
     menu: Option<Menu>,
     context_anchor: UiPoint<Pixels>,
@@ -352,6 +354,13 @@ impl TerminalUi {
         });
         let shell_program = cx.new(|cx| {
             InputState::new(window, cx).default_value(app.shell_settings.program.clone())
+        });
+        let shell_environment = cx.new(|cx| {
+            InputState::new(window, cx)
+                .multi_line(true)
+                .rows(4)
+                .placeholder("NAME=value\nANOTHER_NAME=value")
+                .default_value(app.shell_settings.environment.clone())
         });
         let git_message = cx.new(|cx| {
             InputState::new(window, cx)
@@ -447,6 +456,22 @@ impl TerminalUi {
                 }
             }),
         ];
+        settings_subscriptions.push(cx.subscribe(&shell_environment, |this, input, event, cx| {
+            if matches!(event, InputEvent::Change) {
+                let text = input.read(cx).value().to_string();
+                match settings::parse_shell_environment(&text) {
+                    Ok(_) => {
+                        this.shell_environment_error = None;
+                        if this.app.shell_settings.environment != text {
+                            this.app.shell_settings.environment = text;
+                            this.apply_settings();
+                        }
+                    }
+                    Err(error) => this.shell_environment_error = Some(error.to_string()),
+                }
+                cx.notify();
+            }
+        }));
         settings_subscriptions.push(cx.subscribe(&git_message, |this, input, event, cx| {
             if matches!(event, InputEvent::Change)
                 && this.git_message_repo.as_ref() == this.app.git.draft_key()
@@ -504,6 +529,8 @@ impl TerminalUi {
             font_chain_subscriptions: Vec::new(),
             shell_select,
             shell_program,
+            shell_environment,
+            shell_environment_error: None,
             _settings_subscriptions: settings_subscriptions,
             menu: None,
             context_anchor: point(px(0.), px(0.)),
@@ -744,10 +771,8 @@ impl TerminalUi {
                 match result {
                     Ok(Ok(Some(paths))) => {
                         if let Some(path) = paths.first() {
-                            this.app.shell_settings = settings::ShellSettings {
-                                mode: settings::ShellMode::Program,
-                                program: path.to_string_lossy().into_owned(),
-                            };
+                            this.app.shell_settings.mode = settings::ShellMode::Program;
+                            this.app.shell_settings.program = path.to_string_lossy().into_owned();
                             this.shell_program.update(cx, |input, cx| {
                                 input.set_value(
                                     this.app.shell_settings.program.clone(),
@@ -783,6 +808,9 @@ impl TerminalUi {
         self.shell_program.update(cx, |input, cx| {
             input.set_value(self.app.shell_settings.program.clone(), window, cx)
         });
+        self.shell_environment_error = None;
+        self.shell_environment
+            .update(cx, |input, cx| input.set_value("", window, cx));
         apply_component_theme(self.app.theme, Some(window), cx);
         let names = available_font_families(cx, &self.app.font_settings.family);
         let selected = names
@@ -2997,6 +3025,21 @@ impl TerminalUi {
                             ),
                     )
                 },
+            )
+            .child(divider())
+            .child(
+                row()
+                    .child(description(
+                        "Environment Variables",
+                        "One NAME=value per line. Applies to new local terminals. Values are literal.",
+                    ))
+                    .child(
+                        div().w(px(320.)).child(
+                            Input::new(&self.shell_environment).small().h(px(100.)),
+                        ).when_some(self.shell_environment_error.clone(), |element, error| {
+                            element.child(div().mt(px(4.)).text_color(gpui::rgb(0xd14343)).child(error))
+                        }),
+                    ),
             )
             .child(divider())
             .child(div().mt(px(20.)).opacity(0.6).child("APPEARANCE"))

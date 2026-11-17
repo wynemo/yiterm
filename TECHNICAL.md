@@ -42,12 +42,28 @@ Linux/macOS 还扫描 `/bin`、`/usr/bin`、`/usr/local/bin`，并读取 `$SHELL
 
 Windows 选择 `git-bash.exe` 或 `mintty.exe` 时，会查找同一安装目录下的 `bash.exe`，在 YiTerm 内启动 Bash；找不到时显示错误并提示直接选择 `bash.exe`。它们自己的终端窗口、主题和启动参数不用于 YiTerm。
 
+在 **Settings → Environment Variables** 中逐行添加 `名称=值`，例如：
+
+```text
+HTTP_PROXY=http://127.0.0.1:7890
+APP_ENV=development
+EMPTY_VALUE=
+```
+
+变量名使用字母、数字和下划线，首字符不能是数字；空行忽略，重复变量以后面的值为准。值可包含空格和 `=`，按原文传入，无需引号，也不展开 `$PATH`、`%PATH%` 或执行命令。格式错误会显示行号并保留此前有效设置。内容自动以明文保存在配置文件中；清空输入框可移除全部自定义变量，Reset Defaults 也会清空。
+
+变量在新建本地 shell 进程之前注入，覆盖同名的继承变量；首次启动、新标签页和新分栏均生效，已有进程不变。指定 `--shell` 时仍应用这些变量；`--ssh` / `--mosh` 直连不应用，也不向远端发送。shell 启动配置可以再次修改这些值；YiTerm 保留自身设置的 `TERM=xterm-256color`，Windows 的 `YITERM_CONFIG_PATH` 仍指向当前配置文件。
+
 设置自动保存到当前配置文件（支持 `--config`），用于下次启动及之后新建的本地 tab / pane，已有会话继续运行。`--shell` 优先于此设置，`--ssh` 仍直接连接远端。配置示例：
 
 ```toml
 [shell]
 mode = "program" # default / program
 program = "pwsh.exe"
+environment = """
+HTTP_PROXY=http://127.0.0.1:7890
+APP_ENV=development
+"""
 ```
 
 Windows 默认启动 `powershell.exe`；macOS 默认使用 `$SHELL`。`--shell` 接收可执行文件路径，不接收整条命令。可以在窗口内直接输入 `ssh user@host`，进入远端后照常粘贴图片；也可使用 `--ssh` 直接启动远端会话。SSH 目标使用 `~/.ssh/config` 中的别名或 `user@host`；端口、密钥等写入 SSH config。远端需要 POSIX shell、可写的 `/tmp` 和 SFTP 支持。

@@ -270,6 +270,7 @@ pub enum ShellMode {
 pub struct ShellSettings {
     pub mode: ShellMode,
     pub program: String,
+    pub environment: String,
 }
 
 pub fn default_shell() -> String {
@@ -288,6 +289,7 @@ impl Default for ShellSettings {
         Self {
             mode: ShellMode::Default,
             program: default_shell(),
+            environment: String::new(),
         }
     }
 }
@@ -302,7 +304,12 @@ impl ShellSettings {
             !self.program.contains('\0'),
             "Shell program contains a null character"
         );
+        self.environment_variables()?;
         Ok(())
+    }
+
+    pub fn environment_variables(&self) -> Result<Vec<(&str, &str)>> {
+        parse_shell_environment(&self.environment)
     }
 
     pub fn executable(&self, cli: Option<&str>) -> Result<String> {
@@ -315,6 +322,34 @@ impl ShellSettings {
             ShellMode::Program => self.program.clone(),
         })
     }
+}
+
+/// Parse literal assignments without shell expansion or command execution.
+pub fn parse_shell_environment(text: &str) -> Result<Vec<(&str, &str)>> {
+    let mut variables = Vec::new();
+    for (index, line) in text.lines().enumerate() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let number = index + 1;
+        let (name, value) = line
+            .split_once('=')
+            .with_context(|| format!("Environment line {number}: expected NAME=value"))?;
+        let name = name.trim();
+        anyhow::ensure!(
+            !name.is_empty()
+                && name.bytes().enumerate().all(|(i, b)| {
+                    b == b'_' || b.is_ascii_alphabetic() || (i > 0 && b.is_ascii_digit())
+                }),
+            "Environment line {number}: name must match [A-Za-z_][A-Za-z0-9_]*"
+        );
+        anyhow::ensure!(
+            !value.contains(['\0', '\r']),
+            "Environment line {number}: value contains a null character or carriage return"
+        );
+        variables.push((name, value));
+    }
+    Ok(variables)
 }
 
 pub fn load_shell(path: &Path) -> Result<ShellSettings> {

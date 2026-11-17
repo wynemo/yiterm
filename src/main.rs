@@ -151,6 +151,7 @@ impl TerminalSession {
         args: &Args,
         warning: Option<&str>,
         directory: Option<&std::path::Path>,
+        shell_settings: &settings::ShellSettings,
     ) -> Result<Self> {
         let log_id = uuid::Uuid::new_v4();
         tracing::trace!(target: "yiterm::mouse",
@@ -186,16 +187,7 @@ impl TerminalSession {
         } else if let Some(host) = &args.mosh {
             integration.direct_mosh(host)?
         } else {
-            let shell = if let Some(shell) = &args.shell {
-                shell.clone()
-            } else {
-                let path = args
-                    .config
-                    .clone()
-                    .map(Ok)
-                    .unwrap_or_else(logging::config_path)?;
-                settings::load_shell(&path)?.executable(None)?
-            };
+            let shell = shell_settings.executable(args.shell.as_deref())?;
             #[cfg(unix)]
             {
                 session_shell = shell.clone();
@@ -205,6 +197,11 @@ impl TerminalSession {
         };
         if let Some(directory) = directory {
             command.cwd(directory);
+        }
+        if args.ssh.is_none() && args.mosh.is_none() {
+            for (name, value) in shell_settings.environment_variables()? {
+                command.env(name, value);
+            }
         }
         command.env("TERM", "xterm-256color");
         #[cfg(windows)]
@@ -934,12 +931,14 @@ impl TerminalApp {
     }
 
     fn new(args: Args, logging: &logging::Logging) -> Result<Self> {
-        let session = TerminalSession::new(&args, logging.warning.as_deref(), None)?;
         let path = args
             .config
             .clone()
             .map(Ok)
             .unwrap_or_else(logging::config_path)?;
+        let shell_settings = settings::load_shell(&path)?;
+        let session =
+            TerminalSession::new(&args, logging.warning.as_deref(), None, &shell_settings)?;
         let cursor_settings = settings::load(&path)?;
         let updater = yiterm::update::Controller::default();
         let update_failed = matches!(updater.state, yiterm::update::State::Failed(_));
@@ -962,7 +961,7 @@ impl TerminalApp {
             cursor_settings,
             font_settings: settings::load_font(&path)?,
             browser_settings: settings::load_browser(&path)?,
-            shell_settings: settings::load_shell(&path)?,
+            shell_settings,
             files_settings: settings::load_files(&path)?,
             git: Default::default(),
             #[cfg(target_os = "linux")]
@@ -1081,7 +1080,12 @@ impl TerminalApp {
         if args.ssh.is_none() && args.mosh.is_none() {
             args.shell = Some(self.shell_settings.executable(args.shell.as_deref())?);
         }
-        TerminalSession::new(&args, self.warning.as_deref(), directory)
+        TerminalSession::new(
+            &args,
+            self.warning.as_deref(),
+            directory,
+            &self.shell_settings,
+        )
     }
 
     fn new_tab(&mut self) {

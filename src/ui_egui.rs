@@ -1479,6 +1479,33 @@ fn show_shell_settings(ui: &mut egui::Ui, shell: &mut settings::ShellSettings) {
         }
         ctx.data_mut(|data| data.insert_temp(draft_id, draft));
     }
+    let environment_id = egui::Id::new("shell-environment-draft");
+    let mut environment = ctx.data_mut(|data| {
+        data.get_temp::<String>(environment_id)
+            .unwrap_or_else(|| shell.environment.clone())
+    });
+    settings_row(
+        ui,
+        "Environment Variables",
+        "One NAME=value per line. Applies to new local terminals. Values are literal.",
+        300.0,
+        |ui| {
+            ui.add(
+                egui::TextEdit::multiline(&mut environment)
+                    .id(environment_id)
+                    .desired_rows(4)
+                    .desired_width(290.0)
+                    .hint_text("NAME=value\nANOTHER_NAME=value"),
+            );
+        },
+    );
+    match settings::parse_shell_environment(&environment) {
+        Ok(_) => shell.environment = environment.clone(),
+        Err(error) => {
+            ui.colored_label(Color32::RED, error.to_string());
+        }
+    }
+    ctx.data_mut(|data| data.insert_temp(environment_id, environment));
 }
 
 fn show_settings(
@@ -1665,6 +1692,7 @@ fn show_settings(
                         ctx.data_mut(|data| {
                             data.remove::<String>(egui::Id::new("font-search"));
                             data.remove::<String>(egui::Id::new("shell-program-draft"));
+                            data.remove::<String>(egui::Id::new("shell-environment-draft"));
                             data.remove::<ShellFilePicker>(egui::Id::new("shell-file-picker"));
                         });
                     }

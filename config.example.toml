@@ -36,3 +36,7 @@ mode = "default"
 # Windows examples: powershell.exe, pwsh.exe, cmd.exe
 # macOS/Linux examples: /bin/zsh, /bin/bash
 # program = "powershell.exe"
+# Literal NAME=value assignments, one per line; applied to new local shells.
+# Empty lines are ignored. No quotes or variable expansion inside values.
+environment = """
+"""
