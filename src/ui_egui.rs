@@ -25,7 +25,7 @@ fn terminal_tab(
         .interact(
             Rect::from_min_max(rect.min, close_hitbox.left_bottom()),
             ui.id().with("select"),
-            egui::Sense::click(),
+            egui::Sense::click_and_drag(),
         )
         .on_hover_cursor(egui::CursorIcon::PointingHand)
         .on_hover_text(title);
@@ -977,6 +977,7 @@ impl eframe::App for TerminalApp {
         let mut rename = None;
         let mut selected = None;
         let mut closed = None;
+        let mut moved = None;
         let mut new = false;
         let mut split = None;
         let mut close_pane = false;
@@ -1073,6 +1074,24 @@ impl eframe::App for TerminalApp {
                                     index == self.active,
                                     self.theme,
                                 );
+                                if response.drag_started_by(egui::PointerButton::Primary) {
+                                    response.dnd_set_drag_payload(TabDrag(session.id));
+                                }
+                                let target = response.union(close.clone());
+                                if target
+                                    .dnd_hover_payload::<TabDrag>()
+                                    .is_some_and(|drag| drag.0 != session.id)
+                                {
+                                    ui.painter().rect_stroke(
+                                        target.rect,
+                                        9.,
+                                        egui::Stroke::new(1., self.theme.accent()),
+                                        egui::StrokeKind::Inside,
+                                    );
+                                }
+                                if let Some(drag) = target.dnd_release_payload::<TabDrag>() {
+                                    moved = Some((drag.0, session.id));
+                                }
                                 response.context_menu(|ui| {
                                     if ui.button("Rename Tab…").clicked() {
                                         rename = Some(session.id);
@@ -1112,6 +1131,10 @@ impl eframe::App for TerminalApp {
         }
         if let Some(index) = closed {
             self.close_tab(index);
+        }
+        if let Some((source, target)) = moved {
+            self.move_tab(source, target);
+            ctx.request_repaint();
         }
         if new {
             self.new_tab();

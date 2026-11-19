@@ -52,6 +52,35 @@ fn tab_terminal_icon(color: Rgba) -> impl IntoElement {
     .flex_shrink_0()
 }
 
+struct TabDragPreview {
+    title: SharedString,
+    theme: ThemeMode,
+}
+
+impl Render for TabDragPreview {
+    fn render(&mut self, _: &mut Window, _: &mut ViewContext<Self>) -> impl IntoElement {
+        div()
+            .flex()
+            .items_center()
+            .h(px(36.))
+            .gap(px(9.))
+            .px(px(12.))
+            .rounded(px(9.))
+            .border_1()
+            .border_color(self.theme.accent())
+            .bg(self.theme.tab_fill(true))
+            .text_color(self.theme.foreground())
+            .child(tab_terminal_icon(self.theme.tab_icon()))
+            .child(
+                div()
+                    .max_w(px(164.))
+                    .truncate()
+                    .text_size(px(16.))
+                    .child(self.title.clone()),
+            )
+    }
+}
+
 #[derive(Clone)]
 struct ShellChoice(String);
 
@@ -2159,6 +2188,7 @@ impl Render for TerminalUi {
         for (index, tab) in self.app.tabs.iter().enumerate() {
             let tab_id = tab.id;
             let title = SharedString::from(tab.title().to_owned());
+            let drag_title = title.clone();
             let active = index == self.app.active;
             tabs = tabs.child(
                 div()
@@ -2183,6 +2213,17 @@ impl Render for TerminalUi {
                     .border_color(theme.tab_border(active))
                     .bg(theme.tab_fill(active))
                     .hover(|d| d.bg(theme.tab_hover()))
+                    .drag_over(move |style, drag: &TabDrag, _, _| {
+                        if drag.0 == tab_id {
+                            style
+                        } else {
+                            style.bg(theme.tab_hover()).border_color(theme.accent())
+                        }
+                    })
+                    .on_drop(cx.listener(move |this, drag: &TabDrag, _, cx| {
+                        this.app.move_tab(drag.0, tab_id);
+                        cx.notify();
+                    }))
                     .pr(px(8.))
                     .flex_shrink_0()
                     .child(
@@ -2205,6 +2246,12 @@ impl Render for TerminalUi {
                             )
                             .tooltip(move |window, cx| {
                                 Tooltip::new(title.clone()).build(window, cx)
+                            })
+                            .on_drag(TabDrag(tab_id), move |_, _, _, cx| {
+                                cx.new(|_| TabDragPreview {
+                                    title: drag_title.clone(),
+                                    theme,
+                                })
                             })
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 this.select_tab(index, cx);

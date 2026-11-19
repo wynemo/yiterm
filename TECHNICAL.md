@@ -292,6 +292,8 @@ macOS / Linux 的 SSH 可通过 `cargo run --release -- --ssh user@host` 启动�
 
 顶部标签栏点击 **+** 新建 tab，点击标签切换，点击 **×** 关闭。每个 tab 有独立的 shell / SSH 会话、终端输出和粘贴状态，后台 tab 持续运行。新 tab 使用当前 Shell 设置；启动时指定的 `--shell` 或 `--ssh` 参数优先；关闭最后一个 tab 时退出窗口。
 
+按住标签标题左右拖动，在高亮的目标标签上松开，即可把拖动的标签移到该位置。排序时当前标签保持选中，会话继续运行。切换标签的快捷键按调整后的顺序导航。
+
 | 操作 | macOS | Windows / Linux |
 | --- | --- | --- |
 | 新建 tab | Cmd+T | Ctrl+Shift+T |

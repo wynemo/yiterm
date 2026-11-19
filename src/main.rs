@@ -899,6 +899,8 @@ impl PaneLayout {
         }
     }
 }
+struct TabDrag(u64);
+
 struct TerminalTab {
     files: files::FileState,
     id: u64,
@@ -1288,6 +1290,27 @@ impl TerminalApp {
         if was_active && !self.tabs.is_empty() {
             self.select(self.active);
         }
+    }
+
+    fn move_tab(&mut self, source_id: u64, target_id: u64) {
+        if source_id == target_id {
+            return;
+        }
+        let Some(source) = self.tabs.iter().position(|tab| tab.id == source_id) else {
+            return;
+        };
+        let Some(target) = self.tabs.iter().position(|tab| tab.id == target_id) else {
+            return;
+        };
+
+        let active_id = self.tabs[self.active].id;
+        let tab = self.tabs.remove(source);
+        self.tabs.insert(target, tab);
+        self.active = self
+            .tabs
+            .iter()
+            .position(|tab| tab.id == active_id)
+            .unwrap();
     }
 }
 
