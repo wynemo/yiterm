@@ -34,7 +34,9 @@ tracing-appender = "0.2"
 time = "0.3"
 russh = { version = "0.64.1", default-features = false, features = ["ring", "rsa"] }
 russh-sftp = "3.0.1"
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "process", "sync", "time"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "process", "signal", "sync", "time"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring"] }
 zeroize = "1"
 hmac = "0.13"
 sha1 = "0.11"
@@ -48,6 +50,9 @@ ocb3 = { version = "0.1", default-features = false, features = ["alloc", "zeroiz
 base64 = "0.22"
 flate2 = "1"
 vt100 = "0.18.1"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+rcgen = { version = "0.14.10", default-features = false, features = ["ring"] }
 
 [target.'cfg(any(target_os = "macos", windows))'.dependencies]
 gpui = { version = "=0.2.2", default-features = false, features = ["font-kit", "windows-manifest", "runtime_shaders"] }

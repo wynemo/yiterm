@@ -1,4 +1,5 @@
 #![cfg_attr(windows, windows_subsystem = "windows")]
+mod direct_share;
 mod files;
 mod git;
 mod kitty;
@@ -59,6 +60,12 @@ fn wake_ui() {}
 struct Args {
     #[command(flatten)]
     screen_share: yiterm::screen_share::Options,
+    /// Listen for YiTerm screen sharing on this IP:PORT (macOS only).
+    #[arg(long, requires = "share_screen", conflicts_with_all = ["share_list", "share_stats"])]
+    share_listen: Option<std::net::SocketAddr>,
+    /// View a Mac sharing its screen at this IP:PORT.
+    #[arg(long, conflicts_with_all = ["ssh", "mosh", "shell", "share_screen"])]
+    share_connect: Option<std::net::SocketAddr>,
     /// Connect directly to this OpenSSH host (remote shell must be POSIX).
     #[arg(long, conflicts_with = "mosh")]
     ssh: Option<String>,
@@ -74,6 +81,12 @@ struct Args {
     /// Local shell executable. Defaults to $SHELL or powershell.exe.
     #[arg(long)]
     shell: Option<String>,
+}
+
+impl Args {
+    fn local_shell(&self) -> bool {
+        self.ssh.is_none() && self.mosh.is_none() && self.share_connect.is_none()
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -124,9 +137,7 @@ struct TerminalSession {
     reported_directory: Option<Option<std::path::PathBuf>>,
     repaint: Arc<Repaint>,
     events: mpsc::Receiver<Event>,
-    writer: Box<dyn Write + Send>,
-    master: Box<dyn MasterPty + Send>,
-    child: Box<dyn portable_pty::Child + Send + Sync>,
+    transport: TerminalTransport,
     integration: ssh::Integration,
     #[cfg(windows)]
     clipboard_requests: yiterm::native_ssh::ClipboardRequests,
@@ -146,6 +157,32 @@ struct TerminalSession {
     status: String,
     size: Size,
 }
+enum TerminalTransport {
+    Pty {
+        writer: Box<dyn Write + Send>,
+        master: Box<dyn MasterPty + Send>,
+        child: Box<dyn portable_pty::Child + Send + Sync>,
+    },
+    Direct(direct_share::Client),
+}
+
+enum TerminalReader {
+    Pty(Box<dyn Read + Send>),
+    Direct(tokio::sync::mpsc::Receiver<Vec<u8>>),
+}
+
+impl TerminalReader {
+    fn next(&mut self, buffer: &mut [u8]) -> std::io::Result<Option<Vec<u8>>> {
+        match self {
+            Self::Pty(reader) => {
+                let n = reader.read(buffer)?;
+                Ok((n > 0).then(|| buffer[..n].to_vec()))
+            }
+            Self::Direct(reader) => Ok(reader.blocking_recv()),
+        }
+    }
+}
+
 impl TerminalSession {
     fn new(
         args: &Args,
@@ -160,7 +197,7 @@ impl TerminalSession {
         );
         tracing::info!(
             session_id = %log_id,
-            session_kind = if args.mosh.is_some() { "mosh" } else if args.ssh.is_some() { "ssh" } else { "local" },
+            session_kind = if args.share_connect.is_some() { "direct_share" } else if args.mosh.is_some() { "mosh" } else if args.ssh.is_some() { "ssh" } else { "local" },
             "Starting terminal session"
         );
         let integration = ssh::Integration::new(&std::env::current_exe()?)?;
@@ -170,56 +207,74 @@ impl TerminalSession {
             ssh::parse(std::slice::from_ref(host))?;
         }
         #[cfg(windows)]
-        let graphics_enabled = conpty::initialize()? && args.mosh.is_none();
+        let graphics_enabled =
+            args.share_connect.is_some() || (conpty::initialize()? && args.mosh.is_none());
         #[cfg(unix)]
         let graphics_enabled = args.mosh.is_none();
-        let pair = portable_pty::native_pty_system().openpty(PtySize {
+        let initial_size = PtySize {
             rows: 24,
             cols: 80,
             pixel_width: 0,
             pixel_height: 0,
-        })?;
+        };
         let mut directory_token = None;
         #[cfg(unix)]
         let mut session_shell = settings::default_shell();
-        let mut command = if let Some(host) = &args.ssh {
-            integration.direct(host)?
-        } else if let Some(host) = &args.mosh {
-            integration.direct_mosh(host)?
+        let (transport, mut reader) = if let Some(address) = args.share_connect {
+            let (client, reader) = direct_share::Client::start(address, initial_size)?;
+            (
+                TerminalTransport::Direct(client),
+                TerminalReader::Direct(reader),
+            )
         } else {
-            let shell = shell_settings.executable(args.shell.as_deref())?;
-            #[cfg(unix)]
+            let pair = portable_pty::native_pty_system().openpty(initial_size)?;
+            let mut command = if let Some(host) = &args.ssh {
+                integration.direct(host)?
+            } else if let Some(host) = &args.mosh {
+                integration.direct_mosh(host)?
+            } else {
+                let shell = shell_settings.executable(args.shell.as_deref())?;
+                #[cfg(unix)]
+                {
+                    session_shell = shell.clone();
+                }
+                directory_token = shell_directory::token_for(&shell);
+                integration.shell_with_directory(&shell, directory_token.as_deref())?
+            };
+            if let Some(directory) = directory {
+                command.cwd(directory);
+            }
+            if args.local_shell() {
+                for (name, value) in shell_settings.environment_variables()? {
+                    command.env(name, value);
+                }
+            }
+            command.env("TERM", "xterm-256color");
+            #[cfg(windows)]
             {
-                session_shell = shell.clone();
+                let path = args
+                    .config
+                    .clone()
+                    .map(Ok)
+                    .unwrap_or_else(logging::config_path)?;
+                command.env("YITERM_CONFIG_PATH", std::path::absolute(path)?);
             }
-            directory_token = shell_directory::token_for(&shell);
-            integration.shell_with_directory(&shell, directory_token.as_deref())?
+            let child = pair
+                .slave
+                .spawn_command(command)
+                .context("Could not start shell/ssh")?;
+            drop(pair.slave);
+            let reader = TerminalReader::Pty(pair.master.try_clone_reader()?);
+            let writer = pair.master.take_writer()?;
+            (
+                TerminalTransport::Pty {
+                    writer,
+                    master: pair.master,
+                    child,
+                },
+                reader,
+            )
         };
-        if let Some(directory) = directory {
-            command.cwd(directory);
-        }
-        if args.ssh.is_none() && args.mosh.is_none() {
-            for (name, value) in shell_settings.environment_variables()? {
-                command.env(name, value);
-            }
-        }
-        command.env("TERM", "xterm-256color");
-        #[cfg(windows)]
-        {
-            let path = args
-                .config
-                .clone()
-                .map(Ok)
-                .unwrap_or_else(logging::config_path)?;
-            command.env("YITERM_CONFIG_PATH", std::path::absolute(path)?);
-        }
-        let child = pair
-            .slave
-            .spawn_command(command)
-            .context("Could not start shell/ssh")?;
-        drop(pair.slave);
-        let mut reader = pair.master.try_clone_reader()?;
-        let writer = pair.master.take_writer()?;
         let (tx, output) = mpsc::sync_channel(64);
         let repaint = Arc::new(Repaint::new());
         let output_repaint = repaint.clone();
@@ -227,8 +282,8 @@ impl TerminalSession {
             let mut directories = shell_directory::Reports::new(directory_token);
             let mut buffer = [0; 16384];
             loop {
-                match reader.read(&mut buffer) {
-                    Ok(0) => {
+                match reader.next(&mut buffer) {
+                    Ok(None) => {
                         tracing::info!("PTY output closed");
                         break;
                     }
@@ -236,11 +291,11 @@ impl TerminalSession {
                         tracing::warn!(%error, "PTY read failed");
                         break;
                     }
-                    Ok(n) => {
-                        profiling::pty_read(n);
+                    Ok(Some(bytes)) => {
+                        profiling::pty_read(bytes.len());
                         let output = TerminalOutput {
-                            bytes: buffer[..n].to_vec(),
-                            directory: directories.observe(&buffer[..n]),
+                            directory: directories.observe(&bytes),
+                            bytes,
                         };
                         if tx.send(output).is_err() {
                             break;
@@ -252,21 +307,26 @@ impl TerminalSession {
             }
             wake_ui();
         });
+        let child_pid = match &transport {
+            TerminalTransport::Pty { child, .. } => child.process_id(),
+            TerminalTransport::Direct(_) => None,
+        };
+        tracing::info!(session_id = %log_id, ?child_pid, "Terminal session started");
         let (tx, events) = mpsc::channel();
         let size = Size { cols: 80, rows: 24 };
         let mut config = Config::default();
         config.default_cursor_style.blinking = true;
         let term = Term::new(config, &size, Listener(tx));
         let (paste_sender, paste_result) = mpsc::channel();
-        tracing::info!(session_id = %log_id, child_pid = ?child.process_id(), "Terminal session started");
         Ok(Self {
             #[cfg(unix)]
             git_session: Arc::new(git::Session::new(session_shell)),
             log_id,
             output_revision: 0,
             title: args
-                .ssh
-                .clone()
+                .share_connect
+                .map(|address| address.to_string())
+                .or_else(|| args.ssh.clone())
                 .or_else(|| args.mosh.clone())
                 .unwrap_or_else(|| "Terminal".into()),
             term,
@@ -278,9 +338,7 @@ impl TerminalSession {
             reported_directory: None,
             repaint,
             events,
-            writer,
-            master: pair.master,
-            child,
+            transport,
             integration,
             #[cfg(windows)]
             clipboard_requests,
@@ -303,12 +361,47 @@ impl TerminalSession {
             size,
         })
     }
+    fn send_input(&mut self, bytes: &[u8]) -> std::io::Result<()> {
+        let writer: &mut dyn Write = match &mut self.transport {
+            TerminalTransport::Pty { writer, .. } => writer,
+            TerminalTransport::Direct(client) => client,
+        };
+        writer.write_all(bytes)?;
+        writer.flush()
+    }
+
+    fn resize_transport(&self, size: PtySize) -> Result<()> {
+        match &self.transport {
+            TerminalTransport::Pty { master, .. } => master.resize(size),
+            TerminalTransport::Direct(client) => {
+                client.resize(size);
+                Ok(())
+            }
+        }
+    }
+
+    fn is_direct_share(&self) -> bool {
+        matches!(self.transport, TerminalTransport::Direct(_))
+    }
+
+    fn process_id(&self) -> Option<u32> {
+        match &self.transport {
+            TerminalTransport::Pty { child, .. } => child.process_id(),
+            TerminalTransport::Direct(_) => None,
+        }
+    }
+
+    fn close_transport(&mut self) {
+        match &mut self.transport {
+            TerminalTransport::Pty { child, .. } => {
+                let _ = child.kill();
+            }
+            TerminalTransport::Direct(client) => client.close(),
+        }
+    }
+
     fn write(&mut self, bytes: &[u8]) {
-        if let Err(error) = self
-            .writer
-            .write_all(bytes)
-            .and_then(|_| self.writer.flush())
-        {
+        if let Err(error) = self.send_input(bytes) {
             tracing::error!(%error, "PTY write failed");
             self.status = error.to_string();
         }
@@ -330,11 +423,7 @@ impl TerminalSession {
             self.size.rows,
             mouse::hex(report)
         );
-        match self
-            .writer
-            .write_all(report)
-            .and_then(|_| self.writer.flush())
-        {
+        match self.send_input(report) {
             Ok(()) => tracing::trace!(target: "yiterm::mouse", "write_ok"),
             Err(error) => {
                 tracing::error!(%error, "PTY mouse write failed");
@@ -349,7 +438,8 @@ impl TerminalSession {
         self.paste_busy = true;
         self.status = "Reading clipboard / uploading image…".into();
         let tx = self.paste_sender.clone();
-        let root = self.child.process_id();
+        let direct = self.is_direct_share();
+        let root = self.process_id();
         let group = self.foreground_group();
         let scp = self.integration.real_scp.clone();
         let ssh_context = self.integration.detection_context();
@@ -358,6 +448,13 @@ impl TerminalSession {
             tracing::debug!("Clipboard paste started");
             let result = (|| -> Result<PasteResult> {
                 let mut clipboard = arboard::Clipboard::new()?;
+                if direct {
+                    return Ok(PasteResult {
+                        text: clipboard.get_text().context("Clipboard has no text")?,
+                        target: None,
+                        image_group: None,
+                    });
+                }
                 let path = if let Ok(image) = clipboard.get_image() {
                     paste::save_image(image)?
                 } else {
@@ -405,7 +502,10 @@ impl TerminalSession {
     fn foreground_group(&self) -> Option<i32> {
         #[cfg(unix)]
         {
-            self.master.process_group_leader()
+            match &self.transport {
+                TerminalTransport::Pty { master, .. } => master.process_group_leader(),
+                TerminalTransport::Direct(_) => None,
+            }
         }
         #[cfg(not(unix))]
         {
@@ -423,7 +523,7 @@ impl TerminalSession {
 }
 impl Drop for TerminalSession {
     fn drop(&mut self) {
-        let _ = self.child.kill();
+        self.close_transport();
     }
 }
 
@@ -656,7 +756,9 @@ impl TerminalSession {
                 }
                 Event::Title(title) => self.title = title,
                 Event::ResetTitle => self.title = "Terminal".into(),
-                Event::ClipboardStore(ClipboardType::Clipboard, text) => {
+                Event::ClipboardStore(ClipboardType::Clipboard, text)
+                    if !self.is_direct_share() =>
+                {
                     if text.len() > MAX_OSC52_CLIPBOARD_BYTES {
                         self.pending_clipboard = None;
                         tracing::warn!(
@@ -705,7 +807,9 @@ impl TerminalSession {
                 }
             }
         }
-        if let Ok(Some(status)) = self.child.try_wait() {
+        if let TerminalTransport::Pty { child, .. } = &mut self.transport
+            && let Ok(Some(status)) = child.try_wait()
+        {
             tracing::info!(?status, "Terminal session exited");
             return false;
         }
@@ -877,6 +981,7 @@ struct TerminalApp {
     updater: yiterm::update::Controller,
     settings_open: bool,
     rename_tab: Option<(u64, String)>,
+    share_address: Option<String>,
     theme: ThemeMode,
     cursor_settings: CursorSettings,
     font_settings: settings::FontSettings,
@@ -917,12 +1022,7 @@ impl TerminalApp {
                     window_focused && tab_index == self.active && pane_index == tab.active;
                 if pane.reported_focus != Some(focused) {
                     let bytes: &[u8] = if focused { b"\x1b[I" } else { b"\x1b[O" };
-                    if pane
-                        .writer
-                        .write_all(bytes)
-                        .and_then(|_| pane.writer.flush())
-                        .is_ok()
-                    {
+                    if pane.send_input(bytes).is_ok() {
                         pane.reported_focus = Some(focused);
                     }
                 }
@@ -957,6 +1057,7 @@ impl TerminalApp {
             updater,
             settings_open: false,
             rename_tab: None,
+            share_address: None,
             theme: settings::load_theme(&path)?,
             cursor_settings,
             font_settings: settings::load_font(&path)?,
@@ -1013,8 +1114,8 @@ impl TerminalApp {
             tab.files.ensure_loaded();
             // All sidebars follow the active local terminal, including when
             // upgrading a configuration with the legacy follow flag disabled.
-            if self.args.ssh.is_none() && self.args.mosh.is_none() {
-                let pane = tab.focused();
+            let pane = tab.focused();
+            if self.args.ssh.is_none() && self.args.mosh.is_none() && !pane.is_direct_share() {
                 if let Some(directory) = pane.reported_directory.clone() {
                     // A prompt report is authoritative for PowerShell's logical
                     // location. Stop PID queries before applying it so a late
@@ -1031,7 +1132,7 @@ impl TerminalApp {
                     let pid = pane
                         .foreground_group()
                         .and_then(|pid| u32::try_from(pid).ok())
-                        .or_else(|| pane.child.process_id());
+                        .or_else(|| pane.process_id());
                     tab.files.follow_directory(pid);
                 }
             } else {
@@ -1077,7 +1178,8 @@ impl TerminalApp {
     }
     fn new_session(&self, directory: Option<&std::path::Path>) -> Result<TerminalSession> {
         let mut args = self.args.clone();
-        if args.ssh.is_none() && args.mosh.is_none() {
+        args.share_connect = None;
+        if args.local_shell() {
             args.shell = Some(self.shell_settings.executable(args.shell.as_deref())?);
         }
         TerminalSession::new(
@@ -1086,6 +1188,32 @@ impl TerminalApp {
             directory,
             &self.shell_settings,
         )
+    }
+
+    fn connect_share(&mut self) {
+        let Some(address) = self.share_address.take() else {
+            return;
+        };
+        let result = (|| -> Result<TerminalSession> {
+            let address: std::net::SocketAddr = address
+                .trim()
+                .parse()
+                .context("Enter an IP address and port, for example 192.168.1.20:9443")?;
+            let mut args = self.args.clone();
+            args.ssh = None;
+            args.mosh = None;
+            args.shell = None;
+            args.share_connect = Some(address);
+            TerminalSession::new(&args, None, None, &self.shell_settings)
+        })();
+        match result {
+            Ok(session) => {
+                self.tabs.push(TerminalTab::new(session));
+                self.select(self.tabs.len() - 1);
+                self.error = None;
+            }
+            Err(error) => self.error = Some(format!("{error:#}")),
+        }
     }
 
     fn new_tab(&mut self) {
@@ -1103,7 +1231,7 @@ impl TerminalApp {
     }
 
     fn split_pane(&mut self, direction: SplitDirection) {
-        let directory = if self.args.ssh.is_none() && self.args.mosh.is_none() {
+        let directory = if self.args.local_shell() {
             let pane = self.tabs[self.active].focused();
             match &pane.reported_directory {
                 // A non-filesystem PowerShell location must not fall back to
@@ -1113,7 +1241,7 @@ impl TerminalApp {
                     .foreground_group()
                     .and_then(|pid| u32::try_from(pid).ok())
                     .and_then(files::process_directory)
-                    .or_else(|| pane.child.process_id().and_then(files::process_directory)),
+                    .or_else(|| pane.process_id().and_then(files::process_directory)),
             }
         } else {
             None
@@ -1305,6 +1433,12 @@ fn main() -> Result<()> {
         return result;
     }
     let args = Args::parse();
+    if let Some(address) = args.share_listen {
+        #[cfg(target_os = "macos")]
+        return direct_share::host::run(address, &args.screen_share);
+        #[cfg(not(target_os = "macos"))]
+        anyhow::bail!("YiTerm direct sharing requires a macOS host ({address})");
+    }
     if args.screen_share.share_screen {
         return yiterm::screen_share::run(&args.screen_share);
     }

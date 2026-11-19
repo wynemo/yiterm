@@ -259,6 +259,11 @@ pub(super) struct TerminalUi {
     context_menu: bool,
     tab_context: Option<u64>,
     rename_input: gpui::Entity<InputState>,
+    share_input: gpui::Entity<InputState>,
+    #[cfg(target_os = "macos")]
+    share_host_dialog: bool,
+    #[cfg(target_os = "macos")]
+    share_host: Option<direct_share::host::Host>,
     font_select: gpui::Entity<SelectState<SearchableVec<String>>>,
     font_size: gpui::Entity<InputState>,
     fallback_selects: Vec<gpui::Entity<SelectState<SearchableVec<String>>>>,
@@ -498,6 +503,20 @@ impl TerminalUi {
                 }
             },
         ));
+        let share_input = cx.new(|cx| InputState::new(window, cx).placeholder("192.168.1.20:9443"));
+        settings_subscriptions.push(cx.subscribe_in(
+            &share_input,
+            window,
+            |this, input, event, window, cx| {
+                if let Some(address) = &mut this.app.share_address {
+                    *address = input.read(cx).value().to_string();
+                    if matches!(event, InputEvent::PressEnter { .. }) {
+                        this.submit_share(true, window);
+                    }
+                    cx.notify();
+                }
+            },
+        ));
         let files_focus = cx.focus_handle();
         let files_split = cx.new(|_| gpui_component::resizable::ResizableState::default());
         Self {
@@ -524,6 +543,11 @@ impl TerminalUi {
             context_menu: false,
             tab_context: None,
             rename_input,
+            share_input,
+            #[cfg(target_os = "macos")]
+            share_host_dialog: false,
+            #[cfg(target_os = "macos")]
+            share_host: None,
             font_select,
             font_size,
             fallback_selects: Vec::new(),
@@ -572,10 +596,20 @@ impl TerminalUi {
         }
         let started = Instant::now();
         let mut changed = self.app.updater.poll();
+        #[cfg(target_os = "macos")]
+        if self
+            .share_host
+            .as_ref()
+            .is_some_and(|host| host.is_finished())
+        {
+            self.share_host = None;
+            self.app.error = Some("YiTerm sharing listener stopped".into());
+            changed = true;
+        }
         if matches!(self.app.updater.state, yiterm::update::State::Restarting) {
             for tab in &mut self.app.tabs {
                 for pane in &mut tab.panes {
-                    let _ = pane.child.kill();
+                    pane.close_transport();
                 }
             }
             #[cfg(windows)]
@@ -646,12 +680,61 @@ impl TerminalUi {
             profile.sample(self.focused, started.elapsed(), poll);
         }
     }
+    fn open_share_dialog(
+        &mut self,
+        hosting: bool,
+        window: &mut Window,
+        cx: &mut ViewContext<Self>,
+    ) {
+        self.menu = None;
+        #[cfg(target_os = "macos")]
+        {
+            self.share_host_dialog = hosting;
+        }
+        let address = if hosting { "0.0.0.0:9443" } else { "" };
+        self.app.share_address = Some(address.into());
+        self.share_input.update(cx, |input, cx| {
+            input.set_value(address, window, cx);
+            input.focus(window, cx);
+        });
+    }
+
+    fn submit_share(&mut self, _read_only: bool, window: &mut Window) {
+        #[cfg(target_os = "macos")]
+        if self.share_host_dialog {
+            let Some(address) = self.app.share_address.take() else {
+                return;
+            };
+            let result = (|| -> Result<_> {
+                let address = anyhow::Context::context(
+                    address.trim().parse(),
+                    "Enter a local IP address and port, for example 0.0.0.0:9443",
+                )?;
+                let mut options = self.app.args.screen_share.clone();
+                options.share_read_only = _read_only;
+                direct_share::host::Host::start(address, options)
+            })();
+            match result {
+                Ok(host) => {
+                    self.share_host = Some(host);
+                    self.app.error = None;
+                }
+                Err(error) => self.app.error = Some(format!("{error:#}")),
+            }
+            self.focus.focus(window);
+            return;
+        }
+        self.app.connect_share();
+        self.focus.focus(window);
+    }
+
     fn blocked(&self) -> bool {
         self.app.settings_open
             || self.app.about_open
             || self.context_menu
             || self.tab_context.is_some()
             || self.app.rename_tab.is_some()
+            || self.app.share_address.is_some()
             || self.menu.is_some()
             || self.viewer_open()
     }
@@ -865,6 +948,7 @@ impl TerminalUi {
                 self.context_menu = false;
                 self.tab_context = None;
                 self.app.rename_tab = None;
+                self.app.share_address = None;
                 self.menu = None;
                 self.focus.focus(window);
                 cx.notify();
@@ -991,7 +1075,7 @@ impl TerminalUi {
             );
             if cols != pane.size.cols || rows != pane.size.rows || pixels_changed {
                 let [pixel_width, pixel_height] = pane.graphics.pixels;
-                if let Err(error) = pane.master.resize(PtySize {
+                if let Err(error) = pane.resize_transport(PtySize {
                     cols: cols as u16,
                     rows: rows as u16,
                     pixel_width,
@@ -2005,7 +2089,18 @@ impl Render for TerminalUi {
                 this.menu = None;
             }));
         let sidebar_visible = self.app.files_settings.visible;
-        let menu = menu.child(div().flex_1()).child(
+        let menu = menu.child(div().flex_1());
+        #[cfg(target_os = "macos")]
+        let menu = if let Some(host) = &self.share_host {
+            menu.child(
+                div()
+                    .px(px(8.))
+                    .child(format!("Sharing on port {}", host.address.port())),
+            )
+        } else {
+            menu
+        };
+        let menu = menu.child(
             div()
                 .id("toggle-files")
                 .size(px(24.))
@@ -2371,6 +2466,35 @@ impl Render for TerminalUi {
                     );
             } else {
                 items = items.child(self.menu_button(
+                    "connect-yiterm",
+                    "Connect to YiTerm…",
+                    cx,
+                    |this, window, cx| {
+                        this.open_share_dialog(false, window, cx);
+                    },
+                ));
+                #[cfg(target_os = "macos")]
+                {
+                    items = if let Some(host) = &self.share_host {
+                        items.child(self.menu_button(
+                            "stop-yiterm-sharing",
+                            format!("Stop YiTerm Sharing ({})", host.address),
+                            cx,
+                            |this, _, _| {
+                                this.share_host = None;
+                                this.menu = None;
+                            },
+                        ))
+                    } else {
+                        items.child(self.menu_button(
+                            "start-yiterm-sharing",
+                            "Start YiTerm Sharing…",
+                            cx,
+                            |this, window, cx| this.open_share_dialog(true, window, cx),
+                        ))
+                    };
+                }
+                items = items.child(self.menu_button(
                     "open-log-file",
                     "Open Log File",
                     cx,
@@ -2545,6 +2669,66 @@ impl Render for TerminalUi {
                     .child(panel),
             );
         }
+        if self.app.share_address.is_some() {
+            #[cfg(target_os = "macos")]
+            let hosting = self.share_host_dialog;
+            #[cfg(not(target_os = "macos"))]
+            let hosting = false;
+            let mut actions = div().flex().gap(px(8.)).child(self.button(
+                "connect-share",
+                if hosting { "Allow Control" } else { "Connect" },
+                cx,
+                |this, window, _| this.submit_share(false, window),
+            ));
+            if hosting {
+                actions = actions.child(self.button(
+                    "view-only-share",
+                    "View Only",
+                    cx,
+                    |this, window, _| this.submit_share(true, window),
+                ));
+            }
+            actions =
+                actions.child(
+                    self.button("cancel-share", "Cancel", cx, |this, window, _| {
+                        this.app.share_address = None;
+                        this.focus.focus(window);
+                    }),
+                );
+            let panel = div()
+                .w(px(360.))
+                .max_w_full()
+                .p(px(16.))
+                .flex()
+                .flex_col()
+                .gap(px(12.))
+                .bg(theme.surface())
+                .border_1()
+                .border_color(theme.border())
+                .rounded(px(6.))
+                .child(if hosting {
+                    "Listen for YiTerm connections"
+                } else {
+                    "Connect to YiTerm"
+                })
+                .child(Input::new(&self.share_input))
+                .when(hosting, |panel| {
+                    panel.child("Devices that can reach this port can connect.")
+                })
+                .child(actions);
+            root = root.child(
+                div()
+                    .absolute()
+                    .inset_0()
+                    .occlude()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .p(px(8.))
+                    .bg(gpui::rgba(0x00000066))
+                    .child(panel),
+            );
+        }
         if self.app.rename_tab.is_some() {
             let panel = div()
                 .w(px(360.))
@@ -2656,7 +2840,7 @@ impl TerminalUi {
             self.app.toggle_files();
         }
         let pane = self.session();
-        let root = pane.child.process_id();
+        let root = pane.process_id();
         let group = pane.foreground_group();
         let ssh_context = pane.integration.detection_context();
         let tab_id = self.app.tabs[self.app.active].id;
@@ -2819,7 +3003,7 @@ impl TerminalUi {
     fn menu_button(
         &self,
         id: &'static str,
-        label: &'static str,
+        label: impl Into<gpui::SharedString>,
         cx: &ViewContext<Self>,
         action: impl Fn(&mut Self, &mut Window, &mut ViewContext<Self>) + 'static,
     ) -> impl IntoElement {
@@ -2828,7 +3012,7 @@ impl TerminalUi {
     fn menu_button_enabled(
         &self,
         id: &'static str,
-        label: &'static str,
+        label: impl Into<gpui::SharedString>,
         enabled: bool,
         cx: &ViewContext<Self>,
         action: impl Fn(&mut Self, &mut Window, &mut ViewContext<Self>) + 'static,
@@ -2844,7 +3028,7 @@ impl TerminalUi {
                 d.cursor_pointer().hover(|d| d.bg(self.app.theme.border()))
             })
             .when(!enabled, |d| d.opacity(0.4))
-            .child(label)
+            .child(label.into())
             .on_click(cx.listener(move |this, _, window, cx| {
                 if enabled {
                     action(this, window, cx);

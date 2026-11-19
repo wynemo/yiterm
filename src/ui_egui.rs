@@ -145,7 +145,7 @@ impl TerminalSession {
             size.rows,
         );
         if size.cols != self.size.cols || size.rows != self.size.rows || pixels_changed {
-            if let Err(error) = self.master.resize(PtySize {
+            if let Err(error) = self.resize_transport(PtySize {
                 cols: size.cols as u16,
                 rows: size.rows as u16,
                 pixel_width: self.graphics.pixels[0],
@@ -804,7 +804,7 @@ impl eframe::App for TerminalApp {
         if matches!(self.updater.state, yiterm::update::State::Restarting) {
             for tab in &mut self.tabs {
                 for pane in &mut tab.panes {
-                    let _ = pane.child.kill();
+                    pane.close_transport();
                 }
             }
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
@@ -812,7 +812,11 @@ impl eframe::App for TerminalApp {
         }
         let profile_start = self.profile.as_ref().map(|_| Instant::now());
         ctx.set_visuals(self.theme.visuals());
-        if !self.settings_open && self.rename_tab.is_none() && !self.files_focused {
+        if !self.settings_open
+            && self.rename_tab.is_none()
+            && self.share_address.is_none()
+            && !self.files_focused
+        {
             reserve_terminal_keyboard(ctx);
         }
         let poll_start = self.profile.as_ref().map(|_| Instant::now());
@@ -829,7 +833,10 @@ impl eframe::App for TerminalApp {
             }
         }
         self.report_terminal_focus(
-            ctx.input(|input| input.focused) && !self.settings_open && !self.files_focused,
+            ctx.input(|input| input.focused)
+                && !self.settings_open
+                && !self.files_focused
+                && self.share_address.is_none(),
         );
         self.poll_files(true);
         let profile_poll = poll_start.map(|start| start.elapsed());
@@ -850,7 +857,12 @@ impl eframe::App for TerminalApp {
         let composing = ctx.input(|input| {
             ime_owns_keyboard(&self.tabs[self.active].focused().ime_preedit, &input.events)
         });
-        if !composing && !self.about_open && !self.settings_open && self.rename_tab.is_none() {
+        if !composing
+            && !self.about_open
+            && !self.settings_open
+            && self.rename_tab.is_none()
+            && self.share_address.is_none()
+        {
             let split = ctx.input_mut(|input| {
                 let modifiers = egui::Modifiers::CTRL | egui::Modifiers::SHIFT;
                 if input.consume_key(modifiers, Key::O) {
@@ -917,6 +929,10 @@ impl eframe::App for TerminalApp {
                     }
                 });
                 ui.menu_button("Tools", |ui| {
+                    if ui.button("Connect to YiTerm…").clicked() {
+                        self.share_address = Some(String::new());
+                        ui.close();
+                    }
                     if ui.button("Open Log File").clicked() {
                         if let Err(error) = logging::open_current_file(&self.log_directory) {
                             self.error = Some(format!("{error:#}"));
@@ -1107,7 +1123,34 @@ impl eframe::App for TerminalApp {
                 self.about_open = false;
             }
         }
-        let renaming = self.rename_tab.is_some();
+        let modal_open = self.rename_tab.is_some() || self.share_address.is_some();
+        if let Some(address) = &mut self.share_address {
+            let modal = egui::Modal::new(egui::Id::new("connect-yiterm")).show(ctx, |ui| {
+                ui.set_width(320.0);
+                ui.heading("Connect to YiTerm");
+                let input = ui.add(
+                    egui::TextEdit::singleline(address)
+                        .hint_text("192.168.1.20:9443")
+                        .desired_width(f32::INFINITY),
+                );
+                if address.is_empty() {
+                    input.request_focus();
+                }
+                let enter = input.lost_focus() && ui.input(|input| input.key_pressed(Key::Enter));
+                ui.horizontal(|ui| {
+                    (
+                        ui.button("Connect").clicked() || enter,
+                        ui.button("Cancel").clicked(),
+                    )
+                })
+                .inner
+            });
+            if modal.inner.1 || (modal.should_close() && !modal.inner.0) {
+                self.share_address = None;
+            } else if modal.inner.0 {
+                self.connect_share();
+            }
+        }
         if let Some((id, draft)) = &mut self.rename_tab {
             let modal = egui::Modal::new(egui::Id::new(("rename-tab", *id))).show(ctx, |ui| {
                 ui.set_width(320.0);
@@ -1154,7 +1197,7 @@ impl eframe::App for TerminalApp {
                         ctx.memory_mut(|m| m.surrender_focus(id));
                     }
                 }
-                self.tabs[self.active].show(ctx, ui, !self.files_focused && !renaming);
+                self.tabs[self.active].show(ctx, ui, !self.files_focused && !modal_open);
             });
         // PTY output wakes the UI directly. Keep a low-frequency fallback for
         // child exit, asynchronous paste results and Windows clipboard IPC.
