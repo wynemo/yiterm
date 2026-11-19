@@ -28,6 +28,26 @@ impl ThemeMode {
     pub fn border(self) -> Rgba {
         self.choose(0x363C46, 0xD0D7DE)
     }
+    pub fn tab_fill(self, active: bool) -> Rgba {
+        if active {
+            self.choose(0x30363E, 0xF6F6F6)
+        } else {
+            self.surface()
+        }
+    }
+    pub fn tab_border(self, active: bool) -> Rgba {
+        if active {
+            self.choose(0x58616E, 0xDEDEDE)
+        } else {
+            self.border()
+        }
+    }
+    pub fn tab_icon(self) -> Rgba {
+        self.choose(0x9DA7B5, 0x686D73)
+    }
+    pub fn tab_hover(self) -> Rgba {
+        self.choose(0x3A414B, 0xE7E8EA)
+    }
     pub fn accent(self) -> Rgba {
         self.choose(0x61AFEF, 0x0969DA)
     }

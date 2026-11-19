@@ -127,6 +127,7 @@ struct TerminalSession {
     git_session: Arc<git::Session>,
     log_id: uuid::Uuid,
     output_revision: u64,
+    default_title: String,
     title: String,
     term: Term<Listener>,
     parser: Processor,
@@ -218,6 +219,7 @@ impl TerminalSession {
             pixel_height: 0,
         };
         let mut directory_token = None;
+        let mut shell_title = None;
         #[cfg(unix)]
         let mut session_shell = settings::default_shell();
         let (transport, mut reader) = if let Some(address) = args.share_connect {
@@ -234,6 +236,10 @@ impl TerminalSession {
                 integration.direct_mosh(host)?
             } else {
                 let shell = shell_settings.executable(args.shell.as_deref())?;
+                shell_title = std::path::Path::new(&shell)
+                    .file_stem()
+                    .and_then(|name| name.to_str())
+                    .map(str::to_owned);
                 #[cfg(unix)]
                 {
                     session_shell = shell.clone();
@@ -318,17 +324,20 @@ impl TerminalSession {
         config.default_cursor_style.blinking = true;
         let term = Term::new(config, &size, Listener(tx));
         let (paste_sender, paste_result) = mpsc::channel();
+        let default_title = args
+            .share_connect
+            .map(|address| address.to_string())
+            .or_else(|| args.ssh.clone())
+            .or_else(|| args.mosh.clone())
+            .or(shell_title)
+            .unwrap_or_else(|| "Terminal".into());
         Ok(Self {
             #[cfg(unix)]
             git_session: Arc::new(git::Session::new(session_shell)),
             log_id,
             output_revision: 0,
-            title: args
-                .share_connect
-                .map(|address| address.to_string())
-                .or_else(|| args.ssh.clone())
-                .or_else(|| args.mosh.clone())
-                .unwrap_or_else(|| "Terminal".into()),
+            title: default_title.clone(),
+            default_title,
             term,
             parser: Processor::new(),
             graphics: kitty::Graphics::new(graphics_enabled, repaint.clone()),
@@ -755,7 +764,7 @@ impl TerminalSession {
                     self.write(text.as_bytes());
                 }
                 Event::Title(title) => self.title = title,
-                Event::ResetTitle => self.title = "Terminal".into(),
+                Event::ResetTitle => self.title.clone_from(&self.default_title),
                 Event::ClipboardStore(ClipboardType::Clipboard, text)
                     if !self.is_direct_share() =>
                 {

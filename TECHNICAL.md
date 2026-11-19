@@ -465,7 +465,7 @@ CI 固定使用 Rust `1.99.1`，避免浮动 `stable` 自动升级导致依赖�
 
 Cargo 按目标平台声明依赖：Linux 不编译 GPUI；Windows / macOS 不编译 eframe、egui-winit 或 glutin。Linux 使用 `vendor/eframe`、`vendor/egui-winit` 和 `vendor/glutin` 的原有补丁；所有平台共用 `vendor/alacritty_terminal` 的 Unicode 修复。发布包按平台携带相应界面后端许可证。
 
-界面保留 Settings / Pane / Tools / About 菜单、编号标签与 +、底部 Paste 与状态栏，以及原有设置和 About 弹窗。终端内容区直接显示终端网格，不再显示分栏标题和关闭按钮。GPUI 的 `EntityInputHandler` 接收文字与输入法预编辑 / 提交；Linux 保留 egui 的原有输入处理。
+界面保留 Settings / Pane / Tools / About 菜单、标签栏、底部 Paste 与状态栏，以及原有设置和 About 弹窗。圆角标签内显示终端图标、会话标题和关闭按钮，标签宽度随标题变化，长标题可悬停查看。新建本地会话的初始标题取自 Shell 程序名，终端可更新会话标题，也可通过右键菜单重命名标签。终端内容区直接显示终端网格，不再显示分栏标题和关闭按钮。GPUI 的 `EntityInputHandler` 接收文字与输入法预编辑 / 提交；Linux 保留 egui 的原有输入处理。
 
 本机只运行 macOS Release 构建，不安装 Windows 工具链或交叉编译 Windows / Linux。Windows 和 Linux 的实际构建分别交给对应 CI runner。
 

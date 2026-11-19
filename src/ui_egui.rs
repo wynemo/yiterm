@@ -1,6 +1,92 @@
 //! Linux egui/eframe interface, sharing the terminal model and sidebar design with GPUI.
 use super::*;
 use eframe::egui::{self, Color32, FontId, Key, Rect, Vec2};
+
+fn terminal_tab(
+    ui: &mut egui::Ui,
+    title: &str,
+    active: bool,
+    theme: ThemeMode,
+) -> (egui::Response, egui::Response) {
+    let mut job = egui::text::LayoutJob::simple_singleline(
+        title.to_owned(),
+        FontId::proportional(16.),
+        theme.foreground(),
+    );
+    job.wrap.max_width = 164.;
+    job.wrap.max_rows = 1;
+    let galley = ui.fonts_mut(|fonts| fonts.layout_job(job));
+    let (_, rect) = ui.allocate_space(Vec2::new(galley.size().x + 77., 36.));
+    let close_hitbox = Rect::from_min_max(
+        egui::pos2(rect.right() - 33., rect.top()),
+        rect.right_bottom(),
+    );
+    let body = ui
+        .interact(
+            Rect::from_min_max(rect.min, close_hitbox.left_bottom()),
+            ui.id().with("select"),
+            egui::Sense::click(),
+        )
+        .on_hover_cursor(egui::CursorIcon::PointingHand)
+        .on_hover_text(title);
+    let close = ui
+        .interact(close_hitbox, ui.id().with("close"), egui::Sense::click())
+        .on_hover_cursor(egui::CursorIcon::PointingHand)
+        .on_hover_text("Close tab");
+    let painter = ui.painter();
+    painter.rect(
+        rect,
+        9.,
+        if body.hovered() || close.hovered() {
+            theme.tab_hover()
+        } else {
+            theme.tab_fill(active)
+        },
+        egui::Stroke::new(1., theme.tab_border(active)),
+        egui::StrokeKind::Inside,
+    );
+
+    let icon = egui::pos2(rect.left() + 13., rect.center().y - 8.);
+    let stroke = egui::Stroke::new(1.5, theme.tab_icon());
+    painter.add(egui::Shape::line(
+        vec![
+            icon + Vec2::new(2., 3.5),
+            icon + Vec2::new(6.5, 8.),
+            icon + Vec2::new(2., 12.5),
+        ],
+        stroke,
+    ));
+    painter.line_segment(
+        [icon + Vec2::new(7.5, 13.5), icon + Vec2::new(14., 13.5)],
+        stroke,
+    );
+    let title_y = rect.center().y - galley.size().y / 2.;
+    painter.galley(
+        egui::pos2(rect.left() + 38., title_y),
+        galley,
+        theme.foreground(),
+    );
+
+    let center = egui::pos2(rect.right() - 21., rect.center().y);
+    let close_color = if close.hovered() {
+        painter.rect_filled(
+            Rect::from_center_size(center, Vec2::splat(24.)),
+            5.,
+            theme.tab_border(active),
+        );
+        theme.foreground()
+    } else {
+        theme.tab_icon()
+    };
+    for direction in [Vec2::new(4., 4.), Vec2::new(4., -4.)] {
+        painter.line_segment(
+            [center - direction, center + direction],
+            egui::Stroke::new(1.5, close_color),
+        );
+    }
+    (body, close)
+}
+
 fn terminal_cell_rect(origin: egui::Pos2, cell: Vec2, column: usize, row: usize) -> Rect {
     // Compute both sides from grid coordinates. Adding cell height to the top
     // can round differently from the next row's top at fractional line heights.
@@ -976,19 +1062,17 @@ impl eframe::App for TerminalApp {
             egui::ScrollArea::horizontal()
                 .id_salt("tabs")
                 .show(ui, |ui| {
+                    ui.add_space(4.);
                     ui.horizontal(|ui| {
+                        ui.spacing_mut().item_spacing.x = 8.;
                         for (index, session) in self.tabs.iter().enumerate() {
-                            ui.push_id(index, |ui| {
-                                let response = ui
-                                    .add_sized(
-                                        [180.0, ui.spacing().interact_size.y],
-                                        egui::Button::selectable(
-                                            index == self.active,
-                                            format!("{}: {}", index + 1, session.title()),
-                                        )
-                                        .truncate(),
-                                    )
-                                    .on_hover_text(session.title());
+                            ui.push_id(session.id, |ui| {
+                                let (response, close) = terminal_tab(
+                                    ui,
+                                    session.title(),
+                                    index == self.active,
+                                    self.theme,
+                                );
                                 response.context_menu(|ui| {
                                     if ui.button("Rename Tab…").clicked() {
                                         rename = Some(session.id);
@@ -998,13 +1082,22 @@ impl eframe::App for TerminalApp {
                                 if response.clicked() {
                                     selected = Some(index);
                                 }
-                                if ui.small_button("×").on_hover_text("Close tab").clicked() {
+                                if close.clicked() {
                                     closed = Some(index);
                                 }
                             });
                         }
-                        new = ui.button("+").on_hover_text("New tab").clicked();
+                        new = ui
+                            .add(
+                                egui::Button::new(egui::RichText::new("+").size(18.))
+                                    .min_size(Vec2::splat(28.))
+                                    .frame(false),
+                            )
+                            .on_hover_cursor(egui::CursorIcon::PointingHand)
+                            .on_hover_text("New tab")
+                            .clicked();
                     });
+                    ui.add_space(4.);
                 });
             if let Some(error) = &self.error {
                 ui.colored_label(self.theme.palette(1), error);

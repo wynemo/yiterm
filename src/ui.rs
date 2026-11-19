@@ -32,6 +32,26 @@ fn shell_menu_width(window: &Window) -> Pixels {
     px(520.).min((window.viewport_size().width - px(32.)).max(px(1.)))
 }
 
+fn tab_terminal_icon(color: Rgba) -> impl IntoElement {
+    canvas(
+        |_, _, _| (),
+        move |bounds, _, window, _| {
+            let at = |x, y| bounds.origin + point(px(x), px(y));
+            let mut path = gpui::PathBuilder::stroke(px(1.5));
+            path.move_to(at(2., 3.5));
+            path.line_to(at(6.5, 8.));
+            path.line_to(at(2., 12.5));
+            path.move_to(at(7.5, 13.5));
+            path.line_to(at(14., 13.5));
+            if let Ok(path) = path.build() {
+                window.paint_path(path, color);
+            }
+        },
+    )
+    .size(px(16.))
+    .flex_shrink_0()
+}
+
 #[derive(Clone)]
 struct ShellChoice(String);
 
@@ -2050,11 +2070,6 @@ impl Render for TerminalUi {
             self.app.window_title = title;
         }
         let theme = self.app.theme;
-        let button_bg = if theme == ThemeMode::Dark {
-            rgb(0x333333)
-        } else {
-            rgb(0xE8E8E8)
-        };
         let menu = div()
             .flex()
             .items_center()
@@ -2136,16 +2151,18 @@ impl Render for TerminalUi {
             .id("tabs")
             .flex()
             .items_center()
-            .h(px(24.))
+            .h(px(44.))
             .gap(px(8.))
-            .px(px(3.))
+            .px(px(10.))
             .overflow_x_scroll()
             .flex_shrink_0();
         for (index, tab) in self.app.tabs.iter().enumerate() {
             let tab_id = tab.id;
+            let title = SharedString::from(tab.title().to_owned());
+            let active = index == self.app.active;
             tabs = tabs.child(
                 div()
-                    .id(("tab", index))
+                    .id(("tab", tab_id))
                     .on_mouse_down(
                         MouseButton::Right,
                         cx.listener(move |this, event: &MouseDownEvent, window, cx| {
@@ -2160,28 +2177,35 @@ impl Render for TerminalUi {
                     )
                     .flex()
                     .items_center()
-                    .gap(px(8.))
+                    .h(px(36.))
+                    .rounded(px(9.))
+                    .border_1()
+                    .border_color(theme.tab_border(active))
+                    .bg(theme.tab_fill(active))
+                    .hover(|d| d.bg(theme.tab_hover()))
+                    .pr(px(8.))
                     .flex_shrink_0()
                     .child(
                         div()
-                            .id(("select-tab", index))
-                            .w(px(180.))
-                            .h(px(20.))
-                            .px(px(6.))
+                            .id("select-tab")
+                            .h_full()
+                            .pl(px(12.))
+                            .pr(px(6.))
                             .flex()
                             .items_center()
-                            .rounded(px(2.))
-                            .bg(if index == self.app.active {
-                                theme.selection()
-                            } else {
-                                button_bg
-                            })
+                            .gap(px(9.))
                             .cursor_pointer()
-                            .child(div().overflow_hidden().text_ellipsis().child(format!(
-                                "{}: {}",
-                                index + 1,
-                                tab.title()
-                            )))
+                            .child(tab_terminal_icon(theme.tab_icon()))
+                            .child(
+                                div()
+                                    .max_w(px(164.))
+                                    .truncate()
+                                    .text_size(px(16.))
+                                    .child(title.clone()),
+                            )
+                            .tooltip(move |window, cx| {
+                                Tooltip::new(title.clone()).build(window, cx)
+                            })
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 this.select_tab(index, cx);
                                 this.hover = None;
@@ -2190,16 +2214,20 @@ impl Render for TerminalUi {
                     )
                     .child(
                         div()
-                            .id(("close-tab", index))
-                            .h(px(18.))
-                            .w(px(16.))
+                            .id("close-tab")
+                            .size(px(24.))
                             .flex()
                             .items_center()
                             .justify_center()
-                            .rounded(px(2.))
-                            .bg(button_bg)
+                            .rounded(px(5.))
+                            .text_color(theme.tab_icon())
+                            .hover(|d| {
+                                d.bg(theme.tab_border(active))
+                                    .text_color(theme.foreground())
+                            })
                             .cursor_pointer()
-                            .child("×")
+                            .child(Icon::new(IconName::Close).size(px(14.)))
+                            .tooltip(|window, cx| Tooltip::new("Close tab").build(window, cx))
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 this.app.close_tab(index);
                                 this.hover = None;
@@ -2209,7 +2237,25 @@ impl Render for TerminalUi {
                     ),
             );
         }
-        tabs = tabs.child(self.button("new-tab", "+", cx, |this, _, cx| this.new_tab(cx)));
+        tabs = tabs.child(
+            div()
+                .id("new-tab")
+                .size(px(28.))
+                .flex_shrink_0()
+                .flex()
+                .items_center()
+                .justify_center()
+                .rounded(px(6.))
+                .text_color(theme.tab_icon())
+                .hover(|d| d.bg(theme.tab_hover()).text_color(theme.foreground()))
+                .cursor_pointer()
+                .child(Icon::new(IconName::Plus).size(px(16.)))
+                .tooltip(|window, cx| Tooltip::new("New tab").build(window, cx))
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.new_tab(cx);
+                    cx.notify();
+                })),
+        );
         let mut top = div()
             .flex()
             .flex_col()
