@@ -899,6 +899,12 @@ impl PaneLayout {
         }
     }
 }
+
+const TAB_HEIGHT: f32 = 26.;
+const TAB_MIN_WIDTH: f32 = 176.;
+const TAB_TITLE_MAX_WIDTH: f32 = 184.;
+const TAB_ACTIVE_LINE_HEIGHT: f32 = 2.;
+
 struct TabDrag(u64);
 
 struct TerminalTab {

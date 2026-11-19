@@ -8,15 +8,21 @@ fn terminal_tab(
     active: bool,
     theme: ThemeMode,
 ) -> (egui::Response, egui::Response) {
+    let title_color = if active {
+        theme.foreground()
+    } else {
+        theme.tab_icon()
+    };
     let mut job = egui::text::LayoutJob::simple_singleline(
         title.to_owned(),
         FontId::proportional(16.),
-        theme.foreground(),
+        title_color,
     );
-    job.wrap.max_width = 164.;
+    job.wrap.max_width = TAB_TITLE_MAX_WIDTH;
     job.wrap.max_rows = 1;
     let galley = ui.fonts_mut(|fonts| fonts.layout_job(job));
-    let (_, rect) = ui.allocate_space(Vec2::new(galley.size().x + 77., 36.));
+    let width = (galley.size().x + 77.).max(TAB_MIN_WIDTH);
+    let (_, rect) = ui.allocate_space(Vec2::new(width, TAB_HEIGHT));
     let close_hitbox = Rect::from_min_max(
         egui::pos2(rect.right() - 33., rect.top()),
         rect.right_bottom(),
@@ -34,38 +40,43 @@ fn terminal_tab(
         .on_hover_cursor(egui::CursorIcon::PointingHand)
         .on_hover_text("Close tab");
     let painter = ui.painter();
-    painter.rect(
+    let hovered = body.hovered() || close.hovered();
+    painter.rect_filled(
         rect,
-        9.,
-        if body.hovered() || close.hovered() {
+        0.,
+        if hovered {
             theme.tab_hover()
         } else {
             theme.tab_fill(active)
         },
-        egui::Stroke::new(1., theme.tab_border(active)),
-        egui::StrokeKind::Inside,
+    );
+    painter.vline(
+        rect.right() - 0.5,
+        rect.y_range(),
+        egui::Stroke::new(1., theme.border()),
+    );
+    let (line_height, line_color) = if active {
+        (TAB_ACTIVE_LINE_HEIGHT, theme.accent())
+    } else {
+        (1., theme.border())
+    };
+    painter.rect_filled(
+        Rect::from_min_size(rect.min, Vec2::new(rect.width() - 1., line_height)),
+        0.,
+        line_color,
     );
 
-    let icon = egui::pos2(rect.left() + 13., rect.center().y - 8.);
-    let stroke = egui::Stroke::new(1.5, theme.tab_icon());
+    let icon = egui::pos2(rect.left() + 12., rect.center().y - 7.);
+    painter.rect_filled(Rect::from_min_size(icon, Vec2::splat(14.)), 2., title_color);
+    let stroke = egui::Stroke::new(1.5, theme.background());
+    let at = |x, y| icon + Vec2::new(x, y) * 0.875;
     painter.add(egui::Shape::line(
-        vec![
-            icon + Vec2::new(2., 3.5),
-            icon + Vec2::new(6.5, 8.),
-            icon + Vec2::new(2., 12.5),
-        ],
+        vec![at(2., 3.5), at(6.5, 8.), at(2., 12.5)],
         stroke,
     ));
-    painter.line_segment(
-        [icon + Vec2::new(7.5, 13.5), icon + Vec2::new(14., 13.5)],
-        stroke,
-    );
+    painter.line_segment([at(7.5, 13.5), at(14., 13.5)], stroke);
     let title_y = rect.center().y - galley.size().y / 2.;
-    painter.galley(
-        egui::pos2(rect.left() + 38., title_y),
-        galley,
-        theme.foreground(),
-    );
+    painter.galley(egui::pos2(rect.left() + 35., title_y), galley, title_color);
 
     let center = egui::pos2(rect.right() - 21., rect.center().y);
     let close_color = if close.hovered() {
@@ -78,11 +89,13 @@ fn terminal_tab(
     } else {
         theme.tab_icon()
     };
-    for direction in [Vec2::new(4., 4.), Vec2::new(4., -4.)] {
-        painter.line_segment(
-            [center - direction, center + direction],
-            egui::Stroke::new(1.5, close_color),
-        );
+    if active || hovered {
+        for direction in [Vec2::new(4., 4.), Vec2::new(4., -4.)] {
+            painter.line_segment(
+                [center - direction, center + direction],
+                egui::Stroke::new(1.5, close_color),
+            );
+        }
     }
     (body, close)
 }
@@ -1063,9 +1076,9 @@ impl eframe::App for TerminalApp {
             egui::ScrollArea::horizontal()
                 .id_salt("tabs")
                 .show(ui, |ui| {
-                    ui.add_space(4.);
                     ui.horizontal(|ui| {
-                        ui.spacing_mut().item_spacing.x = 8.;
+                        ui.spacing_mut().item_spacing.x = 0.;
+                        ui.add_space(4.);
                         for (index, session) in self.tabs.iter().enumerate() {
                             ui.push_id(session.id, |ui| {
                                 let (response, close) = terminal_tab(
@@ -1084,7 +1097,7 @@ impl eframe::App for TerminalApp {
                                 {
                                     ui.painter().rect_stroke(
                                         target.rect,
-                                        9.,
+                                        0.,
                                         egui::Stroke::new(1., self.theme.accent()),
                                         egui::StrokeKind::Inside,
                                     );
@@ -1106,17 +1119,17 @@ impl eframe::App for TerminalApp {
                                 }
                             });
                         }
+                        ui.add_space(4.);
                         new = ui
                             .add(
                                 egui::Button::new(egui::RichText::new("+").size(18.))
-                                    .min_size(Vec2::splat(28.))
+                                    .min_size(Vec2::splat(TAB_HEIGHT))
                                     .frame(false),
                             )
                             .on_hover_cursor(egui::CursorIcon::PointingHand)
                             .on_hover_text("New tab")
                             .clicked();
                     });
-                    ui.add_space(4.);
                 });
             if let Some(error) = &self.error {
                 ui.colored_label(self.theme.palette(1), error);

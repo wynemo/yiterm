@@ -32,11 +32,12 @@ fn shell_menu_width(window: &Window) -> Pixels {
     px(520.).min((window.viewport_size().width - px(32.)).max(px(1.)))
 }
 
-fn tab_terminal_icon(color: Rgba) -> impl IntoElement {
-    canvas(
+fn tab_terminal_icon(theme: ThemeMode, active: bool) -> impl IntoElement {
+    let color = theme.background();
+    let glyph = canvas(
         |_, _, _| (),
         move |bounds, _, window, _| {
-            let at = |x, y| bounds.origin + point(px(x), px(y));
+            let at = |x: f32, y: f32| bounds.origin + point(px(x * 0.875), px(y * 0.875));
             let mut path = gpui::PathBuilder::stroke(px(1.5));
             path.move_to(at(2., 3.5));
             path.line_to(at(6.5, 8.));
@@ -48,8 +49,17 @@ fn tab_terminal_icon(color: Rgba) -> impl IntoElement {
             }
         },
     )
-    .size(px(16.))
-    .flex_shrink_0()
+    .size(px(14.));
+    div()
+        .size(px(14.))
+        .flex_shrink_0()
+        .rounded(px(2.))
+        .bg(if active {
+            theme.foreground()
+        } else {
+            theme.tab_icon()
+        })
+        .child(glyph)
 }
 
 struct TabDragPreview {
@@ -62,18 +72,19 @@ impl Render for TabDragPreview {
         div()
             .flex()
             .items_center()
-            .h(px(36.))
+            .h(px(TAB_HEIGHT))
+            .min_w(px(TAB_MIN_WIDTH))
             .gap(px(9.))
-            .px(px(12.))
-            .rounded(px(9.))
+            .pl(px(12.))
+            .pr(px(38.))
             .border_1()
             .border_color(self.theme.accent())
             .bg(self.theme.tab_fill(true))
             .text_color(self.theme.foreground())
-            .child(tab_terminal_icon(self.theme.tab_icon()))
+            .child(tab_terminal_icon(self.theme, true))
             .child(
                 div()
-                    .max_w(px(164.))
+                    .max_w(px(TAB_TITLE_MAX_WIDTH))
                     .truncate()
                     .text_size(px(16.))
                     .child(self.title.clone()),
@@ -2180,9 +2191,10 @@ impl Render for TerminalUi {
             .id("tabs")
             .flex()
             .items_center()
-            .h(px(44.))
-            .gap(px(8.))
-            .px(px(10.))
+            .h(px(TAB_HEIGHT + 1.))
+            .px(px(4.))
+            .border_t_1()
+            .border_color(theme.border())
             .overflow_x_scroll()
             .flex_shrink_0();
         for (index, tab) in self.app.tabs.iter().enumerate() {
@@ -2193,6 +2205,7 @@ impl Render for TerminalUi {
             tabs = tabs.child(
                 div()
                     .id(("tab", tab_id))
+                    .group("terminal-tab")
                     .on_mouse_down(
                         MouseButton::Right,
                         cx.listener(move |this, event: &MouseDownEvent, window, cx| {
@@ -2207,10 +2220,10 @@ impl Render for TerminalUi {
                     )
                     .flex()
                     .items_center()
-                    .h(px(36.))
-                    .rounded(px(9.))
-                    .border_1()
-                    .border_color(theme.tab_border(active))
+                    .h(px(TAB_HEIGHT))
+                    .min_w(px(TAB_MIN_WIDTH))
+                    .border_r_1()
+                    .border_color(theme.border())
                     .bg(theme.tab_fill(active))
                     .hover(|d| d.bg(theme.tab_hover()))
                     .drag_over(move |style, drag: &TabDrag, _, _| {
@@ -2226,22 +2239,39 @@ impl Render for TerminalUi {
                     }))
                     .pr(px(8.))
                     .flex_shrink_0()
+                    .when(active, |tab| {
+                        tab.child(
+                            div()
+                                .absolute()
+                                .top(px(0.))
+                                .left(px(0.))
+                                .right(px(0.))
+                                .h(px(TAB_ACTIVE_LINE_HEIGHT))
+                                .bg(theme.accent()),
+                        )
+                    })
                     .child(
                         div()
                             .id("select-tab")
                             .h_full()
+                            .flex_grow()
                             .pl(px(12.))
                             .pr(px(6.))
                             .flex()
                             .items_center()
                             .gap(px(9.))
                             .cursor_pointer()
-                            .child(tab_terminal_icon(theme.tab_icon()))
+                            .child(tab_terminal_icon(theme, active))
                             .child(
                                 div()
-                                    .max_w(px(164.))
+                                    .max_w(px(TAB_TITLE_MAX_WIDTH))
                                     .truncate()
                                     .text_size(px(16.))
+                                    .text_color(if active {
+                                        theme.foreground()
+                                    } else {
+                                        theme.tab_icon()
+                                    })
                                     .child(title.clone()),
                             )
                             .tooltip(move |window, cx| {
@@ -2263,11 +2293,15 @@ impl Render for TerminalUi {
                         div()
                             .id("close-tab")
                             .size(px(24.))
+                            .flex_shrink_0()
                             .flex()
                             .items_center()
                             .justify_center()
                             .rounded(px(5.))
                             .text_color(theme.tab_icon())
+                            .when(!active, |d| {
+                                d.opacity(0.).group_hover("terminal-tab", |d| d.opacity(1.))
+                            })
                             .hover(|d| {
                                 d.bg(theme.tab_border(active))
                                     .text_color(theme.foreground())
@@ -2287,7 +2321,8 @@ impl Render for TerminalUi {
         tabs = tabs.child(
             div()
                 .id("new-tab")
-                .size(px(28.))
+                .size(px(TAB_HEIGHT))
+                .ml(px(4.))
                 .flex_shrink_0()
                 .flex()
                 .items_center()
