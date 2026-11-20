@@ -69,7 +69,7 @@ struct TabDragPreview {
 
 impl Render for TabDragPreview {
     fn render(&mut self, _: &mut Window, _: &mut ViewContext<Self>) -> impl IntoElement {
-        div()
+        let preview = div()
             .flex()
             .items_center()
             .h(px(TAB_HEIGHT))
@@ -78,8 +78,8 @@ impl Render for TabDragPreview {
             .pl(px(12.))
             .pr(px(38.))
             .border_1()
-            .border_color(self.theme.accent())
-            .bg(self.theme.tab_fill(true))
+            .border_color(self.theme.border())
+            .bg(gpui::Hsla::from(self.theme.tab_fill(true)).opacity(0.85))
             .text_color(self.theme.foreground())
             .child(tab_terminal_icon(self.theme, true))
             .child(
@@ -88,8 +88,30 @@ impl Render for TabDragPreview {
                     .truncate()
                     .text_size(px(16.))
                     .child(self.title.clone()),
-            )
+            );
+        div().pt(px(4.)).child(preview)
     }
+}
+
+fn tab_drop_target(
+    tab_id: u64,
+    before: bool,
+    theme: ThemeMode,
+    cx: &ViewContext<TerminalUi>,
+) -> gpui::Div {
+    div()
+        .border_color(gpui::transparent_black())
+        .drag_over(move |style, drag: &TabDrag, _, _| {
+            if drag.0 == tab_id {
+                style
+            } else {
+                style.border_color(theme.accent())
+            }
+        })
+        .on_drop(cx.listener(move |this, drag: &TabDrag, _, cx| {
+            this.app.move_tab(drag.0, tab_id, before);
+            cx.notify();
+        }))
 }
 
 #[derive(Clone)]
@@ -2218,11 +2240,19 @@ impl Render for TerminalUi {
             .flex()
             .items_center()
             .h(px(TAB_HEIGHT + 1.))
-            .px(px(4.))
             .border_t_1()
             .border_color(theme.border())
             .overflow_x_scroll()
             .flex_shrink_0();
+        if let Some(first) = self.app.tabs.first() {
+            tabs = tabs.child(
+                tab_drop_target(first.id, true, theme, cx)
+                    .w(px(8.))
+                    .h(px(TAB_HEIGHT))
+                    .flex_shrink_0()
+                    .border_r_2(),
+            );
+        }
         for (index, tab) in self.app.tabs.iter().enumerate() {
             let tab_id = tab.id;
             let title = SharedString::from(tab.title().to_owned());
@@ -2232,6 +2262,7 @@ impl Render for TerminalUi {
                 div()
                     .id(("tab", tab_id))
                     .group("terminal-tab")
+                    .relative()
                     .on_mouse_down(
                         MouseButton::Right,
                         cx.listener(move |this, event: &MouseDownEvent, window, cx| {
@@ -2252,17 +2283,6 @@ impl Render for TerminalUi {
                     .border_color(theme.border())
                     .bg(theme.tab_fill(active))
                     .hover(|d| d.bg(theme.tab_hover()))
-                    .drag_over(move |style, drag: &TabDrag, _, _| {
-                        if drag.0 == tab_id {
-                            style
-                        } else {
-                            style.bg(theme.tab_hover()).border_color(theme.accent())
-                        }
-                    })
-                    .on_drop(cx.listener(move |this, drag: &TabDrag, _, cx| {
-                        this.app.move_tab(drag.0, tab_id);
-                        cx.notify();
-                    }))
                     .pr(px(8.))
                     .flex_shrink_0()
                     .when(active, |tab| {
@@ -2341,29 +2361,48 @@ impl Render for TerminalUi {
                                 cx.stop_propagation();
                                 cx.notify();
                             })),
+                    )
+                    .children([true, false].map(|before| {
+                        tab_drop_target(tab_id, before, theme, cx)
+                            .absolute()
+                            .top(px(0.))
+                            .bottom(px(0.))
+                            .w(gpui::relative(0.5))
+                            .when(before, |half| half.left(px(0.)).border_l_2())
+                            .when(!before, |half| half.right(px(0.)).border_r_2())
+                    })),
+            );
+        }
+        if let Some(last) = self.app.tabs.last() {
+            tabs = tabs.child(
+                tab_drop_target(last.id, false, theme, cx)
+                    .h(px(TAB_HEIGHT))
+                    .flex()
+                    .flex_grow()
+                    .flex_shrink_0()
+                    .border_l_2()
+                    .child(
+                        div()
+                            .id("new-tab")
+                            .size(px(TAB_HEIGHT))
+                            .ml(px(2.))
+                            .flex_shrink_0()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .rounded(px(6.))
+                            .text_color(theme.tab_icon())
+                            .hover(|d| d.bg(theme.tab_hover()).text_color(theme.foreground()))
+                            .cursor_pointer()
+                            .child(Icon::new(IconName::Plus).size(px(16.)))
+                            .tooltip(|window, cx| Tooltip::new("New tab").build(window, cx))
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.new_tab(cx);
+                                cx.notify();
+                            })),
                     ),
             );
         }
-        tabs = tabs.child(
-            div()
-                .id("new-tab")
-                .size(px(TAB_HEIGHT))
-                .ml(px(4.))
-                .flex_shrink_0()
-                .flex()
-                .items_center()
-                .justify_center()
-                .rounded(px(6.))
-                .text_color(theme.tab_icon())
-                .hover(|d| d.bg(theme.tab_hover()).text_color(theme.foreground()))
-                .cursor_pointer()
-                .child(Icon::new(IconName::Plus).size(px(16.)))
-                .tooltip(|window, cx| Tooltip::new("New tab").build(window, cx))
-                .on_click(cx.listener(|this, _, _, cx| {
-                    this.new_tab(cx);
-                    cx.notify();
-                })),
-        );
         let mut top = div()
             .flex()
             .flex_col()

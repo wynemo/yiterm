@@ -1074,12 +1074,32 @@ impl eframe::App for TerminalApp {
                     }
                 });
             });
+            let tab_bar_width = ui.available_width();
             egui::ScrollArea::horizontal()
                 .id_salt("tabs")
                 .show(ui, |ui| {
                     ui.horizontal(|ui| {
                         ui.spacing_mut().item_spacing.x = 0.;
-                        ui.add_space(4.);
+                        let mut drop_target =
+                            |ui: &egui::Ui, target: &egui::Response, tab_id, before, marker_x| {
+                                if let Some(drag) = target.dnd_release_payload::<TabDrag>() {
+                                    moved = Some((drag.0, tab_id, before));
+                                } else if target
+                                    .dnd_hover_payload::<TabDrag>()
+                                    .is_some_and(|drag| drag.0 != tab_id)
+                                {
+                                    ui.painter().vline(
+                                        marker_x,
+                                        target.rect.y_range(),
+                                        egui::Stroke::new(2., self.theme.accent()),
+                                    );
+                                }
+                            };
+                        let (leading_rect, leading) =
+                            ui.allocate_exact_size(Vec2::new(8., TAB_HEIGHT), egui::Sense::hover());
+                        if let Some(first) = self.tabs.first() {
+                            drop_target(ui, &leading, first.id, true, leading_rect.right() - 1.);
+                        }
                         for (index, session) in self.tabs.iter().enumerate() {
                             ui.push_id(session.id, |ui| {
                                 let (response, close) = terminal_tab(
@@ -1090,21 +1110,19 @@ impl eframe::App for TerminalApp {
                                 );
                                 if response.drag_started_by(egui::PointerButton::Primary) {
                                     response.dnd_set_drag_payload(TabDrag(session.id));
+                                    ctx.request_repaint();
                                 }
                                 let target = response.union(close.clone());
-                                if target
-                                    .dnd_hover_payload::<TabDrag>()
-                                    .is_some_and(|drag| drag.0 != session.id)
+                                if let Some(pointer) =
+                                    ui.input(|input| input.pointer.interact_pos())
                                 {
-                                    ui.painter().rect_stroke(
-                                        target.rect,
-                                        0.,
-                                        egui::Stroke::new(1., self.theme.accent()),
-                                        egui::StrokeKind::Inside,
-                                    );
-                                }
-                                if let Some(drag) = target.dnd_release_payload::<TabDrag>() {
-                                    moved = Some((drag.0, session.id));
+                                    let before = pointer.x < target.rect.center().x;
+                                    let x = if before {
+                                        target.rect.left() + 1.
+                                    } else {
+                                        target.rect.right() - 1.
+                                    };
+                                    drop_target(ui, &target, session.id, before, x);
                                 }
                                 response.context_menu(|ui| {
                                     if ui.button("Rename Tab…").clicked() {
@@ -1120,16 +1138,30 @@ impl eframe::App for TerminalApp {
                                 }
                             });
                         }
-                        ui.add_space(4.);
-                        new = ui
+                        let (gap_rect, gap) =
+                            ui.allocate_exact_size(Vec2::new(4., TAB_HEIGHT), egui::Sense::hover());
+                        let plus = ui
                             .add(
                                 egui::Button::new(egui::RichText::new("+").size(18.))
                                     .min_size(Vec2::splat(TAB_HEIGHT))
                                     .frame(false),
                             )
                             .on_hover_cursor(egui::CursorIcon::PointingHand)
-                            .on_hover_text("New tab")
-                            .clicked();
+                            .on_hover_text("New tab");
+                        new = plus.clicked();
+                        if let Some(last) = self.tabs.last() {
+                            let mut trailing = gap.union(plus);
+                            let remaining =
+                                leading_rect.left() + tab_bar_width - trailing.rect.right();
+                            if remaining > 0. {
+                                let (_, blank) = ui.allocate_exact_size(
+                                    Vec2::new(remaining, TAB_HEIGHT),
+                                    egui::Sense::hover(),
+                                );
+                                trailing = trailing.union(blank);
+                            }
+                            drop_target(ui, &trailing, last.id, false, gap_rect.left() + 1.);
+                        }
                     });
                 });
             if let Some(error) = &self.error {
@@ -1146,8 +1178,8 @@ impl eframe::App for TerminalApp {
         if let Some(index) = closed {
             self.close_tab(index);
         }
-        if let Some((source, target)) = moved {
-            self.move_tab(source, target);
+        if let Some((source, target, before)) = moved {
+            self.move_tab(source, target, before);
             ctx.request_repaint();
         }
         if new {

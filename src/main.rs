@@ -1297,7 +1297,7 @@ impl TerminalApp {
         }
     }
 
-    fn move_tab(&mut self, source_id: u64, target_id: u64) {
+    fn move_tab(&mut self, source_id: u64, target_id: u64, before: bool) {
         if source_id == target_id {
             return;
         }
@@ -1307,10 +1307,14 @@ impl TerminalApp {
         let Some(target) = self.tabs.iter().position(|tab| tab.id == target_id) else {
             return;
         };
+        let insertion = target + usize::from(!before) - usize::from(source < target);
+        if insertion == source {
+            return;
+        }
 
         let active_id = self.tabs[self.active].id;
         let tab = self.tabs.remove(source);
-        self.tabs.insert(target, tab);
+        self.tabs.insert(insertion, tab);
         self.active = self
             .tabs
             .iter()
