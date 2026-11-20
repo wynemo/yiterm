@@ -28,6 +28,14 @@ pub enum Event {
     Exit,
 }
 
+pub fn vertical_wheel(button: usize, pressed: bool) -> Option<i32> {
+    match (button & !28, pressed) {
+        (64, true) => Some(1),
+        (65, true) => Some(-1),
+        _ => None,
+    }
+}
+
 pub struct Decoder {
     bytes: Vec<u8>,
     last_input: Instant,

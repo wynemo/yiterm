@@ -60,7 +60,11 @@ impl Control {
                     }
                 }
             }
-            Event::Mouse(button, x, y, pressed) if button & !(3 | 28 | 32) == 0 => {
+            Event::Mouse(button, x, y, pressed) => {
+                let wheel = input::vertical_wheel(button, pressed);
+                if wheel.is_none() && button & !(3 | 28 | 32) != 0 {
+                    return Ok(());
+                }
                 check_desktop()?;
                 let button_id = button & 3;
                 let motion = button & 32 != 0;
@@ -74,19 +78,30 @@ impl Control {
                     }
                     mouse_move(x, y)
                 });
+                if let Some(direction) = wheel {
+                    // Windows can route scrolling to the foreground window.
+                    if let Some(movement) = movement
+                        && (matches!(source, Source::Display(_)) || foreground(source).is_some())
+                    {
+                        let delta = direction * WHEEL_DELTA as i32;
+                        send(&[movement, mouse_event(0, 0, MOUSEEVENTF_WHEEL, delta as u32)]);
+                    }
+                    return Ok(());
+                }
                 if let Some((down, up)) = BUTTONS.get(button_id).copied() {
                     if !motion && !pressed && self.held[button_id] {
                         if let Some(movement) = movement {
                             send(&[movement]);
                         }
-                        self.held[button_id] = send(&[mouse_event(0, 0, up)]) != 1;
+                        self.held[button_id] = send(&[mouse_event(0, 0, up, 0)]) != 1;
                         return Ok(());
                     }
                     if let Some(movement) = movement {
                         if motion {
                             send(&[movement]);
                         } else if pressed && !self.held[button_id] {
-                            self.held[button_id] = send(&[movement, mouse_event(0, 0, down)]) == 2;
+                            self.held[button_id] =
+                                send(&[movement, mouse_event(0, 0, down, 0)]) == 2;
                         }
                     }
                 } else if let Some(movement) = movement {
@@ -103,7 +118,7 @@ impl Control {
     pub(super) fn release(&mut self) {
         for ((_, up), held) in BUTTONS.into_iter().zip(&mut self.held) {
             if *held {
-                *held = send(&[mouse_event(0, 0, up)]) != 1;
+                *held = send(&[mouse_event(0, 0, up, 0)]) != 1;
             }
         }
     }
@@ -213,13 +228,14 @@ fn send_key(key: u16, extended: bool, modifiers: u32) {
     }
 }
 
-fn mouse_event(x: i32, y: i32, flags: u32) -> INPUT {
+fn mouse_event(x: i32, y: i32, flags: u32, data: u32) -> INPUT {
     INPUT {
         r#type: INPUT_MOUSE,
         Anonymous: INPUT_0 {
             mi: MOUSEINPUT {
                 dx: x,
                 dy: y,
+                mouseData: data,
                 dwFlags: flags,
                 ..Default::default()
             },
@@ -246,6 +262,7 @@ fn mouse_move(x: i32, y: i32) -> Option<INPUT> {
         normalize(x, width),
         normalize(y, height),
         MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK,
+        0,
     ))
 }
 

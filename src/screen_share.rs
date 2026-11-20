@@ -459,9 +459,11 @@ mod macos {
                                         }
                                     }
                                 }
-                                Event::Mouse(button, x, y, pressed)
-                                    if control && button & 64 == 0 =>
-                                {
+                                Event::Mouse(button, x, y, pressed) if control => {
+                                    let wheel = super::input::vertical_wheel(button, pressed);
+                                    if wheel.is_none() && button & !(3 | 28 | 32) != 0 {
+                                        continue;
+                                    }
                                     if let Some([cw, ch]) = state.cell {
                                         if let Ok((cols, rows)) =
                                             geometry(None, None, None, state.grid)
@@ -492,7 +494,9 @@ mod macos {
                                             let local_y =
                                                 y as f64 - 0.5 - state.origin.1 as f64 * ch;
                                             let motion = button & 32 != 0;
-                                            let phase = if motion {
+                                            let phase = if wheel.is_some() {
+                                                4
+                                            } else if motion {
                                                 0
                                             } else if pressed {
                                                 1
@@ -511,7 +515,7 @@ mod macos {
                                                     yiterm_capture_pointer(
                                                         (local_x / w).clamp(0., 0.999999),
                                                         (local_y / h).clamp(0., 0.999999),
-                                                        (button & 3) as i32,
+                                                        wheel.unwrap_or((button & 3) as i32),
                                                         phase,
                                                         (button & 28) as i32,
                                                     );

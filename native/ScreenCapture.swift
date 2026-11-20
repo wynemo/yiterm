@@ -260,7 +260,7 @@ private var pendingPointer:(Double,Double,Int32,Int32)?
 private var pointerScheduled=false
 @_cdecl("yiterm_capture_pointer")
 public func pointerCapture(_ x:Double,_ y:Double,_ button:Int32,_ phase:Int32,_ modifiers:Int32) {
-    guard x.isFinite,y.isFinite,(0...3).contains(phase) else { return }
+    guard x.isFinite,y.isFinite,(0...4).contains(phase) else { return }
     if phase == 0 {
         pointerLock.lock()
         pendingPointer=(x,y,button,modifiers)
@@ -323,6 +323,20 @@ private func applyPointer(_ x:Double,_ y:Double,_ button:Int32,_ phase:Int32,_ m
         if modifiers&4 != 0 { flags.insert(.maskShift) }
         if modifiers&8 != 0 { flags.insert(.maskAlternate) }
         if modifiers&16 != 0 { flags.insert(.maskControl) }
+        if phase == 4 {
+            guard button == 1 || button == -1,
+                  let event = CGEvent(scrollWheelEvent2Source: nil, units: .line,
+                                      wheelCount: 1, wheel1: button, wheel2: 0, wheel3: 0) else { return }
+            event.location = point
+            event.flags = flags
+            if let pid = capture.windowPID {
+                guard keyboardAllowed() else { return }
+                event.postToPid(pid)
+            } else {
+                event.post(tap: .cghidEventTap)
+            }
+            return
+        }
         let actual: Int32
         let type: CGEventType
         if phase == 0 {
