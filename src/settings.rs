@@ -270,6 +270,7 @@ pub enum ShellMode {
 pub struct ShellSettings {
     pub mode: ShellMode,
     pub program: String,
+    pub arguments: String,
     pub environment: String,
 }
 
@@ -289,6 +290,7 @@ impl Default for ShellSettings {
         Self {
             mode: ShellMode::Default,
             program: default_shell(),
+            arguments: String::new(),
             environment: String::new(),
         }
     }
@@ -296,14 +298,7 @@ impl Default for ShellSettings {
 
 impl ShellSettings {
     pub fn validate(&self) -> Result<()> {
-        anyhow::ensure!(
-            self.mode != ShellMode::Program || !self.program.trim().is_empty(),
-            "Shell program cannot be empty"
-        );
-        anyhow::ensure!(
-            !self.program.contains('\0'),
-            "Shell program contains a null character"
-        );
+        self.command(None)?;
         self.environment_variables()?;
         Ok(())
     }
@@ -312,16 +307,34 @@ impl ShellSettings {
         parse_shell_environment(&self.environment)
     }
 
-    pub fn executable(&self, cli: Option<&str>) -> Result<String> {
+    pub fn command(&self, cli: Option<&str>) -> Result<(String, Vec<String>)> {
         if let Some(cli) = cli {
-            return Ok(cli.to_owned());
+            return Ok((cli.to_owned(), Vec::new()));
         }
-        self.validate()?;
+        anyhow::ensure!(
+            self.mode != ShellMode::Program || !self.program.trim().is_empty(),
+            "Shell program cannot be empty"
+        );
+        anyhow::ensure!(
+            !self.program.contains('\0'),
+            "Shell program contains a null character"
+        );
         Ok(match self.mode {
-            ShellMode::Default => default_shell(),
-            ShellMode::Program => self.program.clone(),
+            ShellMode::Default => (default_shell(), Vec::new()),
+            ShellMode::Program => (
+                self.program.clone(),
+                parse_shell_arguments(&self.arguments)?,
+            ),
         })
     }
+}
+
+pub fn parse_shell_arguments(text: &str) -> Result<Vec<String>> {
+    anyhow::ensure!(
+        !text.contains('\0'),
+        "Shell arguments contain a null character"
+    );
+    shell_words::split(text).context("Shell arguments contain an unmatched quote")
 }
 
 /// Parse literal assignments without shell expansion or command execution.

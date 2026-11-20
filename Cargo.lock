@@ -10921,6 +10921,7 @@ dependencies = [
  "serde_json",
  "sha1 0.11.0",
  "sha2 0.10.9",
+ "shell-words",
  "sysinfo 0.39.6",
  "tempfile",
  "time",

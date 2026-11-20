@@ -331,6 +331,8 @@ pub(super) struct TerminalUi {
     font_chain_subscriptions: Vec<gpui::Subscription>,
     shell_select: gpui::Entity<SelectState<SearchableVec<ShellChoice>>>,
     shell_program: gpui::Entity<InputState>,
+    shell_arguments: gpui::Entity<InputState>,
+    shell_arguments_error: Option<String>,
     shell_environment: gpui::Entity<InputState>,
     shell_environment_error: Option<String>,
     _settings_subscriptions: Vec<gpui::Subscription>,
@@ -419,6 +421,9 @@ impl TerminalUi {
         });
         let shell_program = cx.new(|cx| {
             InputState::new(window, cx).default_value(app.shell_settings.program.clone())
+        });
+        let shell_arguments = cx.new(|cx| {
+            InputState::new(window, cx).default_value(app.shell_settings.arguments.clone())
         });
         let shell_environment = cx.new(|cx| {
             InputState::new(window, cx)
@@ -523,6 +528,22 @@ impl TerminalUi {
                 }
             }),
         ];
+        settings_subscriptions.push(cx.subscribe(&shell_arguments, |this, input, event, cx| {
+            if matches!(event, InputEvent::Change) {
+                let text = input.read(cx).value().to_string();
+                match settings::parse_shell_arguments(&text) {
+                    Ok(_) => {
+                        this.shell_arguments_error = None;
+                        if this.app.shell_settings.arguments != text {
+                            this.app.shell_settings.arguments = text;
+                            this.apply_settings();
+                        }
+                    }
+                    Err(error) => this.shell_arguments_error = Some(error.to_string()),
+                }
+                cx.notify();
+            }
+        }));
         settings_subscriptions.push(cx.subscribe(&shell_environment, |this, input, event, cx| {
             if matches!(event, InputEvent::Change) {
                 let text = input.read(cx).value().to_string();
@@ -615,6 +636,8 @@ impl TerminalUi {
             font_chain_subscriptions: Vec::new(),
             shell_select,
             shell_program,
+            shell_arguments,
+            shell_arguments_error: None,
             shell_environment,
             shell_environment_error: None,
             _settings_subscriptions: settings_subscriptions,
@@ -953,6 +976,9 @@ impl TerminalUi {
         self.shell_program.update(cx, |input, cx| {
             input.set_value(self.app.shell_settings.program.clone(), window, cx)
         });
+        self.shell_arguments_error = None;
+        self.shell_arguments
+            .update(cx, |input, cx| input.set_value("", window, cx));
         self.shell_environment_error = None;
         self.shell_environment
             .update(cx, |input, cx| input.set_value("", window, cx));
@@ -3326,18 +3352,40 @@ impl TerminalUi {
             .when(
                 self.app.shell_settings.mode == settings::ShellMode::Program,
                 |element| {
-                    element.child(divider()).child(
-                        row()
-                            .child(description(
-                                "Program",
-                                "Executable name or path, without arguments.",
-                            ))
-                            .child(
-                                div()
-                                    .w(px(260.))
-                                    .child(Input::new(&self.shell_program).small()),
-                            ),
-                    )
+                    element
+                        .child(divider())
+                        .child(
+                            row().child(description("Program", "Executable name or path."))
+                                .child(
+                                    div()
+                                        .w(px(260.))
+                                        .child(Input::new(&self.shell_program).small()),
+                                ),
+                        )
+                        .child(divider())
+                        .child(
+                            row()
+                                .child(description(
+                                    "Arguments",
+                                    "Optional startup arguments. Quote Windows paths and values with spaces.",
+                                ))
+                                .child(
+                                    div()
+                                        .w(px(260.))
+                                        .child(Input::new(&self.shell_arguments).small())
+                                        .when_some(
+                                            self.shell_arguments_error.clone(),
+                                            |element, error| {
+                                                element.child(
+                                                    div()
+                                                        .mt(px(4.))
+                                                        .text_color(gpui::rgb(0xd14343))
+                                                        .child(error),
+                                                )
+                                            },
+                                        ),
+                                ),
+                        )
                 },
             )
             .child(divider())

@@ -235,7 +235,7 @@ impl TerminalSession {
             } else if let Some(host) = &args.mosh {
                 integration.direct_mosh(host)?
             } else {
-                let shell = shell_settings.executable(args.shell.as_deref())?;
+                let (shell, arguments) = shell_settings.command(args.shell.as_deref())?;
                 shell_title = std::path::Path::new(&shell)
                     .file_stem()
                     .and_then(|name| name.to_str())
@@ -244,8 +244,10 @@ impl TerminalSession {
                 {
                     session_shell = shell.clone();
                 }
-                directory_token = shell_directory::token_for(&shell);
-                integration.shell_with_directory(&shell, directory_token.as_deref())?
+                if arguments.is_empty() {
+                    directory_token = shell_directory::token_for(&shell);
+                }
+                integration.shell_with_directory(&shell, &arguments, directory_token.as_deref())?
             };
             if let Some(directory) = directory {
                 command.cwd(directory);
@@ -1196,9 +1198,6 @@ impl TerminalApp {
     fn new_session(&self, directory: Option<&std::path::Path>) -> Result<TerminalSession> {
         let mut args = self.args.clone();
         args.share_connect = None;
-        if args.local_shell() {
-            args.shell = Some(self.shell_settings.executable(args.shell.as_deref())?);
-        }
         TerminalSession::new(
             &args,
             self.warning.as_deref(),

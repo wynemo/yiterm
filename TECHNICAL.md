@@ -32,7 +32,11 @@ cargo run --release -- --shell /bin/zsh
 cargo run --release -- --ssh my-server
 ```
 
-在 **Settings → Shell** 中选择 **Default**（默认）或 **Program**。Default 在 Windows 使用 `powershell.exe`，macOS/Linux 使用 `$SHELL`（未设置时使用 `/bin/sh`）。选择 Program 后，在 **Program** 输入可执行文件名或完整路径，例如 `pwsh.exe`、`cmd.exe`、`/bin/zsh`；路径包含空格时无需加引号，不接收整条命令或额外参数。输入后按 Enter、离开输入框或点击 Done 提交保存。程序名不能为空；不存在或无法执行时，新建终端会显示启动错误。
+在 **Settings → Shell** 中选择 **Default**（默认）或 **Program**。Default 在 Windows 使用 `powershell.exe`，macOS/Linux 使用 `$SHELL`（未设置时使用 `/bin/sh`）。选择 Program 后，在 **Program** 输入可执行文件名或完整路径，例如 `pwsh.exe`、`cmd.exe`、`/bin/zsh`。程序路径含空格时可直接输入。按 Enter、离开输入框或点击 Done 提交保存。程序名不能为空；不存在或无法执行时，新建终端会显示启动错误。
+
+在 **Arguments** 中填写可选启动参数，例如给 `cmd.exe` 填写 `/D /K "echo ready"`，给 `pwsh.exe` 填写 `-NoLogo -NoProfile`，或给 `/bin/zsh` 填写 `-l`。参数以空格分隔，单引号和双引号可将包含空格的值合为一个参数。参数中的 Windows 路径建议用单引号包裹，以保留反斜杠，例如 `-File 'C:\My Scripts\start.ps1'`。参数开头的 `#` 也需要加引号才能按原文传入。YiTerm 按参数逐个传给所选程序，不展开变量或通配符。参数格式有效时自动保存；引号未闭合时显示错误并保留此前有效设置。参数只用于 Program 模式下之后启动的本地会话。
+
+在 Windows 上，填写自定义参数后，所选程序使用这些参数启动。PowerShell 的 YiTerm 提示符目录上报，以及 Bash、Zsh 和 Fish 的 YiTerm 启动初始化，只在 Arguments 留空时启用。
 
 Shell 下拉列表会列出当前进程 PATH 中发现的常见 Shell，包括当前平台可用的 PowerShell、CMD、Bash、Zsh、Fish、Git Bash、Mintty、WSL、Nushell 等；支持搜索，每次打开 Settings 时刷新。Windows / macOS 的列表加宽并随窗口宽度限制，优先显示程序名，旁边显示可省略的路径以区分多个安装；悬停列表项或当前选项可查看完整路径，搜索和保存仍使用完整路径。Windows 上，若 PATH 仅包含 Git 的 `cmd` 目录，还会检查同一安装目录下的 Git Bash、Bash 和 Mintty。未列出的程序可以手动输入，或点击 **Browse…** 打开独立的系统文件选择窗口；取消不会改变设置。Linux 在 GNOME 等桌面优先调用 `zenity` 的 GTK 文件对话框，在 KDE 优先调用 `kdialog`，首选工具未安装时尝试另一种。选择窗口在后台进程中运行，不阻塞终端；同一时间只能打开一个 Shell 文件选择窗口。选定后检查是否为可执行文件，通过后自动填入 Program 并保存。
 
@@ -40,7 +44,7 @@ Linux 的 Browse 需要安装 `zenity` 或 `kdialog`。如两者均未安装，�
 
 Linux/macOS 还扫描 `/bin`、`/usr/bin`、`/usr/local/bin`，并读取 `$SHELL` 和 `/etc/shells` 中存在且可执行的程序，避免桌面启动时 PATH 不完整导致漏项。Linux 的 Program 输入支持常规复制、剪切和粘贴；清空输入时显示错误并保留此前有效设置，有效内容在结束编辑时保存。Linux 设置弹窗和搜索框持有输入焦点时，后台终端不接收键盘输入，也不覆盖输入框的输入法光标位置。
 
-Windows 选择 `git-bash.exe` 或 `mintty.exe` 时，会查找同一安装目录下的 `bash.exe`，在 YiTerm 内启动 Bash；找不到时显示错误并提示直接选择 `bash.exe`。它们自己的终端窗口、主题和启动参数不用于 YiTerm。
+Windows 选择 `git-bash.exe` 或 `mintty.exe` 时，会查找同一安装目录下的 `bash.exe`，在 YiTerm 内启动 Bash。**Arguments** 填写的是 Bash 的参数。找不到 Bash 时，YiTerm 会提示直接选择 `bash.exe`。
 
 在 **Settings → Environment Variables** 中逐行添加 `名称=值`，例如：
 
@@ -60,6 +64,7 @@ EMPTY_VALUE=
 [shell]
 mode = "program" # default / program
 program = "pwsh.exe"
+arguments = "-NoLogo -NoProfile"
 environment = """
 HTTP_PROXY=http://127.0.0.1:7890
 APP_ENV=development

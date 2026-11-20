@@ -82,15 +82,13 @@ impl Integration {
     pub fn shell_with_directory(
         &self,
         shell: &str,
+        arguments: &[String],
         _token: Option<&str>,
     ) -> Result<portable_pty::CommandBuilder> {
-        self.shell(shell)
-    }
-
-    pub fn shell(&self, shell: &str) -> Result<portable_pty::CommandBuilder> {
         // Let the selected shell load its normal startup files itself.
         // No --rcfile, ZDOTDIR override, aliases, functions or PATH rewriting.
         let mut command = portable_pty::CommandBuilder::new(shell);
+        command.args(arguments);
         self.configure(&mut command)?;
         Ok(command)
     }
@@ -196,12 +194,10 @@ impl Integration {
             wake,
         )
     }
-    pub fn shell(&self, shell: &str) -> Result<portable_pty::CommandBuilder> {
-        self.shell_with_directory(shell, None)
-    }
     pub fn shell_with_directory(
         &self,
         shell: &str,
+        arguments: &[String],
         directory_token: Option<&str>,
     ) -> Result<portable_pty::CommandBuilder> {
         let resolved = crate::settings::resolve_windows_shell(shell)?;
@@ -209,6 +205,12 @@ impl Integration {
             .to_str()
             .context("Shell path is not valid Unicode")?;
         let mut command = portable_pty::CommandBuilder::new(shell);
+        if !arguments.is_empty() {
+            // Custom arguments control startup, including any script or command to run.
+            command.args(arguments);
+            self.configure(&mut command)?;
+            return Ok(command);
+        }
         let bin = self.bin.to_string_lossy().into_owned();
         let quoted = crate::paste::quote_posix(&bin);
         let home = std::env::var_os("HOME")

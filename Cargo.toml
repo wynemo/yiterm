@@ -26,6 +26,7 @@ url = "2"
 uuid = { version = "1", features = ["v4"] }
 
 serde = { version = "1", features = ["derive"] }
+shell-words = "1"
 toml = "0.8"
 directories = "6"
 tracing = "0.1"

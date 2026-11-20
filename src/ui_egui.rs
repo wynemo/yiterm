@@ -1005,6 +1005,7 @@ impl eframe::App for TerminalApp {
                         );
                         data.remove::<String>(egui::Id::new("shell-search"));
                         data.remove::<String>(egui::Id::new("shell-program-draft"));
+                        data.remove::<String>(egui::Id::new("shell-arguments-draft"));
                         data.remove::<ShellFilePicker>(egui::Id::new("shell-file-picker"));
                     });
                 }
@@ -1626,20 +1627,14 @@ fn show_shell_settings(ui: &mut egui::Ui, shell: &mut settings::ShellSettings) {
                 .unwrap_or_else(|| shell.program.clone())
         });
         let mut finished_editing = false;
-        settings_row(
-            ui,
-            "Program",
-            "Executable name or path, without arguments.",
-            300.0,
-            |ui| {
-                let response = ui.add(
-                    egui::TextEdit::singleline(&mut draft)
-                        .id(egui::Id::new("shell-program-input"))
-                        .desired_width(290.0),
-                );
-                finished_editing = response.lost_focus();
-            },
-        );
+        settings_row(ui, "Program", "Executable name or path.", 300.0, |ui| {
+            let response = ui.add(
+                egui::TextEdit::singleline(&mut draft)
+                    .id(egui::Id::new("shell-program-input"))
+                    .desired_width(290.0),
+            );
+            finished_editing = response.lost_focus();
+        });
         // Keep invalid intermediate input visible without overwriting the last
         // valid setting or sending save failures to the terminal behind the modal.
         if draft.trim().is_empty() {
@@ -1650,6 +1645,32 @@ fn show_shell_settings(ui: &mut egui::Ui, shell: &mut settings::ShellSettings) {
             shell.program = draft.clone();
         }
         ctx.data_mut(|data| data.insert_temp(draft_id, draft));
+
+        let arguments_id = egui::Id::new("shell-arguments-draft");
+        let mut arguments = ctx.data_mut(|data| {
+            data.get_temp::<String>(arguments_id)
+                .unwrap_or_else(|| shell.arguments.clone())
+        });
+        settings_row(
+            ui,
+            "Arguments",
+            "Optional startup arguments. Quote Windows paths and values with spaces.",
+            300.0,
+            |ui| {
+                ui.add(
+                    egui::TextEdit::singleline(&mut arguments)
+                        .id(arguments_id)
+                        .desired_width(290.0),
+                );
+            },
+        );
+        match settings::parse_shell_arguments(&arguments) {
+            Ok(_) => shell.arguments.clone_from(&arguments),
+            Err(error) => {
+                ui.colored_label(Color32::RED, error.to_string());
+            }
+        }
+        ctx.data_mut(|data| data.insert_temp(arguments_id, arguments));
     }
     let environment_id = egui::Id::new("shell-environment-draft");
     let mut environment = ctx.data_mut(|data| {
@@ -1864,6 +1885,7 @@ fn show_settings(
                         ctx.data_mut(|data| {
                             data.remove::<String>(egui::Id::new("font-search"));
                             data.remove::<String>(egui::Id::new("shell-program-draft"));
+                            data.remove::<String>(egui::Id::new("shell-arguments-draft"));
                             data.remove::<String>(egui::Id::new("shell-environment-draft"));
                             data.remove::<ShellFilePicker>(egui::Id::new("shell-file-picker"));
                         });
