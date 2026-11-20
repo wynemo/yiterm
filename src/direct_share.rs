@@ -1,5 +1,5 @@
 //! TLS transport for YiTerm screen sharing, with raw VT output and framed input.
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", windows))]
 pub mod host;
 
 use anyhow::{Context, Result, ensure};
@@ -249,7 +249,7 @@ async fn connect(
                 CertificateError::ApplicationVerificationFailure,
             ))
         {
-            anyhow::anyhow!("Mac identity changed for {address}")
+            anyhow::anyhow!("YiTerm host identity changed for {address}")
         } else {
             anyhow::Error::from(error)
         }
@@ -261,12 +261,12 @@ async fn connect(
     );
     let cert = &connection
         .peer_certificates()
-        .context("Mac sent no identity")?[0];
+        .context("YiTerm host sent no identity")?[0];
     let fingerprint = Sha256::digest(cert);
     if !save_once(&path, &fingerprint)? {
         ensure!(
             read_saved(&path, 32)?.as_deref() == Some(&fingerprint[..]),
-            "Mac identity changed for {address}"
+            "YiTerm host identity changed for {address}"
         );
     }
 

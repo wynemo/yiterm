@@ -22,6 +22,7 @@ pub enum Event {
     Text(String),
     Key(u32, u32), // Shift=1, Option=2, Control=4, Command=8.
     Focus(bool),
+    #[cfg(target_os = "macos")]
     Size(usize, usize, usize),
     Mouse(usize, usize, usize, bool),
     Exit,
@@ -134,6 +135,7 @@ impl Decoder {
                 if final_byte == b'y' && text.starts_with("?9002;") {
                     return Some(Event::Canvas(matches!(text, "?9002;1$" | "?9002;2$")));
                 }
+                #[cfg(target_os = "macos")]
                 if final_byte == b't' {
                     if let Some([kind, h, w]) = numbers::<3>(text) {
                         return Some(Event::Size(kind, w, h));
@@ -189,7 +191,7 @@ fn numbers<const N: usize>(text: &str) -> Option<[usize; N]> {
     values.try_into().ok()
 }
 fn control(byte: u8, modifiers: u32) -> Event {
-    if modifiers & 2 != 0 && (1..=26).contains(&byte) {
+    if cfg!(target_os = "macos") && modifiers & 2 != 0 && (1..=26).contains(&byte) {
         return Event::Key(u32::from(b'a' + byte - 1), 8);
     }
     let key = match byte {
@@ -207,7 +209,14 @@ fn control(byte: u8, modifiers: u32) -> Event {
                 _ => return Event::Key(ESCAPE, modifiers),
             };
             // Ctrl+Alt supplies Command shortcuts from Windows/Linux keyboards.
-            return Event::Key(code, if modifiers & 2 != 0 { 8 } else { modifiers | 4 });
+            return Event::Key(
+                code,
+                if cfg!(target_os = "macos") && modifiers & 2 != 0 {
+                    8
+                } else {
+                    modifiers | 4
+                },
+            );
         }
     };
     Event::Key(key, modifiers)
@@ -225,7 +234,7 @@ fn special(text: &str, final_byte: u8) -> Option<Event> {
     if modifiers > 15 {
         return None;
     }
-    let modifiers = if modifiers & 6 == 6 {
+    let modifiers = if cfg!(target_os = "macos") && modifiers & 6 == 6 {
         (modifiers & !6) | 8
     } else {
         modifiers

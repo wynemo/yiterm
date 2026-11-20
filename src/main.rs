@@ -60,10 +60,10 @@ fn wake_ui() {}
 struct Args {
     #[command(flatten)]
     screen_share: yiterm::screen_share::Options,
-    /// Listen for YiTerm screen sharing on this IP:PORT (macOS only).
+    /// Listen for YiTerm screen sharing on this IP:PORT (macOS or Windows).
     #[arg(long, requires = "share_screen", conflicts_with_all = ["share_list", "share_stats"])]
     share_listen: Option<std::net::SocketAddr>,
-    /// View a Mac sharing its screen at this IP:PORT.
+    /// View a YiTerm host sharing its screen at this IP:PORT.
     #[arg(long, conflicts_with_all = ["ssh", "mosh", "shell", "share_screen"])]
     share_connect: Option<std::net::SocketAddr>,
     /// Connect directly to this OpenSSH host (remote shell must be POSIX).
@@ -1473,12 +1473,26 @@ fn main() -> Result<()> {
     if let Some(result) = yiterm::update::run_helper_if_requested() {
         return result;
     }
+    #[cfg(windows)]
+    if std::env::args_os()
+        .skip(1)
+        .any(|arg| arg == "--share-screen")
+    {
+        use windows_sys::Win32::System::Console::{
+            ATTACH_PARENT_PROCESS, AttachConsole, SetConsoleCtrlHandler,
+        };
+        // The GUI-subsystem binary needs the caller's console for sharing CLI output and Ctrl+C.
+        unsafe {
+            AttachConsole(ATTACH_PARENT_PROCESS);
+            SetConsoleCtrlHandler(None, 0);
+        }
+    }
     let args = Args::parse();
     if let Some(address) = args.share_listen {
-        #[cfg(target_os = "macos")]
+        #[cfg(any(target_os = "macos", windows))]
         return direct_share::host::run(address, &args.screen_share);
-        #[cfg(not(target_os = "macos"))]
-        anyhow::bail!("YiTerm direct sharing requires a macOS host ({address})");
+        #[cfg(not(any(target_os = "macos", windows)))]
+        anyhow::bail!("YiTerm direct sharing requires a macOS or Windows host ({address})");
     }
     if args.screen_share.share_screen {
         return yiterm::screen_share::run(&args.screen_share);

@@ -575,23 +575,34 @@ fallbacks = [] # 按顺序填写已安装的字体名称
 
 ## YiTerm 直连屏幕共享
 
-被连接端需要 macOS 13+。在 Mac 的 YiTerm 中打开 **Tools → Start YiTerm Sharing…**，填写监听地址和端口，再选择 **Allow Control** 或 **View Only**。例如 `0.0.0.0:9443` 监听所有 IPv4 网卡。连接端打开 **Tools → Connect to YiTerm…**，填写 Mac 实际可达的地址（例如 `192.168.1.20:9443`），画面会在新标签页打开。IPv6 地址用方括号包住，如 `[fd00::20]:9443`。
+共享端支持 Windows 10 / 11 和 macOS 13+。在共享端的 YiTerm 中打开 **Tools → Start YiTerm Sharing…**，填写监听地址和端口，再选择 **Allow Control** 或 **View Only**。例如 `0.0.0.0:9443` 监听所有 IPv4 网卡。观看端打开 **Tools → Connect to YiTerm…**，填写共享端实际可达的地址（例如 `192.168.1.20:9443`），画面会在新标签页打开。IPv6 地址用方括号包住，例如 `[fd00::20]:9443`。每次允许一个观看者，关闭观看分栏或按 **Ctrl+]** 结束连接。通过 **Tools → Stop YiTerm Sharing** 或在监听终端按 **Ctrl+C** 停止共享。
 
-也可从命令行启动。监听端复用屏幕／窗口、帧率、画质和只读选项。
+Windows 需要当前用户的已登录桌面。默认共享主显示器。Windows 防火墙需要允许观看端访问所选 TCP 端口。锁屏或切换到安全桌面会结束本次连接，桌面恢复后可重新连接。键鼠控制受 Windows 的输入权限限制，普通权限的 YiTerm 无法向以管理员权限运行的应用注入输入。
+
+Windows 可在 PowerShell 中列出采集源、启动服务，监听时可用 `--share-read-only` 禁用键鼠控制：
+
+```powershell
+Start-Process -Wait -NoNewWindow -FilePath .\yiterm.exe -ArgumentList '--share-screen --share-list'
+Start-Process -Wait -NoNewWindow -FilePath .\yiterm.exe -ArgumentList '--share-screen --share-listen 0.0.0.0:9443'
+```
+
+监听端可加 `--share-display ID` 或 `--share-window ID`，ID 来自上面的列表。Windows 单窗口共享依赖应用响应 Windows 的绘制请求，部分应用可能显示空白。窗口关闭、隐藏或最小化时会结束连接。控制单窗口时，鼠标只在共享窗口可见区域内投递，键盘输入要求该窗口处于前台。当前转发键盘、鼠标移动、点击和拖动。
+
+macOS 可用以下命令启动监听。两种平台均支持通过 `--share-width`、`--share-fps` 和 `--share-quality` 调整采集宽度、帧率和画质。
 
 ```sh
-# Mac，使用当前登录用户启动
+# macOS 共享端
 yiterm --share-screen --share-listen 0.0.0.0:9443
 
-# 连接端
+# 观看端
 yiterm --share-connect 192.168.1.20:9443
 ```
 
-Mac 仍需在系统设置中给 YiTerm 授予屏幕录制权限。允许控制时还需辅助功能权限。控制连接遇到锁屏时，沿用现有解锁流程，在观看分栏输入一次 Mac 登录密码，输入不回显。仅观看模式不收集密码。每次允许一个观看者，关闭观看分栏或按 **Ctrl+]** 会结束本次会话。通过 Mac 的 **Tools → Stop YiTerm Sharing** 或监听命令上的 **Ctrl+C** 停止共享。
+macOS 需要在系统设置中给 YiTerm 授予屏幕录制权限。允许控制时还需辅助功能权限。控制连接遇到锁屏时，沿用现有解锁流程，在观看分栏输入一次 Mac 登录密码，输入不回显。仅观看模式不收集密码。
 
 直连使用 TLS 1.3。连接端首次连接时自动记住该 IP 和端口的证书，后续若证书改变则拒绝连接。首次连接没有预先校验设备身份，监听端也不验证观看者身份，因此能访问监听端口的设备可以按当前共享模式观看或控制。没有邀请、配对或 SSH 登录步骤。
 
-Mac 在本地 PTY 中运行现有采集和解锁逻辑。直连会话分开传送终端输入、窗口尺寸与保活，输出的 Kitty 图形和终端字节直接交给连接端渲染器，Windows 连接端无需通过 ConPTY 重绘。
+Windows 使用 Win32 桌面采集。Mac 在本地 PTY 中运行采集和解锁逻辑。直连会话分开传送终端输入、窗口尺寸与保活，输出的 Kitty 图形和终端字节直接交给观看端渲染器。
 
 ## macOS SSH 屏幕共享
 

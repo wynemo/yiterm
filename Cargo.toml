@@ -52,10 +52,8 @@ base64 = "0.22"
 flate2 = "1"
 vt100 = "0.18.1"
 
-[target.'cfg(target_os = "macos")'.dependencies]
-rcgen = { version = "0.14.10", default-features = false, features = ["ring"] }
-
 [target.'cfg(any(target_os = "macos", windows))'.dependencies]
+rcgen = { version = "0.14.10", default-features = false, features = ["ring"] }
 gpui = { version = "=0.2.2", default-features = false, features = ["font-kit", "windows-manifest", "runtime_shaders"] }
 gpui-component = "=0.5.0"
 gpui-component-assets = "=0.5.0"
@@ -69,7 +67,23 @@ egui-winit = { version = "0.33.3", default-features = false, features = ["termin
 [target.'cfg(windows)'.dependencies]
 clipboard-win = { version = "5.4", features = ["std"] }
 raw-window-handle = { version = "0.6", features = ["std"] }
-windows-sys = { version = "0.61", features = ["Win32_System_LibraryLoader", "Win32_System_Console", "Win32_System_Pipes", "Win32_System_Threading", "Win32_Security", "Win32_Security_Authorization", "Win32_Security_Cryptography", "Win32_Storage_FileSystem", "Win32_System_Memory", "Win32_System_IO"] }
+windows-sys = { version = "0.61", features = [
+    "Win32_Graphics_Gdi",
+    "Win32_Security",
+    "Win32_Security_Authorization",
+    "Win32_Security_Cryptography",
+    "Win32_Storage_FileSystem",
+    "Win32_System_Console",
+    "Win32_System_IO",
+    "Win32_System_LibraryLoader",
+    "Win32_System_Memory",
+    "Win32_System_Pipes",
+    "Win32_System_StationsAndDesktops",
+    "Win32_System_Threading",
+    "Win32_UI_HiDpi",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_UI_WindowsAndMessaging",
+] }
 webview2-com = "0.39.1"
 windows = { version = "0.62", features = ["Win32_Foundation", "Win32_System_Com", "Win32_UI_WindowsAndMessaging", "Win32_Graphics_Gdi"] }
 

@@ -342,9 +342,7 @@ pub(super) struct TerminalUi {
     tab_context: Option<u64>,
     rename_input: gpui::Entity<InputState>,
     share_input: gpui::Entity<InputState>,
-    #[cfg(target_os = "macos")]
     share_host_dialog: bool,
-    #[cfg(target_os = "macos")]
     share_host: Option<direct_share::host::Host>,
     font_select: gpui::Entity<SelectState<SearchableVec<String>>>,
     font_size: gpui::Entity<InputState>,
@@ -647,9 +645,7 @@ impl TerminalUi {
             tab_context: None,
             rename_input,
             share_input,
-            #[cfg(target_os = "macos")]
             share_host_dialog: false,
-            #[cfg(target_os = "macos")]
             share_host: None,
             font_select,
             font_size,
@@ -681,6 +677,7 @@ impl TerminalUi {
             return;
         }
         self.shutting_down = true;
+        self.share_host = None;
         for tab in &mut self.app.tabs {
             if let Some(browser) = tab.browser.take() {
                 browser.update(cx, |browser, cx| browser.close(cx));
@@ -701,7 +698,6 @@ impl TerminalUi {
         }
         let started = Instant::now();
         let mut changed = self.app.updater.poll();
-        #[cfg(target_os = "macos")]
         if self
             .share_host
             .as_ref()
@@ -792,10 +788,7 @@ impl TerminalUi {
         cx: &mut ViewContext<Self>,
     ) {
         self.menu = None;
-        #[cfg(target_os = "macos")]
-        {
-            self.share_host_dialog = hosting;
-        }
+        self.share_host_dialog = hosting;
         let address = if hosting { "0.0.0.0:9443" } else { "" };
         self.app.share_address = Some(address.into());
         self.share_input.update(cx, |input, cx| {
@@ -804,8 +797,7 @@ impl TerminalUi {
         });
     }
 
-    fn submit_share(&mut self, _read_only: bool, window: &mut Window) {
-        #[cfg(target_os = "macos")]
+    fn submit_share(&mut self, read_only: bool, window: &mut Window) {
         if self.share_host_dialog {
             let Some(address) = self.app.share_address.take() else {
                 return;
@@ -816,7 +808,7 @@ impl TerminalUi {
                     "Enter a local IP address and port, for example 0.0.0.0:9443",
                 )?;
                 let mut options = self.app.args.screen_share.clone();
-                options.share_read_only = _read_only;
+                options.share_read_only = read_only;
                 direct_share::host::Host::start(address, options)
             })();
             match result {
@@ -2193,7 +2185,6 @@ impl Render for TerminalUi {
             }));
         let sidebar_visible = self.app.files_settings.visible;
         let menu = menu.child(div().flex_1());
-        #[cfg(target_os = "macos")]
         let menu = if let Some(host) = &self.share_host {
             menu.child(
                 div()
@@ -2666,7 +2657,6 @@ impl Render for TerminalUi {
                         this.open_share_dialog(false, window, cx);
                     },
                 ));
-                #[cfg(target_os = "macos")]
                 {
                     items = if let Some(host) = &self.share_host {
                         items.child(self.menu_button(
@@ -2863,10 +2853,7 @@ impl Render for TerminalUi {
             );
         }
         if self.app.share_address.is_some() {
-            #[cfg(target_os = "macos")]
             let hosting = self.share_host_dialog;
-            #[cfg(not(target_os = "macos"))]
-            let hosting = false;
             let mut actions = div().flex().gap(px(8.)).child(self.button(
                 "connect-share",
                 if hosting { "Allow Control" } else { "Connect" },
