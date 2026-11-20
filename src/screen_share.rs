@@ -1,10 +1,14 @@
 //! Screen capture and Kitty graphics encoding.
 use anyhow::{Result, bail};
 use clap::Args;
-#[cfg(any(target_os = "macos", windows))]
+#[cfg(any(target_os = "linux", windows))]
+mod desktop;
+#[cfg(any(target_os = "macos", target_os = "linux", windows))]
 mod graphics;
-#[cfg(any(target_os = "macos", windows))]
+#[cfg(any(target_os = "macos", target_os = "linux", windows))]
 mod input;
+#[cfg(target_os = "linux")]
+pub mod linux;
 #[cfg(target_os = "macos")]
 mod unlock;
 #[cfg(windows)]
@@ -12,7 +16,7 @@ pub mod windows;
 
 #[derive(Args, Clone, Debug)]
 pub struct Options {
-    /// Share a screen as Kitty graphics (macOS 13+ or Windows).
+    /// Share a screen as Kitty graphics (macOS 13+, Windows or Linux X11).
     #[arg(long, conflicts_with_all = ["ssh", "mosh", "shell"])]
     pub share_screen: bool,
     /// List available display and window IDs on the capture host.
@@ -60,10 +64,17 @@ pub fn run(options: &Options) -> Result<()> {
         }
         bail!("Use --share-screen --share-listen IP:PORT to share from Windows");
     }
-    #[cfg(not(any(target_os = "macos", windows)))]
+    #[cfg(target_os = "linux")]
+    {
+        if options.share_list {
+            return linux::list_sources();
+        }
+        bail!("Use --share-screen --share-listen IP:PORT to share from Linux");
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
     {
         let _ = options;
-        bail!("Screen capture requires macOS 13 or later or Windows")
+        bail!("Screen capture requires macOS 13 or later, Windows or Linux X11")
     }
 }
 

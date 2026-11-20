@@ -10,8 +10,8 @@ use yiterm::screen_share::Options;
 #[cfg(target_os = "macos")]
 #[path = "host/macos.rs"]
 mod platform;
-#[cfg(windows)]
-#[path = "host/windows.rs"]
+#[cfg(any(target_os = "linux", windows))]
+#[path = "host/desktop.rs"]
 mod platform;
 
 type ServerStream = tokio_rustls::server::TlsStream<TcpStream>;
@@ -20,6 +20,8 @@ type Stop<'a, F> = std::pin::Pin<&'a mut F>;
 pub fn run(address: SocketAddr, options: &Options) -> Result<()> {
     #[cfg(windows)]
     yiterm::screen_share::windows::require_user_desktop()?;
+    #[cfg(target_os = "linux")]
+    yiterm::screen_share::linux::require_desktop(options)?;
     runtime()?.block_on(async {
         #[cfg(unix)]
         let stopped = {
@@ -57,6 +59,8 @@ impl Host {
     pub fn start(address: SocketAddr, options: Options) -> Result<Self> {
         #[cfg(windows)]
         yiterm::screen_share::windows::require_user_desktop()?;
+        #[cfg(target_os = "linux")]
+        yiterm::screen_share::linux::require_desktop(&options)?;
         let config = config()?;
         let runtime = runtime()?;
         let listener = {

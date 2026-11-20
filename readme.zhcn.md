@@ -19,7 +19,7 @@
 - 多标签页，每个标签页运行独立会话。
 - 左右、上下分栏，可拖动调整大小。
 - 本地 shell、SSH 远端会话和 Windows 内置 Mosh 客户端。
-- 支持从 Windows 和 macOS 发起 YiTerm 直连屏幕共享。
+- 支持从 Windows、macOS 和 Linux（X11）发起 YiTerm 直连屏幕共享。
 - 跟随终端目录的文件浏览器，以及支持 diff、暂存和提交的 Git 侧栏。
 - Windows 内置 WebView2 浏览器可复用当前聚焦分栏的 YiTerm SSH 连接。
 - 拖动选择文字并复制。

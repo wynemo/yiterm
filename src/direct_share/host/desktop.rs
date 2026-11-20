@@ -1,5 +1,8 @@
 use super::*;
-use yiterm::screen_share::windows;
+#[cfg(target_os = "linux")]
+use yiterm::screen_share::linux as platform;
+#[cfg(windows)]
+use yiterm::screen_share::windows as platform;
 
 pub(super) async fn session(
     stream: ServerStream,
@@ -12,7 +15,7 @@ pub(super) async fn session(
     let (output, mut frames) = mpsc::channel(1);
     let options = options.clone();
     let worker = tokio::task::spawn_blocking(move || {
-        windows::stream(&options, size_updates, events, &output)
+        platform::stream(&options, size_updates, events, &output)
     });
     let (mut reader, mut writer) = tokio::io::split(stream);
     eprintln!("YiTerm viewer connected.");

@@ -909,8 +909,17 @@ impl eframe::App for TerminalApp {
                     pane.close_transport();
                 }
             }
+            self.share_host = None;
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
             return;
+        }
+        if self
+            .share_host
+            .as_ref()
+            .is_some_and(direct_share::host::Host::is_finished)
+        {
+            self.share_host = None;
+            self.error = Some("YiTerm sharing stopped. See the log for details.".into());
         }
         let profile_start = self.profile.as_ref().map(|_| Instant::now());
         ctx.set_visuals(self.theme.visuals());
@@ -1035,7 +1044,23 @@ impl eframe::App for TerminalApp {
                 });
                 ui.menu_button("Tools", |ui| {
                     if ui.button("Connect to YiTerm…").clicked() {
+                        self.share_host_dialog = false;
                         self.begin_connect_share();
+                        share_started = true;
+                        ui.close();
+                    }
+                    if let Some(host) = &self.share_host {
+                        if ui
+                            .button(format!("Stop YiTerm Sharing ({})", host.address))
+                            .clicked()
+                        {
+                            self.share_host = None;
+                            ui.close();
+                        }
+                    } else if ui.button("Start YiTerm Sharing…").clicked() {
+                        self.share_host_dialog = true;
+                        self.error = None;
+                        self.share_address = Some("0.0.0.0:9443".into());
                         share_started = true;
                         ui.close();
                     }
@@ -1292,19 +1317,29 @@ impl eframe::App for TerminalApp {
         }
         let modal_open = self.rename_tab.is_some() || self.share_address.is_some();
         if let Some(address) = &mut self.share_address {
-            let modal = egui::Modal::new(egui::Id::new("connect-yiterm")).show(ctx, |ui| {
+            let hosting = self.share_host_dialog;
+            let title = if hosting {
+                "Start YiTerm Sharing"
+            } else {
+                "Connect to YiTerm"
+            };
+            let modal = egui::Modal::new(egui::Id::new(title)).show(ctx, |ui| {
                 ui.set_width(320.0);
-                ui.heading("Connect to YiTerm");
+                ui.heading(title);
                 let input = ui.add(
                     egui::TextEdit::singleline(address)
-                        .hint_text("192.168.1.20:9443")
+                        .hint_text(if hosting {
+                            "0.0.0.0:9443"
+                        } else {
+                            "192.168.1.20:9443"
+                        })
                         .desired_width(f32::INFINITY),
                 );
                 if share_started {
                     input.request_focus();
                 }
                 let enter = input.lost_focus() && ui.input(|input| input.key_pressed(Key::Enter));
-                if !self.share_recent.is_empty() {
+                if !hosting && !self.share_recent.is_empty() {
                     ui.label("Recent connections");
                     for recent in &self.share_recent {
                         let recent = recent.to_string();
@@ -1317,18 +1352,49 @@ impl eframe::App for TerminalApp {
                         }
                     }
                 }
+                if hosting && let Some(error) = &self.error {
+                    ui.colored_label(self.theme.palette(1), error);
+                }
                 ui.horizontal(|ui| {
-                    (
-                        ui.button("Connect").clicked() || enter,
-                        ui.button("Cancel").clicked(),
-                    )
+                    let submit = if hosting {
+                        let control = ui.button("Allow Control").clicked();
+                        let view_only = ui.button("View Only").clicked() || enter;
+                        if control || view_only {
+                            Some(!control)
+                        } else {
+                            None
+                        }
+                    } else {
+                        (ui.button("Connect").clicked() || enter).then_some(true)
+                    };
+                    (submit, ui.button("Cancel").clicked())
                 })
                 .inner
             });
-            if modal.inner.1 || (modal.should_close() && !modal.inner.0) {
+            if modal.inner.1 || (modal.should_close() && modal.inner.0.is_none()) {
                 self.share_address = None;
-            } else if modal.inner.0 {
-                self.connect_share();
+            } else if let Some(read_only) = modal.inner.0 {
+                if hosting {
+                    let result = (|| {
+                        let address = address
+                            .trim()
+                            .parse()
+                            .context("Enter a listen address such as 0.0.0.0:9443")?;
+                        let mut options = self.args.screen_share.clone();
+                        options.share_read_only = read_only;
+                        direct_share::host::Host::start(address, options)
+                    })();
+                    match result {
+                        Ok(host) => {
+                            self.share_host = Some(host);
+                            self.share_address = None;
+                            self.error = None;
+                        }
+                        Err(error) => self.error = Some(format!("{error:#}")),
+                    }
+                } else {
+                    self.connect_share();
+                }
             }
         }
         if let Some((id, draft)) = &mut self.rename_tab {

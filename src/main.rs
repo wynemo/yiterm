@@ -60,7 +60,7 @@ fn wake_ui() {}
 struct Args {
     #[command(flatten)]
     screen_share: yiterm::screen_share::Options,
-    /// Listen for YiTerm screen sharing on this IP:PORT (macOS or Windows).
+    /// Listen for YiTerm screen sharing on this IP:PORT (macOS, Windows or Linux X11).
     #[arg(long, requires = "share_screen", conflicts_with_all = ["share_list", "share_stats"])]
     share_listen: Option<std::net::SocketAddr>,
     /// View a YiTerm host sharing its screen at this IP:PORT.
@@ -1002,6 +1002,10 @@ struct TerminalApp {
     rename_tab: Option<(u64, String)>,
     share_address: Option<String>,
     share_recent: Vec<std::net::SocketAddr>,
+    #[cfg(target_os = "linux")]
+    share_host_dialog: bool,
+    #[cfg(target_os = "linux")]
+    share_host: Option<direct_share::host::Host>,
     theme: ThemeMode,
     cursor_settings: CursorSettings,
     font_settings: settings::FontSettings,
@@ -1079,6 +1083,10 @@ impl TerminalApp {
             rename_tab: None,
             share_address: None,
             share_recent: Vec::new(),
+            #[cfg(target_os = "linux")]
+            share_host_dialog: false,
+            #[cfg(target_os = "linux")]
+            share_host: None,
             theme: settings::load_theme(&path)?,
             cursor_settings,
             font_settings: settings::load_font(&path)?,
@@ -1504,10 +1512,12 @@ fn main() -> Result<()> {
     }
     let args = Args::parse();
     if let Some(address) = args.share_listen {
-        #[cfg(any(target_os = "macos", windows))]
+        #[cfg(any(target_os = "macos", target_os = "linux", windows))]
         return direct_share::host::run(address, &args.screen_share);
-        #[cfg(not(any(target_os = "macos", windows)))]
-        anyhow::bail!("YiTerm direct sharing requires a macOS or Windows host ({address})");
+        #[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
+        anyhow::bail!(
+            "YiTerm direct sharing requires a macOS, Windows or Linux X11 host ({address})"
+        );
     }
     if args.screen_share.share_screen {
         return yiterm::screen_share::run(&args.screen_share);

@@ -68,7 +68,13 @@ impl Control {
                 check_desktop()?;
                 let button_id = button & 3;
                 let motion = button & 32 != 0;
-                let point = view.point(x, y, source.bounds()?);
+                let rect = source.bounds()?;
+                let point = view.point(
+                    x,
+                    y,
+                    (rect.left, rect.top),
+                    (rect.right - rect.left, rect.bottom - rect.top),
+                );
                 let movement = point.and_then(|(x, y)| {
                     if let Source::Window(window) = source {
                         let under_pointer = unsafe { WindowFromPoint(POINT { x, y }) };

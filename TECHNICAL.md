@@ -575,11 +575,24 @@ fallbacks = [] # 按顺序填写已安装的字体名称
 
 ## YiTerm 直连屏幕共享
 
-共享端支持 Windows 10 / 11 和 macOS 13+。在共享端的 YiTerm 中打开 **Tools → Start YiTerm Sharing…**，填写监听地址和端口，再选择 **Allow Control** 或 **View Only**。例如 `0.0.0.0:9443` 监听所有 IPv4 网卡。观看端打开 **Tools → Connect to YiTerm…**，填写共享端实际可达的地址（例如 `192.168.1.20:9443`），画面会在新标签页打开。IPv6 地址用方括号包住，例如 `[fd00::20]:9443`。每次允许一个观看者，关闭观看分栏或按 **Ctrl+]** 结束连接。通过 **Tools → Stop YiTerm Sharing** 或在监听终端按 **Ctrl+C** 停止共享。
+共享端支持 Windows 10 / 11、macOS 13+ 和 Linux X11。在共享端的 YiTerm 中打开 **Tools → Start YiTerm Sharing…**，填写监听地址和端口，再选择 **Allow Control** 或 **View Only**。例如 `0.0.0.0:9443` 监听所有 IPv4 网卡。观看端打开 **Tools → Connect to YiTerm…**，填写共享端实际可达的地址（例如 `192.168.1.20:9443`），画面会在新标签页打开。IPv6 地址用方括号包住，例如 `[fd00::20]:9443`。每次允许一个观看者，关闭观看分栏或按 **Ctrl+]** 结束连接。通过 **Tools → Stop YiTerm Sharing** 或在监听终端按 **Ctrl+C** 停止共享。
+
+### Linux 共享给 Windows
+
+在 Linux 上登录 X11 桌面，然后在 YiTerm 中选择 **Tools → Start YiTerm Sharing…**。用默认端口时，Windows 在 **Tools → Connect to YiTerm…** 填写 Linux 的实际局域网 IP 和端口，例如 `192.168.1.20:9443`。Linux 的防火墙需允许 Windows 访问所选 TCP 端口。也可以在 Linux 桌面终端运行以下命令：
+
+```sh
+./yiterm --share-screen --share-list
+./yiterm --share-screen --share-listen 0.0.0.0:9443 --share-read-only
+```
+
+需要键鼠控制时，在菜单选 **Allow Control**，或从命令中去掉 `--share-read-only`。控制通过 X11 的 XTEST 扩展发送按键、鼠标移动、点击、拖动和上下滚动。文本输入取决于服务端 X11 键盘布局能生成的字符。
+
+默认共享 `DISPLAY` 指定的 X11 screen。可用 `--share-display ID` 选择同一 X server 上的其他 screen，ID 来自 `--share-list`。同一 X11 screen 上的多台显示器作为一个桌面共享。Linux 共享范围为整个 X11 screen，支持可访问的 TrueColor X11 桌面。通过命令行启动时需要正确的 `DISPLAY` 和 X11 授权。Wayland 和 XWayland 桌面、单窗口选择暂不支持。
+
+### Windows 和 macOS 共享端
 
 Windows 需要当前用户的已登录桌面。默认共享主显示器。Windows 防火墙需要允许观看端访问所选 TCP 端口。锁屏或切换到安全桌面会结束本次连接，桌面恢复后可重新连接。键鼠控制受 Windows 的输入权限限制，普通权限的 YiTerm 无法向以管理员权限运行的应用注入输入。
-
-观看端在连接通过 TLS 握手及主机身份校验后保存地址，最近五个不同的地址保存在配置目录的 `direct-share/recent.json` 中。再次打开 **Connect to YiTerm…** 时会预填最近连接过的地址，也可从 **Recent connections** 中选择或输入新地址。
 
 Windows 可在 PowerShell 中列出采集源、启动服务，监听时可用 `--share-read-only` 禁用键鼠控制：
 
@@ -590,7 +603,7 @@ Start-Process -Wait -NoNewWindow -FilePath .\yiterm.exe -ArgumentList '--share-s
 
 监听端可加 `--share-display ID` 或 `--share-window ID`，ID 来自上面的列表。Windows 单窗口共享依赖应用响应 Windows 的绘制请求，部分应用可能显示空白。窗口关闭、隐藏或最小化时会结束连接。控制单窗口时，鼠标只在共享窗口可见区域内投递，键盘和滚轮输入要求该窗口处于前台。当前转发键盘、鼠标移动、点击、拖动和上下滚动。
 
-macOS 可用以下命令启动监听。两种平台均支持通过 `--share-width`、`--share-fps` 和 `--share-quality` 调整采集宽度、帧率和画质。
+macOS 可用以下命令启动监听。三个平台均支持通过 `--share-width`、`--share-fps` 和 `--share-quality` 调整采集宽度、帧率和画质。
 
 ```sh
 # macOS 共享端
@@ -602,9 +615,13 @@ yiterm --share-connect 192.168.1.20:9443
 
 macOS 需要在系统设置中给 YiTerm 授予屏幕录制权限。允许控制时还需辅助功能权限。控制连接遇到锁屏时，沿用现有解锁流程，在观看分栏输入一次 Mac 登录密码，输入不回显。仅观看模式不收集密码。
 
+### 连接与传输
+
 直连使用 TLS 1.3。连接端首次连接时自动记住该 IP 和端口的证书，后续若证书改变则拒绝连接。首次连接没有预先校验设备身份，监听端也不验证观看者身份，因此能访问监听端口的设备可以按当前共享模式观看或控制。没有邀请、配对或 SSH 登录步骤。
 
-Windows 使用 Win32 桌面采集。Mac 在本地 PTY 中运行采集和解锁逻辑。直连会话分开传送终端输入、窗口尺寸与保活，输出的 Kitty 图形和终端字节直接交给观看端渲染器。
+观看端在连接通过 TLS 握手及主机身份校验后保存地址，最近五个不同的地址保存在配置目录的 `direct-share/recent.json` 中。再次打开 **Connect to YiTerm…** 时会预填最近连接过的地址，也可从 **Recent connections** 中选择或输入新地址。
+
+Windows 使用 Win32 桌面采集，Linux 通过 X11 获取桌面画面，Mac 在本地 PTY 中运行采集和解锁逻辑。直连会话分开传送终端输入、窗口尺寸与保活，输出的 Kitty 图形和终端字节直接交给观看端渲染器。
 
 直连和 SSH 屏幕共享使用同一套画布放置逻辑。相邻瓦片共用同一条边界，Windows 和 macOS 观看端将边界对齐到物理像素，并限制线性纹理采样范围，避免画面出现瓦片接缝。
 
