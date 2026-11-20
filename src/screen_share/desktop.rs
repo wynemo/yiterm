@@ -242,7 +242,11 @@ pub(super) fn stream(
                     }
                 }
                 Event::Canvas(value) => canvas = Some(value),
-                Event::Text(text) if options.share_read_only && text.contains('q') => return Ok(()),
+                Event::Text(text) | Event::Paste(text)
+                    if options.share_read_only && text.contains('q') =>
+                {
+                    return Ok(());
+                }
                 event if !options.share_read_only && focused => {
                     if let Some(view) = shown {
                         desktop.input(event, view, || output.is_closed())?;

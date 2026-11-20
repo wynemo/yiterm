@@ -319,7 +319,7 @@ impl Desktop for X11Desktop {
                 keysym(code).map(|sym| (sym, modifiers)).into_iter(),
                 stopped,
             )?,
-            Event::Text(text) => self.keyboard(
+            Event::Text(text) | Event::Paste(text) => self.keyboard(
                 text.chars()
                     .filter_map(|ch| text_keysym(u32::from(ch)).map(|sym| (sym, 0))),
                 stopped,

@@ -28,35 +28,15 @@ impl Control {
         stopped: impl Fn() -> bool,
     ) -> Result<()> {
         match event {
-            Event::Text(text) => {
-                for c in text.chars() {
-                    if stopped() || foreground(source).is_none() {
-                        break;
-                    }
-                    check_desktop()?;
-                    match c {
-                        '\r' | '\n' => send_key(VK_RETURN, false, 0),
-                        '\t' => send_key(VK_TAB, false, 0),
-                        c if !c.is_control() => send_character(c),
-                        _ => {}
-                    }
-                }
-            }
+            Event::Text(text) => send_text(&text, source, true, stopped)?,
+            Event::Paste(text) => send_text(&text, source, false, stopped)?,
             Event::Key(code, modifiers) => {
                 check_desktop()?;
                 if let Some(window) = foreground(source) {
                     if let Some((key, extended)) = virtual_key(code) {
                         send_key(key, extended, modifiers);
                     } else if let Ok(c) = u16::try_from(code) {
-                        let thread = unsafe { GetWindowThreadProcessId(window, null_mut()) };
-                        let key = unsafe { VkKeyScanExW(c, GetKeyboardLayout(thread)) };
-                        if key != -1 {
-                            send_key(
-                                (key & 255) as u16,
-                                false,
-                                modifiers | ((key as u32 >> 8) & 7),
-                            );
-                        }
+                        send_layout_key(window, c, modifiers);
                     }
                 }
             }
@@ -150,6 +130,57 @@ fn foreground(source: &Source) -> Option<HWND> {
     visible.then_some(window)
 }
 
+fn send_text(text: &str, source: &Source, typed: bool, stopped: impl Fn() -> bool) -> Result<()> {
+    for c in text.chars() {
+        if stopped() {
+            break;
+        }
+        let Some(window) = foreground(source) else {
+            break;
+        };
+        check_desktop()?;
+        match c {
+            '\r' | '\n' => send_key(VK_RETURN, false, 0),
+            '\t' => send_key(VK_TAB, false, 0),
+            // Keep ordinary typing in the host's IME. Paste and non-ASCII text
+            // are already composed and use Unicode input.
+            ' '..='~' if typed && send_layout_key(window, c as u16, 0) => {}
+            c if !c.is_control() => send_character(c),
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
+fn send_layout_key(window: HWND, c: u16, modifiers: u32) -> bool {
+    let thread = unsafe { GetWindowThreadProcessId(window, null_mut()) };
+    let layout = unsafe { GetKeyboardLayout(thread) };
+    let mapped = unsafe { VkKeyScanExW(c, layout) };
+    if mapped == -1 {
+        return false;
+    }
+    let [key, shift_state] = mapped.to_le_bytes();
+    if shift_state & !7 != 0 {
+        return false;
+    }
+    // Win32 orders these bits Shift, Control, Alt. The decoder uses Shift, Alt, Control.
+    let shift_state = u32::from(shift_state);
+    let modifiers =
+        modifiers | (shift_state & 1) | ((shift_state & 2) << 1) | ((shift_state & 4) >> 1);
+    let scan = unsafe { MapVirtualKeyExW(u32::from(key), MAPVK_VK_TO_VSC_EX, layout) };
+    let (key, scan, flags) = match (scan >> 8, scan as u8) {
+        (0, code) if code != 0 => (0, u16::from(code), KEYEVENTF_SCANCODE),
+        (0xe0, code) => (
+            0,
+            u16::from(code),
+            KEYEVENTF_SCANCODE | KEYEVENTF_EXTENDEDKEY,
+        ),
+        _ => (u16::from(key), 0, 0),
+    };
+    tap_key(key, scan, flags, modifiers);
+    true
+}
+
 fn send_character(c: char) {
     let mut units = [0; 2];
     let mut events = [key_event(0, 0, 0); 4];
@@ -203,6 +234,11 @@ fn key_event(key: u16, scan: u16, flags: u32) -> INPUT {
 }
 
 fn send_key(key: u16, extended: bool, modifiers: u32) {
+    let flags = if extended { KEYEVENTF_EXTENDEDKEY } else { 0 };
+    tap_key(key, 0, flags, modifiers);
+}
+
+fn tap_key(key: u16, scan: u16, flags: u32, modifiers: u32) {
     let mut events = Vec::with_capacity(10);
     let mut releases = Vec::with_capacity(4);
     for (bit, modifier, flags) in [
@@ -216,10 +252,8 @@ fn send_key(key: u16, extended: bool, modifiers: u32) {
             releases.push(key_event(modifier, 0, flags | KEYEVENTF_KEYUP));
         }
     }
-    let flags = if extended { KEYEVENTF_EXTENDEDKEY } else { 0 };
-    events.push(key_event(key, 0, flags));
-    let key_up = key_event(key, 0, flags | KEYEVENTF_KEYUP);
-    events.push(key_up);
+    events.push(key_event(key, scan, flags));
+    events.push(key_event(key, scan, flags | KEYEVENTF_KEYUP));
     events.extend(releases.iter().rev().copied());
     let sent = send(&events) as usize;
     if sent != 0 && sent < events.len() {

@@ -603,6 +603,8 @@ Start-Process -Wait -NoNewWindow -FilePath .\yiterm.exe -ArgumentList '--share-s
 
 监听端可加 `--share-display ID` 或 `--share-window ID`，ID 来自上面的列表。Windows 单窗口共享依赖应用响应 Windows 的绘制请求，部分应用可能显示空白。窗口关闭、隐藏或最小化时会结束连接。控制单窗口时，鼠标只在共享窗口可见区域内投递，键盘和滚轮输入要求该窗口处于前台。当前转发键盘、鼠标移动、点击、拖动和上下滚动。
 
+使用 Windows 共享端的中文输入法时，在观看端切到英文输入，在远程 Windows 目标窗口选中中文输入模式，然后输入拼音并选词。普通字母、数字和标点按远程窗口的键盘布局转成按键，由 Windows 输入法组合。观看端已提交的中文和通过 bracketed paste 传输的文本以 Unicode 发送给远端应用。
+
 macOS 可用以下命令启动监听。三个平台均支持通过 `--share-width`、`--share-fps` 和 `--share-quality` 调整采集宽度、帧率和画质。
 
 ```sh

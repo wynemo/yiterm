@@ -410,12 +410,12 @@ mod macos {
                             let control = !read_only && state.focused && state.ready;
                             match event {
                                 Event::Exit => STOP.store(true, Ordering::Relaxed),
-                                Event::Text(text) if read_only => {
+                                Event::Text(text) | Event::Paste(text) if read_only => {
                                     if text.contains('q') {
                                         STOP.store(true, Ordering::Relaxed);
                                     }
                                 }
-                                Event::Text(text) if control => unsafe {
+                                Event::Text(text) | Event::Paste(text) if control => unsafe {
                                     yiterm_capture_text(text.as_ptr(), text.len());
                                 },
                                 Event::Key(code, mods) if control => unsafe {

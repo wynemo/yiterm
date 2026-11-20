@@ -20,6 +20,7 @@ pub const F1: u32 = 0xe010;
 pub enum Event {
     Canvas(bool),
     Text(String),
+    Paste(String),
     Key(u32, u32), // Shift=1, Option=2, Control=4, Command=8.
     Focus(bool),
     #[cfg(target_os = "macos")]
@@ -64,7 +65,7 @@ impl Decoder {
                     let text = String::from_utf8_lossy(&self.bytes[..end]).into_owned();
                     self.bytes.drain(..end + marker.len());
                     self.paste = false;
-                    return Some(Event::Text(text));
+                    return Some(Event::Paste(text));
                 }
                 if self.bytes.len() < 4096 {
                     return None;
@@ -79,7 +80,7 @@ impl Decoder {
                 }
                 let text = String::from_utf8_lossy(&self.bytes[..end]).into_owned();
                 self.bytes.drain(..end);
-                return Some(Event::Text(text));
+                return Some(Event::Paste(text));
             }
             let first = self.bytes[0];
             if first != 27 {
