@@ -104,8 +104,8 @@ struct Placement {
 }
 pub struct Draw<'a> {
     pub picture: &'a Picture,
-    /// Destination in logical pixels relative to the viewport.
-    pub rect: [f32; 4],
+    /// Left, top, right, and bottom in logical pixels relative to the viewport.
+    pub edges: [f64; 4],
     /// Normalized source rectangle.
     pub uv: [f32; 4],
     pub z: i32,
@@ -801,7 +801,7 @@ impl Graphics {
         }
     }
     pub fn draws<'a>(&'a self, term: &Term<Listener>) -> Vec<Draw<'a>> {
-        let offset = term.grid().display_offset() as f32;
+        let offset = term.grid().display_offset() as f64;
         let mut draws = Vec::new();
         for p in &self.placements {
             let Some(point) = term.graphics_anchors.get(&p.anchor) else {
@@ -810,32 +810,28 @@ impl Graphics {
             let Some(image) = self.images.get(&p.image) else {
                 continue;
             };
-            let [w, h] = self.extent(p);
             let base_x =
                 point.column.0 as f64 * self.cell[0] as f64 + p.dx as f64 / self.scale as f64;
-            let base_y = (point.line.0 as f64 + offset as f64) * self.cell[1] as f64
+            let base_y = (point.line.0 as f64 + offset) * self.cell[1] as f64
                 + p.dy as f64 / self.scale as f64;
-            let (x, y, w, h) = if let Some(canvas) = &p.canvas {
+            let edges = if let Some(canvas) = &p.canvas {
                 let scale = self.canvas_scale(p, canvas);
-                let left = base_x + canvas.x as f64 * scale;
-                let top = base_y + canvas.y as f64 * scale;
-                let right = base_x + (u64::from(canvas.x) + u64::from(p.w)) as f64 * scale;
-                let bottom = base_y + (u64::from(canvas.y) + u64::from(p.h)) as f64 * scale;
-                (
-                    left as f32,
-                    top as f32,
-                    (right - left) as f32,
-                    (bottom - top) as f32,
-                )
+                [
+                    base_x + canvas.x as f64 * scale,
+                    base_y + canvas.y as f64 * scale,
+                    base_x + (u64::from(canvas.x) + u64::from(p.w)) as f64 * scale,
+                    base_y + (u64::from(canvas.y) + u64::from(p.h)) as f64 * scale,
+                ]
             } else {
-                (base_x as f32, base_y as f32, w, h)
+                let [w, h] = self.extent(p);
+                [base_x, base_y, base_x + f64::from(w), base_y + f64::from(h)]
             };
-            if y + h <= 0. || y >= term.screen_lines() as f32 * self.cell[1] {
+            if edges[3] <= 0. || edges[1] >= term.screen_lines() as f64 * f64::from(self.cell[1]) {
                 continue;
             }
             draws.push(Draw {
                 picture: image,
-                rect: [x, y, w, h],
+                edges,
                 z: p.z,
                 uv: [
                     p.x as f32 / image.width as f32,

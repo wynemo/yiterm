@@ -1767,31 +1767,40 @@ fn paint_box_drawing(text: &str, rect: Rect, color: Rgba, window: &mut Window) -
 }
 
 fn paint_graphics(pane: &TerminalSession, rect: Rect, above_text: bool, window: &mut Window) {
+    let scale = f64::from(window.scale_factor());
+    let snap = |edge: f64, origin: Pixels| ((f64::from(f32::from(origin)) + edge) * scale).round();
     for draw in pane.graphics.draws(&pane.term) {
         if (draw.z >= 0) != above_text {
             continue;
         }
-        let [x, y, w, h] = draw.rect;
-        let [u0, v0, u1, v1] = draw.uv;
-        // Shared tile edges must land on the same device pixel. Fractional
-        // content masks otherwise leave hairline seams between adjacent images.
-        let scale = window.scale_factor();
-        let left = ((f32::from(rect.origin.x) + x) * scale).round() / scale;
-        let top = ((f32::from(rect.origin.y) + y) * scale).round() / scale;
-        let right = ((f32::from(rect.origin.x) + x + w) * scale).round() / scale;
-        let bottom = ((f32::from(rect.origin.y) + y + h) * scale).round() / scale;
+        let [left, top, right, bottom] = draw.edges;
+        let left = snap(left, rect.origin.x);
+        let top = snap(top, rect.origin.y);
+        let right = snap(right, rect.origin.x);
+        let bottom = snap(bottom, rect.origin.y);
+        let (width, height) = (right - left, bottom - top);
+        if width <= 0. || height <= 0. {
+            continue;
+        }
+        let logical = |edge: f64| px((edge / scale) as f32);
         let bounds = Bounds::new(
-            point(px(left), px(top)),
-            size(px(right - left), px(bottom - top)),
+            point(logical(left), logical(top)),
+            size(logical(width), logical(height)),
         );
-        let source_width = (right - left) / (u1 - u0);
-        let source_height = (bottom - top) / (v1 - v0);
+        let [u0, v0, u1, v1] = draw.uv.map(f64::from);
+        let source_width = width / (u1 - u0);
+        let source_height = height / (v1 - v0);
+        let scaled = |value: f64| gpui::ScaledPixels::from(value as f32);
+        // Keep the snapped edges in device pixels through sprite creation.
         let image_bounds = Bounds::new(
-            bounds.origin - point(px(u0 * source_width), px(v0 * source_height)),
-            size(px(source_width), px(source_height)),
+            point(
+                scaled(left - u0 * source_width),
+                scaled(top - v0 * source_height),
+            ),
+            size(scaled(source_width), scaled(source_height)),
         );
         window.with_content_mask(Some(ContentMask { bounds }), |window| {
-            if let Err(error) = window.paint_image(
+            if let Err(error) = window.paint_image_with_scaled_bounds(
                 image_bounds,
                 Default::default(),
                 draw.picture.render.clone(),

@@ -3134,10 +3134,26 @@ impl Window {
         frame_index: usize,
         grayscale: bool,
     ) -> Result<()> {
+        let bounds = bounds
+            .scale(self.scale_factor())
+            .map_origin(|origin| origin.floor())
+            .map_size(|size| size.ceil());
+        self.paint_image_with_scaled_bounds(bounds, corner_radii, data, frame_index, grayscale)
+    }
+
+    /// Paints an image during the paint phase using destination bounds in physical pixels.
+    /// Use this when adjacent images must share an exact edge. Panics for an invalid frame index.
+    pub fn paint_image_with_scaled_bounds(
+        &mut self,
+        bounds: Bounds<ScaledPixels>,
+        corner_radii: Corners<Pixels>,
+        data: Arc<RenderImage>,
+        frame_index: usize,
+        grayscale: bool,
+    ) -> Result<()> {
         self.invalidator.debug_assert_paint();
 
         let scale_factor = self.scale_factor();
-        let bounds = bounds.scale(scale_factor);
         let params = RenderImageParams {
             image_id: data.id,
             frame_index,
@@ -3163,9 +3179,7 @@ impl Window {
             order: 0,
             pad: 0,
             grayscale,
-            bounds: bounds
-                .map_origin(|origin| origin.floor())
-                .map_size(|size| size.ceil()),
+            bounds,
             content_mask,
             corner_radii,
             tile,

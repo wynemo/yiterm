@@ -9,3 +9,7 @@ browser even after its DOM and network requests have loaded successfully.
 
 Keep this change when updating the vendored crate. The Windows browser CI includes
 an on-screen pixel check using a real GPUI window and a colored WebView2 child.
+
+`src/window.rs` provides a physical-pixel image painting method for adjacent
+screen-sharing tiles. The Windows and macOS polychrome sprite shaders clamp
+linear sampling to each sprite's atlas allocation.

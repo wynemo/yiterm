@@ -115,11 +115,14 @@ fn paint_graphics(pane: &TerminalSession, rect: Rect, above_text: bool, ui: &egu
         if (draw.z >= 0) != above_text {
             continue;
         }
-        let [x, y, w, h] = draw.rect;
+        let [left, top, right, bottom] = draw.edges.map(|edge| edge as f32);
         let [u0, v0, u1, v1] = draw.uv;
         painter.image(
             draw.picture.texture(ui.ctx()),
-            Rect::from_min_size(rect.min + Vec2::new(x, y), Vec2::new(w, h)),
+            Rect::from_min_max(
+                rect.min + Vec2::new(left, top),
+                rect.min + Vec2::new(right, bottom),
+            ),
             Rect::from_min_max(egui::pos2(u0, v0), egui::pos2(u1, v1)),
             Color32::WHITE,
         );
