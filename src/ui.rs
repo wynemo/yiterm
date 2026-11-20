@@ -789,8 +789,12 @@ impl TerminalUi {
     ) {
         self.menu = None;
         self.share_host_dialog = hosting;
-        let address = if hosting { "0.0.0.0:9443" } else { "" };
-        self.app.share_address = Some(address.into());
+        if hosting {
+            self.app.share_address = Some("0.0.0.0:9443".into());
+        } else {
+            self.app.begin_connect_share();
+        }
+        let address = self.app.share_address.clone().unwrap_or_default();
         self.share_input.update(cx, |input, cx| {
             input.set_value(address, window, cx);
             input.focus(window, cx);
@@ -2904,6 +2908,31 @@ impl Render for TerminalUi {
                 .when(hosting, |panel| {
                     panel.child("Devices that can reach this port can connect.")
                 })
+                .when(!hosting && !self.app.share_recent.is_empty(), |panel| {
+                    panel.child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .child(div().text_size(px(12.)).child("Recent connections"))
+                            .children(self.app.share_recent.iter().enumerate().map(
+                                |(index, address)| {
+                                    let address = address.to_string();
+                                    self.menu_button(
+                                        ("recent-share", index),
+                                        address.clone(),
+                                        cx,
+                                        move |this, window, cx| {
+                                            this.app.share_address = Some(address.clone());
+                                            this.share_input.update(cx, |input, cx| {
+                                                input.set_value(address.clone(), window, cx);
+                                                input.focus(window, cx);
+                                            });
+                                        },
+                                    )
+                                },
+                            )),
+                    )
+                })
                 .child(actions);
             root = root.child(
                 div()
@@ -3191,7 +3220,7 @@ impl TerminalUi {
     }
     fn menu_button(
         &self,
-        id: &'static str,
+        id: impl Into<gpui::ElementId>,
         label: impl Into<gpui::SharedString>,
         cx: &ViewContext<Self>,
         action: impl Fn(&mut Self, &mut Window, &mut ViewContext<Self>) + 'static,
@@ -3200,7 +3229,7 @@ impl TerminalUi {
     }
     fn menu_button_enabled(
         &self,
-        id: &'static str,
+        id: impl Into<gpui::ElementId>,
         label: impl Into<gpui::SharedString>,
         enabled: bool,
         cx: &ViewContext<Self>,

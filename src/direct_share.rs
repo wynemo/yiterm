@@ -34,11 +34,49 @@ const HEARTBEAT: Duration = Duration::from_secs(5);
 const INPUT: u8 = 1;
 const RESIZE: u8 = 2;
 const PING: u8 = 3;
+const RECENT_LIMIT: usize = 5;
 
 fn data_dir() -> Result<PathBuf> {
     let path = yiterm::logging::config_path()?.with_file_name("direct-share");
     fs::create_dir_all(&path)?;
     Ok(path)
+}
+
+pub fn recent_addresses() -> Result<Vec<SocketAddr>> {
+    load_recent(&data_dir()?.join("recent.json"))
+}
+
+fn load_recent(path: &Path) -> Result<Vec<SocketAddr>> {
+    match fs::read(path) {
+        Ok(bytes) => {
+            serde_json::from_slice(&bytes).context("Cannot decode YiTerm connection history")
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(Vec::new()),
+        Err(error) => Err(error).context("Cannot read YiTerm connection history"),
+    }
+}
+
+fn remember_address(directory: &Path, address: SocketAddr) -> Result<()> {
+    // Keep the lock on a separate file so it survives atomic history replacement.
+    let lock = fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(directory.join("recent.lock"))?;
+    lock.lock()?;
+    let path = directory.join("recent.json");
+    let mut addresses = load_recent(&path)?;
+    if addresses.first() == Some(&address) {
+        return Ok(());
+    }
+    addresses.retain(|saved| *saved != address);
+    addresses.insert(0, address);
+    addresses.truncate(RECENT_LIMIT);
+    let mut file = tempfile::NamedTempFile::new_in(directory)?;
+    serde_json::to_writer(&mut file, &addresses)?;
+    file.as_file().sync_all()?;
+    file.persist(path).map_err(|error| error.error)?;
+    Ok(())
 }
 
 fn read_saved(path: &Path, limit: u64) -> Result<Option<Vec<u8>>> {
@@ -218,7 +256,8 @@ async fn connect(
     output: &mpsc::Sender<Vec<u8>>,
 ) -> Result<()> {
     let name = address.to_string();
-    let path = data_dir()?.join(format!("peer-{:x}.sha256", Sha256::digest(name.as_bytes())));
+    let directory = data_dir()?;
+    let path = directory.join(format!("peer-{:x}.sha256", Sha256::digest(name.as_bytes())));
     let pin = read_saved(&path, 32)?;
     ensure!(
         pin.as_ref().is_none_or(|pin| pin.len() == 32),
@@ -268,6 +307,9 @@ async fn connect(
             read_saved(&path, 32)?.as_deref() == Some(&fingerprint[..]),
             "YiTerm host identity changed for {address}"
         );
+    }
+    if let Err(error) = remember_address(&directory, address) {
+        tracing::warn!(%error, "Cannot save YiTerm connection history");
     }
 
     let (mut reader, mut writer) = tokio::io::split(tls);

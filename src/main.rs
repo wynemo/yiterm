@@ -1001,6 +1001,7 @@ struct TerminalApp {
     settings_open: bool,
     rename_tab: Option<(u64, String)>,
     share_address: Option<String>,
+    share_recent: Vec<std::net::SocketAddr>,
     theme: ThemeMode,
     cursor_settings: CursorSettings,
     font_settings: settings::FontSettings,
@@ -1077,6 +1078,7 @@ impl TerminalApp {
             settings_open: false,
             rename_tab: None,
             share_address: None,
+            share_recent: Vec::new(),
             theme: settings::load_theme(&path)?,
             cursor_settings,
             font_settings: settings::load_font(&path)?,
@@ -1204,6 +1206,19 @@ impl TerminalApp {
             directory,
             &self.shell_settings,
         )
+    }
+
+    fn begin_connect_share(&mut self) {
+        self.share_recent = direct_share::recent_addresses().unwrap_or_else(|error| {
+            tracing::warn!(%error, "Cannot load YiTerm connection history");
+            Vec::new()
+        });
+        self.share_address = Some(
+            self.share_recent
+                .first()
+                .map(ToString::to_string)
+                .unwrap_or_default(),
+        );
     }
 
     fn connect_share(&mut self) {

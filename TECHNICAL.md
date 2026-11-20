@@ -579,6 +579,8 @@ fallbacks = [] # 按顺序填写已安装的字体名称
 
 Windows 需要当前用户的已登录桌面。默认共享主显示器。Windows 防火墙需要允许观看端访问所选 TCP 端口。锁屏或切换到安全桌面会结束本次连接，桌面恢复后可重新连接。键鼠控制受 Windows 的输入权限限制，普通权限的 YiTerm 无法向以管理员权限运行的应用注入输入。
 
+观看端在连接通过 TLS 握手及主机身份校验后保存地址，最近五个不同的地址保存在配置目录的 `direct-share/recent.json` 中。再次打开 **Connect to YiTerm…** 时会预填最近连接过的地址，也可从 **Recent connections** 中选择或输入新地址。
+
 Windows 可在 PowerShell 中列出采集源、启动服务，监听时可用 `--share-read-only` 禁用键鼠控制：
 
 ```powershell

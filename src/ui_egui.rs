@@ -997,6 +997,7 @@ impl eframe::App for TerminalApp {
         let mut new = false;
         let mut split = None;
         let mut close_pane = false;
+        let mut share_started = false;
         egui::TopBottomPanel::top("menu").show(ctx, |ui| {
             egui::MenuBar::new().ui(ui, |ui| {
                 if ui.button("Settings").clicked() {
@@ -1034,7 +1035,8 @@ impl eframe::App for TerminalApp {
                 });
                 ui.menu_button("Tools", |ui| {
                     if ui.button("Connect to YiTerm…").clicked() {
-                        self.share_address = Some(String::new());
+                        self.begin_connect_share();
+                        share_started = true;
                         ui.close();
                     }
                     if ui.button("Open Log File").clicked() {
@@ -1298,10 +1300,23 @@ impl eframe::App for TerminalApp {
                         .hint_text("192.168.1.20:9443")
                         .desired_width(f32::INFINITY),
                 );
-                if address.is_empty() {
+                if share_started {
                     input.request_focus();
                 }
                 let enter = input.lost_focus() && ui.input(|input| input.key_pressed(Key::Enter));
+                if !self.share_recent.is_empty() {
+                    ui.label("Recent connections");
+                    for recent in &self.share_recent {
+                        let recent = recent.to_string();
+                        if ui
+                            .selectable_label(*address == recent, recent.as_str())
+                            .clicked()
+                        {
+                            *address = recent;
+                            input.request_focus();
+                        }
+                    }
+                }
                 ui.horizontal(|ui| {
                     (
                         ui.button("Connect").clicked() || enter,
