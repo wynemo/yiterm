@@ -1243,22 +1243,42 @@ impl TerminalApp {
         );
     }
 
+    fn new_share_session(&self, address: std::net::SocketAddr) -> Result<TerminalSession> {
+        let mut args = self.args.clone();
+        args.ssh = None;
+        args.mosh = None;
+        args.shell = None;
+        args.share_connect = Some(address);
+        TerminalSession::new(&args, None, None, &self.shell_settings)
+    }
+
+    fn reconnect_share(&mut self) {
+        let pane = self.tabs[self.active].focused();
+        let TerminalTransport::Direct(client) = &pane.transport else {
+            return;
+        };
+        match self.new_share_session(client.address) {
+            Ok(mut session) => {
+                session.parser.advance(
+                    &mut session.term,
+                    format!("Connecting to {}…\r\n", client.address).as_bytes(),
+                );
+                *self.tabs[self.active].focused_mut() = session;
+                self.error = None;
+            }
+            Err(error) => self.error = Some(format!("Cannot reconnect: {error:#}")),
+        }
+    }
+
     fn connect_share(&mut self) {
         let Some(address) = self.share_address.take() else {
             return;
         };
-        let result = (|| -> Result<TerminalSession> {
-            let address: std::net::SocketAddr = address
-                .trim()
-                .parse()
-                .context("Enter an IP address and port, for example 192.168.1.20:9443")?;
-            let mut args = self.args.clone();
-            args.ssh = None;
-            args.mosh = None;
-            args.shell = None;
-            args.share_connect = Some(address);
-            TerminalSession::new(&args, None, None, &self.shell_settings)
-        })();
+        let result = address
+            .trim()
+            .parse()
+            .context("Enter an IP address and port, for example 192.168.1.20:9443")
+            .and_then(|address| self.new_share_session(address));
         match result {
             Ok(session) => {
                 self.tabs.push(TerminalTab::new(session));

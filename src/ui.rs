@@ -2661,6 +2661,18 @@ impl Render for TerminalUi {
                             this.close_pane();
                         }),
                     );
+                if self.app.tabs[self.app.active].focused().is_direct_share() {
+                    items = items.child(self.menu_button(
+                        "reconnect-yiterm",
+                        "Reconnect",
+                        cx,
+                        |this, window, _| {
+                            this.menu = None;
+                            this.app.reconnect_share();
+                            this.focus.focus(window);
+                        },
+                    ));
+                }
             } else {
                 items = items.child(self.menu_button(
                     "connect-yiterm",

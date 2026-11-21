@@ -1041,6 +1041,13 @@ impl eframe::App for TerminalApp {
                         close_pane = true;
                         ui.close();
                     }
+                    if self.tabs[self.active].focused().is_direct_share()
+                        && ui.button("Reconnect").clicked()
+                    {
+                        self.reconnect_share();
+                        ui.close();
+                        ctx.request_repaint();
+                    }
                 });
                 ui.menu_button("Tools", |ui| {
                     if ui.button("Connect to YiTerm…").clicked() {
