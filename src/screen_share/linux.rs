@@ -299,6 +299,7 @@ impl X11Desktop {
             b"mate-terminal",
             b"terminator",
             b"xfce4-terminal",
+            b"yiterm",
         ];
 
         // WM_CLASS belongs to the application window. Keyboard focus can be on a child.

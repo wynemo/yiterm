@@ -588,7 +588,7 @@ fallbacks = [] # 按顺序填写已安装的字体名称
 
 需要键鼠控制时，在菜单选 **Allow Control**，或从命令中去掉 `--share-read-only`。控制通过 X11 的 XTEST 扩展发送按键、鼠标移动、点击、拖动和上下滚动。可用 XKB 时优先使用远程桌面的当前键盘布局，切换布局后无需重连。
 
-可以在观看端直接用输入法选词。提交的中文、emoji 等非 ASCII 文本，以及通过 YiTerm 粘贴的文本，会写入远端 X11 的 UTF-8 剪贴板，再粘贴到聚焦的应用。GNOME Terminal、Konsole、MATE Terminal、Terminator 和 Xfce Terminal 使用 **Ctrl+Shift+V**，其他应用默认使用 **Ctrl+V**。在终端里的 `vi` 中编辑时，先进入插入模式再输入中文。若远端应用使用自定义快捷键，可从远端应用的「粘贴」菜单取出文字。远端剪贴板的原内容会被替换，剪贴板管理器也可能保留这段文字。较长的粘贴内容可能分批发送。
+可以在观看端直接用输入法选词。提交的中文、emoji 等非 ASCII 文本，以及通过 YiTerm 粘贴的文本，会写入远端 X11 的 UTF-8 剪贴板，再粘贴到聚焦的应用。YiTerm、GNOME Terminal、Konsole、MATE Terminal、Terminator 和 Xfce Terminal 使用 **Ctrl+Shift+V**，其他应用默认使用 **Ctrl+V**。在终端里的 `vi` 中编辑时，先进入插入模式再输入中文。若远端应用使用自定义快捷键，可从远端应用的「粘贴」菜单取出文字。远端剪贴板的原内容会被替换，剪贴板管理器也可能保留这段文字。较长的粘贴内容可能分批发送。
 
 向上述终端粘贴时，共享端先短暂等待并回应终端的剪贴板格式查询，再发送快捷键。GNOME Terminal 会根据查询结果启用粘贴操作。
 

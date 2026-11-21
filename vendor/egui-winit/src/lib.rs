@@ -1744,15 +1744,18 @@ pub fn create_winit_window_attributes(
     }
 
     #[cfg(all(feature = "wayland", target_os = "linux"))]
-    if let Some(app_id) = _app_id {
+    if let Some(app_id) = _app_id.as_deref() {
         use winit::platform::wayland::WindowAttributesExtWayland as _;
         window_attributes = window_attributes.with_name(app_id, "");
     }
 
     #[cfg(all(feature = "x11", target_os = "linux"))]
     {
+        use winit::platform::x11::WindowAttributesExtX11 as _;
+        if let Some(app_id) = _app_id.as_deref() {
+            window_attributes = window_attributes.with_name(app_id, app_id);
+        }
         if let Some(window_type) = _window_type {
-            use winit::platform::x11::WindowAttributesExtX11 as _;
             use winit::platform::x11::WindowType;
             window_attributes = window_attributes.with_x11_window_type(vec![match window_type {
                 egui::X11WindowType::Normal => WindowType::Normal,

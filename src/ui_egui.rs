@@ -2281,6 +2281,7 @@ pub(super) fn run(app: TerminalApp) -> Result<()> {
         "yiterm",
         eframe::NativeOptions {
             viewport: egui::ViewportBuilder::default()
+                .with_app_id("yiterm")
                 .with_inner_size([960.0, 640.0])
                 .with_icon(eframe::icon_data::from_png_bytes(include_bytes!(
                     "../assets/icons/yiterm.png"
