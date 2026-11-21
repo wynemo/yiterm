@@ -5,12 +5,11 @@ pub mod host;
 use anyhow::{Context, Result, ensure};
 use portable_pty::PtySize;
 use rustls::{
-    CertificateError, ClientConfig, DigitallySignedStruct, Error, SignatureScheme,
+    ClientConfig, DigitallySignedStruct, Error, SignatureScheme,
     client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier},
     crypto::{WebPkiSupportedAlgorithms, verify_tls13_signature},
     pki_types::{CertificateDer, ServerName, UnixTime},
 };
-use sha2::{Digest, Sha256};
 use std::{
     fs,
     io::{self, Write},
@@ -115,28 +114,19 @@ fn save_once(path: &Path, bytes: &[u8]) -> Result<bool> {
 
 #[derive(Debug)]
 struct ServerIdentity {
-    pin: Option<Vec<u8>>,
     algorithms: WebPkiSupportedAlgorithms,
 }
 
 impl ServerCertVerifier for ServerIdentity {
     fn verify_server_cert(
         &self,
-        cert: &CertificateDer<'_>,
+        _: &CertificateDer<'_>,
         _: &[CertificateDer<'_>],
         _: &ServerName<'_>,
         _: &[u8],
         _: UnixTime,
     ) -> Result<ServerCertVerified, Error> {
-        if self
-            .pin
-            .as_deref()
-            .is_some_and(|pin| pin != &Sha256::digest(cert)[..])
-        {
-            return Err(Error::InvalidCertificate(
-                CertificateError::ApplicationVerificationFailure,
-            ));
-        }
+        // Direct sharing encrypts transport without persisting or pinning host identity.
         Ok(ServerCertVerified::assertion())
     }
 
@@ -277,17 +267,9 @@ async fn connect(
     mut sizes: watch::Receiver<PtySize>,
     output: &mpsc::Sender<Vec<u8>>,
 ) -> Result<()> {
-    let name = address.to_string();
     let directory = data_dir()?;
-    let path = directory.join(format!("peer-{:x}.sha256", Sha256::digest(name.as_bytes())));
-    let pin = read_saved(&path, 32)?;
-    ensure!(
-        pin.as_ref().is_none_or(|pin| pin.len() == 32),
-        "Invalid stored identity for {address}"
-    );
     let provider = rustls::crypto::ring::default_provider();
     let verifier = ServerIdentity {
-        pin,
         algorithms: provider.signature_verification_algorithms,
     };
     let mut config = ClientConfig::builder_with_provider(Arc::new(provider))
@@ -303,33 +285,12 @@ async fn connect(
         tokio_rustls::TlsConnector::from(Arc::new(config))
             .connect(ServerName::IpAddress(address.ip().into()), socket),
     )
-    .await?
-    .map_err(|error| {
-        if error.get_ref().and_then(|e| e.downcast_ref::<Error>())
-            == Some(&Error::InvalidCertificate(
-                CertificateError::ApplicationVerificationFailure,
-            ))
-        {
-            anyhow::anyhow!("YiTerm host identity changed for {address}")
-        } else {
-            anyhow::Error::from(error)
-        }
-    })?;
+    .await??;
     let connection = tls.get_ref().1;
     ensure!(
         connection.alpn_protocol() == Some(ALPN),
         "Incompatible YiTerm sharing protocol"
     );
-    let cert = &connection
-        .peer_certificates()
-        .context("YiTerm host sent no identity")?[0];
-    let fingerprint = Sha256::digest(cert);
-    if !save_once(&path, &fingerprint)? {
-        ensure!(
-            read_saved(&path, 32)?.as_deref() == Some(&fingerprint[..]),
-            "YiTerm host identity changed for {address}"
-        );
-    }
     if let Err(error) = remember_address(&directory, address) {
         tracing::warn!(%error, "Cannot save YiTerm connection history");
     }
