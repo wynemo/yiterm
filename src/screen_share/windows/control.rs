@@ -20,6 +20,10 @@ pub(super) struct Control {
 }
 
 impl Control {
+    pub(super) fn abandon(&mut self) {
+        self.held = [false; 3];
+    }
+
     pub(super) fn handle(
         &mut self,
         event: Event,

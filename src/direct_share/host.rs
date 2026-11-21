@@ -19,7 +19,16 @@ type Stop<'a, F> = std::pin::Pin<&'a mut F>;
 
 pub fn run(address: SocketAddr, options: &Options) -> Result<()> {
     #[cfg(windows)]
-    yiterm::screen_share::windows::require_user_desktop()?;
+    {
+        use yiterm::screen_share::windows::{prepare, privilege};
+        if privilege::elevated()? && !privilege::effective_system() {
+            let process = privilege::launch(std::env::args_os().skip(1).collect(), data_dir()?)?;
+            // The replacement owns its console and Ctrl+C handler.
+            process.detach();
+            return Ok(());
+        }
+        prepare()?;
+    }
     #[cfg(target_os = "linux")]
     yiterm::screen_share::linux::require_desktop(options)?;
     runtime()?.block_on(async {
@@ -53,12 +62,62 @@ pub struct Host {
     pub address: SocketAddr,
     stop: Option<oneshot::Sender<()>>,
     worker: Option<std::thread::JoinHandle<()>>,
+    #[cfg(windows)]
+    process: Option<yiterm::screen_share::windows::privilege::SharingProcess>,
 }
 
 impl Host {
     pub fn start(address: SocketAddr, options: Options) -> Result<Self> {
         #[cfg(windows)]
-        yiterm::screen_share::windows::require_user_desktop()?;
+        {
+            use yiterm::screen_share::windows::{privilege, require_user_desktop};
+            if privilege::elevated()? && !privilege::effective_system() {
+                // Resolve an ephemeral port before handing the listener to the child.
+                let socket = std::net::TcpListener::bind(address)?;
+                let address = socket.local_addr()?;
+                drop(socket);
+                let mut args: Vec<std::ffi::OsString> = vec![
+                    "--share-screen".into(),
+                    "--share-listen".into(),
+                    address.to_string().into(),
+                    "--share-width".into(),
+                    options.share_width.to_string().into(),
+                    "--share-fps".into(),
+                    options.share_fps.to_string().into(),
+                ];
+                for (name, value) in [
+                    ("--share-display", options.share_display),
+                    ("--share-window", options.share_window),
+                ] {
+                    if let Some(value) = value {
+                        args.extend([name.into(), value.to_string().into()]);
+                    }
+                }
+                if let Some(quality) = &options.share_quality {
+                    args.extend(["--share-quality".into(), quality.into()]);
+                }
+                for (name, enabled) in [
+                    ("--share-read-only", options.share_read_only),
+                    (
+                        "--share-adaptive-resolution",
+                        options.share_adaptive_resolution,
+                    ),
+                    ("--share-fixed-resolution", options.share_fixed_resolution),
+                ] {
+                    if enabled {
+                        args.push(name.into());
+                    }
+                }
+                let process = privilege::launch(args, data_dir()?)?;
+                return Ok(Self {
+                    address,
+                    stop: None,
+                    worker: None,
+                    process: Some(process),
+                });
+            }
+            require_user_desktop()?;
+        }
         #[cfg(target_os = "linux")]
         yiterm::screen_share::linux::require_desktop(&options)?;
         let config = config()?;
@@ -84,10 +143,16 @@ impl Host {
             address,
             stop: Some(stop),
             worker: Some(worker),
+            #[cfg(windows)]
+            process: None,
         })
     }
 
     pub fn is_finished(&self) -> bool {
+        #[cfg(windows)]
+        if let Some(process) = &self.process {
+            return process.is_finished();
+        }
         self.worker
             .as_ref()
             .is_some_and(|worker| worker.is_finished())

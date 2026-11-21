@@ -16,6 +16,12 @@ pub(super) trait Desktop {
     fn check(&mut self) -> Result<()> {
         Ok(())
     }
+    fn changed(&mut self) -> bool {
+        false
+    }
+    fn recoverable(&self) -> bool {
+        false
+    }
     fn frame(&mut self, width: u32, divisor: usize) -> Result<Frame>;
     fn input(&mut self, event: Event, view: View, stopped: impl Fn() -> bool) -> Result<()>;
     fn release(&mut self);
@@ -223,8 +229,40 @@ pub(super) fn stream(
             .blocking_send(b"\x1b[?1003h\x1b[?1006h\x1b[?1016h\x1b[?2004h".to_vec())
             .map_err(|_| io::Error::from(io::ErrorKind::BrokenPipe))?;
     }
+    let mut recovering = None;
     while !output.is_closed() {
-        desktop.check()?;
+        let checked = desktop.check();
+        let changed = desktop.changed();
+        if changed || checked.is_err() && desktop.recoverable() {
+            shown = None;
+            decoder = Decoder::new();
+            while input.try_recv().is_ok() {}
+            renderer.previous = None;
+            renderer.previous_view = None;
+            let mut clear = Vec::new();
+            delete(
+                &mut clear,
+                renderer.previous_grid.0 * renderer.previous_grid.1,
+            )?;
+            renderer.previous_grid = (0, 0);
+            if !clear.is_empty() {
+                output
+                    .blocking_send(clear)
+                    .map_err(|_| io::Error::from(io::ErrorKind::BrokenPipe))?;
+            }
+            next_frame = Instant::now();
+        }
+        if let Err(error) = checked {
+            if !desktop.recoverable() {
+                return Err(error);
+            }
+            let since = recovering.get_or_insert_with(Instant::now);
+            if since.elapsed() >= Duration::from_secs(5) {
+                return Err(error);
+            }
+            std::thread::sleep(Duration::from_millis(50));
+            continue;
+        }
         for _ in 0..4 {
             let Ok(bytes) = input.try_recv() else { break };
             decoder.push(&bytes);
@@ -249,7 +287,15 @@ pub(super) fn stream(
                 }
                 event if !options.share_read_only && focused => {
                     if let Some(view) = shown {
-                        desktop.input(event, view, || output.is_closed())?;
+                        if let Err(error) = desktop.input(event, view, || output.is_closed()) {
+                            if !desktop.recoverable() {
+                                return Err(error);
+                            }
+                            shown = None;
+                            decoder = Decoder::new();
+                            while input.try_recv().is_ok() {}
+                            break;
+                        }
                     }
                 }
                 _ => {}
@@ -261,8 +307,43 @@ pub(super) fn stream(
         {
             let size = *sizes.borrow_and_update();
             let tick = Instant::now();
-            let frame = desktop.frame(options.share_width, divisor)?;
-            desktop.check()?;
+            let captured = desktop
+                .frame(options.share_width, divisor)
+                .and_then(|frame| {
+                    desktop.check()?;
+                    anyhow::ensure!(!desktop.changed(), "Windows desktop changed during capture");
+                    Ok(frame)
+                });
+            let frame = match captured {
+                Ok(frame) => {
+                    recovering = None;
+                    frame
+                }
+                Err(error) if desktop.recoverable() => {
+                    shown = None;
+                    decoder = Decoder::new();
+                    while input.try_recv().is_ok() {}
+                    renderer.previous = None;
+                    let mut clear = Vec::new();
+                    delete(
+                        &mut clear,
+                        renderer.previous_grid.0 * renderer.previous_grid.1,
+                    )?;
+                    renderer.previous_grid = (0, 0);
+                    if !clear.is_empty() {
+                        output
+                            .blocking_send(clear)
+                            .map_err(|_| io::Error::from(io::ErrorKind::BrokenPipe))?;
+                    }
+                    let since = recovering.get_or_insert_with(Instant::now);
+                    if since.elapsed() >= Duration::from_secs(5) {
+                        return Err(error);
+                    }
+                    std::thread::sleep(Duration::from_millis(50));
+                    continue;
+                }
+                Err(error) => return Err(error),
+            };
             let view = View::new(size, canvas.unwrap_or(false), (frame.w, frame.h));
             renderer.frame(frame, view, quality, output)?;
             shown = Some(view);

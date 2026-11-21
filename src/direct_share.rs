@@ -38,6 +38,11 @@ const RECENT_LIMIT: usize = 5;
 const INPUT_QUEUE_FULL: &str = "YiTerm input queue full; disconnected";
 
 fn data_dir() -> Result<PathBuf> {
+    #[cfg(windows)]
+    let path = std::env::var_os("YITERM_SHARE_IDENTITY_DIR")
+        .map(PathBuf::from)
+        .unwrap_or(yiterm::logging::config_path()?.with_file_name("direct-share"));
+    #[cfg(not(windows))]
     let path = yiterm::logging::config_path()?.with_file_name("direct-share");
     fs::create_dir_all(&path)?;
     Ok(path)

@@ -23,7 +23,105 @@ use windows_sys::Win32::{
 use windows_sys::core::BOOL;
 use zeroize::Zeroizing;
 
+mod console;
 mod control;
+pub mod privilege;
+
+pub fn prepare() -> Result<()> {
+    if privilege::effective_system() {
+        console::prepare()?;
+        Ok(())
+    } else {
+        require_user_desktop()
+    }
+}
+
+// Bind only the calling worker to the current input desktop. Network/runtime
+// threads never retain a secure-desktop binding across operations.
+struct DesktopBinding {
+    desktop: HDESK,
+    previous: HDESK,
+    name: String,
+}
+impl DesktopBinding {
+    fn open() -> Result<Self> {
+        unsafe {
+            let previous = GetThreadDesktop(GetCurrentThreadId());
+            ensure!(!previous.is_null(), "无法保存原线程桌面");
+            let desktop = OpenInputDesktop(
+                0,
+                0,
+                DESKTOP_READOBJECTS
+                    | DESKTOP_WRITEOBJECTS
+                    | DESKTOP_SWITCHDESKTOP
+                    | DESKTOP_JOURNALPLAYBACK,
+            );
+            ensure!(
+                !desktop.is_null(),
+                "无法访问 Windows 当前桌面：{}",
+                std::io::Error::last_os_error()
+            );
+            let mut binding = Self {
+                desktop,
+                previous,
+                name: String::new(),
+            };
+            binding.name = desktop_name(desktop)?;
+            ensure!(
+                binding.name.eq_ignore_ascii_case("Default")
+                    || (privilege::effective_system()
+                        && binding.name.eq_ignore_ascii_case("Winlogon")),
+                "当前进程无法访问 Windows 安全桌面，请以管理员身份启动共享"
+            );
+            ensure!(
+                SetThreadDesktop(desktop) != 0,
+                "无法切换 Windows 采集/输入线程桌面：{}",
+                std::io::Error::last_os_error()
+            );
+            Ok(binding)
+        }
+    }
+}
+impl Drop for DesktopBinding {
+    fn drop(&mut self) {
+        unsafe {
+            if SetThreadDesktop(self.previous) == 0 {
+                std::process::abort();
+            }
+            CloseDesktop(self.desktop);
+        }
+    }
+}
+fn desktop_name(desktop: HDESK) -> Result<String> {
+    let mut name = [0u16; 256];
+    let mut needed = 0;
+    ensure!(
+        unsafe {
+            GetUserObjectInformationW(
+                desktop,
+                UOI_NAME,
+                name.as_mut_ptr().cast(),
+                mem::size_of_val(&name) as u32,
+                &mut needed,
+            )
+        } != 0,
+        "无法读取 Windows 桌面身份"
+    );
+    Ok(String::from_utf16_lossy(
+        &name[..name.iter().position(|c| *c == 0).unwrap_or(name.len())],
+    ))
+}
+pub(crate) fn current_desktop_name() -> Option<String> {
+    unsafe {
+        let desktop = OpenInputDesktop(0, 0, DESKTOP_READOBJECTS);
+        if desktop.is_null() {
+            return None;
+        }
+        let name = desktop_name(desktop).ok();
+        CloseDesktop(desktop);
+        name
+    }
+}
 
 pub fn require_user_desktop() -> Result<()> {
     let mut name = [0u16; 32];
@@ -350,7 +448,14 @@ struct Capture {
 }
 
 impl Capture {
-    fn frame(&mut self, source: &Source, rect: RECT, width: u32, divisor: usize) -> Result<Frame> {
+    fn frame(
+        &mut self,
+        source: &Source,
+        rect: RECT,
+        width: u32,
+        divisor: usize,
+        secure: bool,
+    ) -> Result<Frame> {
         let native = dimensions(rect)?;
         let (w, h) = native;
         let size = capture_size(native, width, divisor);
@@ -389,6 +494,46 @@ impl Capture {
             scaled.scale_from(surface.dc, 0, 0, native, SRCCOPY)?;
             return Ok(scaled.frame());
         }
+        // Secure desktop drivers may reject StretchBlt, including equal-size copies.
+        // Copy native pixels with BitBlt and resize in CPU memory instead.
+        if secure {
+            Surface::get(&mut self.window, &self.screen, native)?;
+            let surface = self
+                .window
+                .as_mut()
+                .context("Missing native capture surface")?;
+            let ok = unsafe {
+                BitBlt(
+                    surface.dc,
+                    0,
+                    0,
+                    w as i32,
+                    h as i32,
+                    self.screen.0,
+                    rect.left,
+                    rect.top,
+                    SRCCOPY,
+                )
+            };
+            ensure!(ok != 0, "Windows could not copy the lock screen");
+            let frame = surface.frame();
+            if size == native {
+                return Ok(frame);
+            }
+            let mut pixels = vec![0; size.0 * size.1 * 4];
+            for y in 0..size.1 {
+                for x in 0..size.0 {
+                    let from = ((y * h / size.1) * w + x * w / size.0) * 4;
+                    let to = (y * size.0 + x) * 4;
+                    pixels[to..to + 4].copy_from_slice(&frame.pixels[from..from + 4]);
+                }
+            }
+            return Ok(Frame {
+                w: size.0,
+                h: size.1,
+                pixels,
+            });
+        }
         Surface::get(&mut self.scaled, &self.screen, size)?;
         let scaled = self
             .scaled
@@ -407,26 +552,104 @@ impl Capture {
 
 struct WindowsDesktop {
     source: Source,
-    capture: Capture,
+    capture: Option<Capture>,
     control: control::Control,
+    binding: Option<DesktopBinding>,
+    lock_source: Source,
+    changed: bool,
 }
 
 impl Desktop for WindowsDesktop {
     fn check(&mut self) -> Result<()> {
+        let current = current_desktop_name().context("Windows 当前桌面暂不可访问")?;
+        if self.capture.is_none()
+            || self
+                .binding
+                .as_ref()
+                .is_none_or(|binding| binding.name != current)
+        {
+            self.control.abandon();
+            self.capture.take();
+            self.binding.take();
+            self.changed = true;
+            let binding = DesktopBinding::open()?;
+            self.binding = Some(binding);
+            self.capture = Some(Capture {
+                screen: ScreenDc::open()?,
+                scaled: None,
+                window: None,
+            });
+        }
         check_desktop()
     }
 
+    fn changed(&mut self) -> bool {
+        std::mem::take(&mut self.changed)
+    }
+
+    fn recoverable(&self) -> bool {
+        privilege::effective_system()
+    }
+
     fn frame(&mut self, width: u32, divisor: usize) -> Result<Frame> {
-        self.capture
-            .frame(&self.source, self.source.bounds()?, width, divisor)
+        let source = if self
+            .binding
+            .as_ref()
+            .is_some_and(|binding| binding.name == "Winlogon")
+        {
+            &self.lock_source
+        } else {
+            &self.source
+        };
+        let secure = self
+            .binding
+            .as_ref()
+            .is_some_and(|binding| binding.name == "Winlogon");
+        let result = self
+            .capture
+            .as_mut()
+            .context("Windows capture is unavailable")?
+            .frame(source, source.bounds()?, width, divisor, secure);
+        if result.is_err() {
+            self.capture.take();
+        }
+        result
     }
 
     fn input(&mut self, event: Event, view: View, stopped: impl Fn() -> bool) -> Result<()> {
-        self.control.handle(event, &self.source, view, stopped)
+        // Never deliver input against coordinates from a different desktop.
+        if self.binding.as_ref().map(|binding| binding.name.as_str())
+            != current_desktop_name().as_deref()
+        {
+            return Ok(());
+        }
+        let source = if self
+            .binding
+            .as_ref()
+            .is_some_and(|binding| binding.name == "Winlogon")
+        {
+            &self.lock_source
+        } else {
+            &self.source
+        };
+        self.control.handle(event, source, view, stopped)
     }
 
     fn release(&mut self) {
-        self.control.release();
+        if self.binding.as_ref().map(|binding| binding.name.as_str())
+            == current_desktop_name().as_deref()
+        {
+            self.control.release();
+        } else {
+            self.control.abandon();
+        }
+    }
+}
+
+impl Drop for WindowsDesktop {
+    fn drop(&mut self) {
+        self.release();
+        self.control.abandon();
     }
 }
 
@@ -438,8 +661,14 @@ pub fn stream(
 ) -> Result<()> {
     // This worker owns the capture DCs and uses physical coordinates throughout.
     unsafe { SetThreadDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2) };
-    require_user_desktop()?;
+    let binding = DesktopBinding::open()?;
     let source = Source::select(options)?;
+    let lock_source = Source::Display(
+        monitors()?
+            .into_iter()
+            .find(|monitor| monitor.primary)
+            .context("Windows primary display is unavailable")?,
+    );
     let capture = Capture {
         screen: ScreenDc::open()?,
         scaled: None,
@@ -448,8 +677,11 @@ pub fn stream(
     desktop::stream(
         WindowsDesktop {
             source,
-            capture,
+            capture: Some(capture),
             control: control::Control::default(),
+            binding: Some(binding),
+            lock_source,
+            changed: false,
         },
         options,
         sizes,
