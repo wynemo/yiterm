@@ -1135,11 +1135,7 @@ impl eframe::App for TerminalApp {
                                     );
                                 }
                             };
-                        let (leading_rect, leading) =
-                            ui.allocate_exact_size(Vec2::new(8., TAB_HEIGHT), egui::Sense::hover());
-                        if let Some(first) = self.tabs.first() {
-                            drop_target(ui, &leading, first.id, true, leading_rect.right() - 1.);
-                        }
+                        let tab_bar_left = ui.cursor().left();
                         for (index, session) in self.tabs.iter().enumerate() {
                             ui.push_id(session.id, |ui| {
                                 let (response, close) = terminal_tab(
@@ -1192,7 +1188,7 @@ impl eframe::App for TerminalApp {
                         if let Some(last) = self.tabs.last() {
                             let mut trailing = gap.union(plus);
                             let remaining =
-                                leading_rect.left() + tab_bar_width - trailing.rect.right();
+                                tab_bar_left + tab_bar_width - trailing.rect.right();
                             if remaining > 0. {
                                 let (_, blank) = ui.allocate_exact_size(
                                     Vec2::new(remaining, TAB_HEIGHT),

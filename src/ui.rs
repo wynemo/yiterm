@@ -2251,15 +2251,6 @@ impl Render for TerminalUi {
             .border_color(theme.border())
             .overflow_x_scroll()
             .flex_shrink_0();
-        if let Some(first) = self.app.tabs.first() {
-            tabs = tabs.child(
-                tab_drop_target(first.id, true, theme, cx)
-                    .w(px(8.))
-                    .h(px(TAB_HEIGHT))
-                    .flex_shrink_0()
-                    .border_r_2(),
-            );
-        }
         for (index, tab) in self.app.tabs.iter().enumerate() {
             let tab_id = tab.id;
             let title = SharedString::from(tab.title().to_owned());
