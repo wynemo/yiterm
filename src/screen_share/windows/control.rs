@@ -1,12 +1,15 @@
 use super::{Source, View, check_desktop};
 use crate::screen_share::input::{self, Event};
-use anyhow::Result;
-use std::{mem, ptr::null_mut};
+use anyhow::{Result, ensure};
+use std::{cell::Cell, mem, ptr::null_mut};
 use windows_sys::Win32::{
     Foundation::{HWND, POINT},
-    Graphics::Gdi::{MONITOR_DEFAULTTONULL, MonitorFromWindow},
     UI::{Input::KeyboardAndMouse::*, WindowsAndMessaging::*},
 };
+
+thread_local! {
+    static INPUT_REJECTED: Cell<bool> = const { Cell::new(false) };
+}
 
 const BUTTONS: [(u32, u32); 3] = [
     (MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP),
@@ -31,6 +34,7 @@ impl Control {
         view: View,
         stopped: impl Fn() -> bool,
     ) -> Result<()> {
+        INPUT_REJECTED.set(false);
         match event {
             Event::Text(text) => send_text(&text, source, true, stopped)?,
             Event::Paste(text) => send_text(&text, source, false, stopped)?,
@@ -102,6 +106,10 @@ impl Control {
             }
             _ => {}
         }
+        ensure!(
+            !INPUT_REJECTED.get(),
+            "Windows 拒绝远程输入，请确认共享端已以管理员身份启动，并重新启动共享"
+        );
         Ok(())
     }
 
@@ -122,16 +130,15 @@ impl Drop for Control {
 
 fn foreground(source: &Source) -> Option<HWND> {
     let window = unsafe { GetForegroundWindow() };
-    if window.is_null() {
-        return None;
+    match source {
+        // Winlogon can have no foreground HWND while the clock curtain is up.
+        // Full-display input targets the bound desktop, not a particular window.
+        Source::Display(_) => Some(window),
+        Source::Window(shared) => {
+            (!window.is_null() && window == shared.handle && source.bounds().is_ok())
+                .then_some(window)
+        }
     }
-    let visible = match source {
-        Source::Window(shared) => window == shared.handle && source.bounds().is_ok(),
-        Source::Display(display) => unsafe {
-            MonitorFromWindow(window, MONITOR_DEFAULTTONULL) == display.handle
-        },
-    };
-    visible.then_some(window)
 }
 
 fn send_text(text: &str, source: &Source, typed: bool, stopped: impl Fn() -> bool) -> Result<()> {
@@ -157,7 +164,11 @@ fn send_text(text: &str, source: &Source, typed: bool, stopped: impl Fn() -> boo
 }
 
 fn send_layout_key(window: HWND, c: u16, modifiers: u32) -> bool {
-    let thread = unsafe { GetWindowThreadProcessId(window, null_mut()) };
+    let thread = if window.is_null() {
+        0
+    } else {
+        unsafe { GetWindowThreadProcessId(window, null_mut()) }
+    };
     let layout = unsafe { GetKeyboardLayout(thread) };
     let mapped = unsafe { VkKeyScanExW(c, layout) };
     if mapped == -1 {
@@ -224,6 +235,29 @@ fn virtual_key(code: u32) -> Option<(u16, bool)> {
 }
 
 fn key_event(key: u16, scan: u16, flags: u32) -> INPUT {
+    // LogonUI expects physical keys, including Enter, Tab and modifiers.
+    // Unicode packets already contain UTF-16 units and must remain unchanged.
+    let (key, scan, flags) = if key != 0 && flags & KEYEVENTF_UNICODE == 0 {
+        let layout = unsafe { GetKeyboardLayout(0) };
+        let mapped = unsafe { MapVirtualKeyExW(u32::from(key), MAPVK_VK_TO_VSC_EX, layout) };
+        if mapped != 0 && mapped >> 8 != 0xe1 {
+            (
+                0,
+                (mapped & 0xff) as u16,
+                flags
+                    | KEYEVENTF_SCANCODE
+                    | if mapped >> 8 == 0xe0 {
+                        KEYEVENTF_EXTENDEDKEY
+                    } else {
+                        0
+                    },
+            )
+        } else {
+            (key, scan, flags)
+        }
+    } else {
+        (key, scan, flags)
+    };
     INPUT {
         r#type: INPUT_KEYBOARD,
         Anonymous: INPUT_0 {
@@ -311,11 +345,15 @@ fn mouse_move(x: i32, y: i32) -> Option<INPUT> {
 }
 
 fn send(events: &[INPUT]) -> u32 {
-    unsafe {
-        SendInput(
-            events.len() as u32,
-            events.as_ptr(),
-            mem::size_of::<INPUT>() as i32,
-        )
+    // Match the native controller: submit each transition individually.
+    let mut sent = 0;
+    for event in events {
+        let accepted = unsafe { SendInput(1, event, mem::size_of::<INPUT>() as i32) };
+        if accepted != 1 {
+            INPUT_REJECTED.set(true);
+            break;
+        }
+        sent += 1;
     }
+    sent
 }

@@ -285,17 +285,11 @@ pub(super) fn stream(
                 {
                     return Ok(());
                 }
-                event if !options.share_read_only && focused => {
+                // The viewer routes input only to the selected pane. A stale focus
+                // notification must not discard subsequent explicit user input.
+                event if !options.share_read_only => {
                     if let Some(view) = shown {
-                        if let Err(error) = desktop.input(event, view, || output.is_closed()) {
-                            if !desktop.recoverable() {
-                                return Err(error);
-                            }
-                            shown = None;
-                            decoder = Decoder::new();
-                            while input.try_recv().is_ok() {}
-                            break;
-                        }
+                        desktop.input(event, view, || output.is_closed())?;
                     }
                 }
                 _ => {}
