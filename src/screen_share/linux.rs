@@ -289,6 +289,48 @@ impl X11Desktop {
         Ok(on_screen.then_some(focus))
     }
 
+    fn paste_modifiers(&self, mut window: Window) -> Result<u32> {
+        const CONTROL: u32 = 4;
+        const SHIFT: u32 = 1;
+        const TERMINAL_CLASSES: &[&[u8]] = &[
+            b"gnome-terminal",
+            b"gnome-terminal-server",
+            b"org.gnome.Terminal",
+            b"konsole",
+            b"org.kde.konsole",
+            b"mate-terminal",
+            b"terminator",
+            b"xfce4-terminal",
+        ];
+
+        // WM_CLASS belongs to the application window. Keyboard focus can be on a child.
+        for _ in 0..16 {
+            if window <= 1 || window == self.root {
+                break;
+            }
+            let Ok(class) = self
+                .connection
+                .get_property(false, window, AtomEnum::WM_CLASS, AtomEnum::STRING, 0, 64)?
+                .reply()
+            else {
+                break;
+            };
+            if class.format == 8 && !class.value.is_empty() {
+                let terminal = class.value.split(|&byte| byte == 0).any(|name| {
+                    TERMINAL_CLASSES
+                        .iter()
+                        .any(|terminal| name.eq_ignore_ascii_case(terminal))
+                });
+                return Ok(CONTROL | if terminal { SHIFT } else { 0 });
+            }
+            let Ok(tree) = self.connection.query_tree(window)?.reply() else {
+                break;
+            };
+            window = tree.parent;
+        }
+        Ok(CONTROL)
+    }
+
     fn keyboard(
         &self,
         keys: impl Iterator<Item = (u32, u32)>,
@@ -364,6 +406,7 @@ impl X11Desktop {
         let Some(focus) = self.focused_window()? else {
             return Ok(());
         };
+        let modifiers = self.paste_modifiers(focus)?;
         let Some(clipboard) = &mut self.clipboard else {
             return Ok(());
         };
@@ -372,7 +415,7 @@ impl X11Desktop {
             return Ok(());
         }
 
-        self.send_keys(std::iter::once((u32::from(b'v'), 4)), &stopped)?;
+        self.send_keys(std::iter::once((u32::from(b'v'), modifiers)), &stopped)?;
         self.connection.flush()?;
         // X11 selection conversion is asynchronous. Give the application a chance
         // to fetch this payload before the next input event can replace it.
