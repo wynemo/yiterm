@@ -124,6 +124,10 @@ Windows / macOS CI 保留 Cargo registry、Git 依赖及完整 Release 编译产
 
 CI 在 Release 缓存内记录各 vendor crate 的内容摘要及文件、目录时间戳。只有整个 crate 内容与缓存一致时才恢复原时间戳；变化的 crate 保留本次 checkout 时间，由 Cargo 重编并更新相关依赖产物。这样既避免未修改的 vendor crate 因 checkout 时间变化而重编，也避免固定旧时间戳掩盖源码修改。首次迁移的旧缓存没有摘要记录，vendor crate 会保守重编一次，registry / Git 依赖仍可复用。精确命中成功构建的缓存后，Cargo 使用离线模式；回退或未命中时允许联网获取依赖。实际缓存命中及重编范围以 CI 日志为准。
 
+### macOS 系统菜单
+
+macOS 使用屏幕顶部的系统菜单栏：YiTerm 菜单包含 About、Settings 和退出，Pane 提供分栏、关闭与重连，Tools 提供连接、共享与打开日志。窗口内不再显示菜单行；共享状态和 Git / Files 开关位于标签栏。Windows 保留窗口内菜单。
+
 ### Linux / macOS SSH 与 shell 环境
 
 Linux 和 macOS 均使用系统 OpenSSH，不创建临时 `bin/ssh`、不往 PATH 中插入 YiTerm 目录，也不设置 `YITERM_REAL_SSH`、`YITERM_SSH_DIRECTORY`。本地 shell 由系统按正常流程加载自己的配置；不使用 YiTerm rc 文件或 ZDOTDIR 覆盖，不额外 source 用户配置，不添加 SSH 函数或别名，也不修改用户配置文件。新版本从旧 YiTerm shell 中启动时，会移除已确认属于旧版本的 SSH PATH 接管及其内部环境变量。

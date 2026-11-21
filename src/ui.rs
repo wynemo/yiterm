@@ -195,6 +195,122 @@ impl SelectItem for ShellChoice {
 
 gpui::actions!(terminal, [Complete, CompletePrevious]);
 
+#[cfg(target_os = "macos")]
+gpui::actions!(
+    native_menu,
+    [
+        OpenSettings,
+        ShowAbout,
+        SplitRight,
+        SplitDown,
+        ClosePane,
+        Reconnect,
+        ConnectShare,
+        StartSharing,
+        StopSharing,
+        OpenLog,
+        Quit
+    ]
+);
+
+#[cfg(target_os = "macos")]
+fn install_native_menus(cx: &mut App) {
+    use gpui::{Menu as NativeMenu, MenuItem as Item};
+    cx.on_action(|_: &Quit, cx| cx.quit());
+    cx.bind_keys([
+        gpui::KeyBinding::new("cmd-q", Quit, None),
+        gpui::KeyBinding::new("cmd-,", OpenSettings, None),
+    ]);
+    cx.set_menus(vec![
+        NativeMenu {
+            name: "YiTerm".into(),
+            items: vec![
+                Item::action("About YiTerm", ShowAbout),
+                Item::separator(),
+                Item::action("Settings…", OpenSettings),
+                Item::separator(),
+                Item::os_submenu("Services", gpui::SystemMenuType::Services),
+                Item::separator(),
+                Item::action("Quit YiTerm", Quit),
+            ],
+        },
+        NativeMenu {
+            name: "Pane".into(),
+            items: vec![
+                Item::action("Split Right", SplitRight),
+                Item::action("Split Down", SplitDown),
+                Item::action("Close Pane", ClosePane),
+                Item::action("Reconnect", Reconnect),
+            ],
+        },
+        NativeMenu {
+            name: "Tools".into(),
+            items: vec![
+                Item::action("Connect to YiTerm…", ConnectShare),
+                Item::action("Start YiTerm Sharing…", StartSharing),
+                Item::action("Stop YiTerm Sharing", StopSharing),
+                Item::action("Open Log File", OpenLog),
+            ],
+        },
+    ]);
+}
+
+#[cfg(target_os = "macos")]
+impl TerminalUi {
+    fn native_menu_actions(&self, mut root: gpui::Div, cx: &ViewContext<Self>) -> gpui::Div {
+        macro_rules! handle {
+            ($action:ty, $callback:expr) => {{
+                root = root.on_action(cx.listener(|this, _: &$action, window, cx| {
+                    this.menu = None;
+                    ($callback)(this, &mut *window, &mut *cx);
+                    cx.notify();
+                }));
+            }};
+        }
+        handle!(
+            OpenSettings,
+            |this: &mut Self, window: &mut Window, cx: &mut ViewContext<Self>| {
+                this.app.settings_open = true;
+                this.refresh_shell_choices(window, cx);
+                this.refresh_font_chain(window, cx);
+            }
+        );
+        handle!(ShowAbout, |this: &mut Self, _, _| {
+            this.app.about_open = true;
+            this.app.about_licenses = false;
+        });
+        handle!(SplitRight, |this: &mut Self, _, _| this
+            .app
+            .split_pane(SplitDirection::Right));
+        handle!(SplitDown, |this: &mut Self, _, _| this
+            .app
+            .split_pane(SplitDirection::Down));
+        handle!(ClosePane, |this: &mut Self, _, _| this.close_pane());
+        handle!(Reconnect, |this: &mut Self, window: &mut Window, _| {
+            if this.app.tabs[this.app.active].focused().is_direct_share() {
+                this.app.reconnect_share();
+                this.focus.focus(window);
+            }
+        });
+        handle!(ConnectShare, |this: &mut Self, window, cx| this
+            .open_share_dialog(false, window, cx));
+        handle!(StartSharing, |this: &mut Self, window, cx| {
+            if this.share_host.is_none() {
+                this.open_share_dialog(true, window, cx);
+            }
+        });
+        handle!(StopSharing, |this: &mut Self, _, _| {
+            this.share_host = None;
+        });
+        handle!(OpenLog, |this: &mut Self, _, _| {
+            if let Err(error) = logging::open_current_file(&this.app.log_directory) {
+                this.app.error = Some(format!("{error:#}"));
+            }
+        });
+        root
+    }
+}
+
 fn terminal_key_bindings() -> [gpui::KeyBinding; 2] {
     [
         gpui::KeyBinding::new("tab", Complete, Some("Terminal")),
@@ -2172,33 +2288,35 @@ impl Render for TerminalUi {
             .h(px(28.))
             .gap(px(4.))
             .px(px(6.))
-            .child(
-                self.menu_button("settings", "Settings", cx, |this, window, cx| {
-                    this.app.settings_open = true;
-                    this.refresh_shell_choices(window, cx);
-                    this.refresh_font_chain(window, cx);
+            .when(!cfg!(target_os = "macos"), |menu| {
+                menu.child(
+                    self.menu_button("settings", "Settings", cx, |this, window, cx| {
+                        this.app.settings_open = true;
+                        this.refresh_shell_choices(window, cx);
+                        this.refresh_font_chain(window, cx);
+                        this.menu = None;
+                    }),
+                )
+                .child(self.menu_button("pane-menu", "Pane", cx, |this, _, _| {
+                    this.menu = if this.menu == Some(Menu::Pane) {
+                        None
+                    } else {
+                        Some(Menu::Pane)
+                    };
+                }))
+                .child(self.menu_button("tools-menu", "Tools", cx, |this, _, _| {
+                    this.menu = if this.menu == Some(Menu::Tools) {
+                        None
+                    } else {
+                        Some(Menu::Tools)
+                    };
+                }))
+                .child(self.menu_button("about", "About", cx, |this, _, _| {
+                    this.app.about_open = true;
+                    this.app.about_licenses = false;
                     this.menu = None;
-                }),
-            )
-            .child(self.menu_button("pane-menu", "Pane", cx, |this, _, _| {
-                this.menu = if this.menu == Some(Menu::Pane) {
-                    None
-                } else {
-                    Some(Menu::Pane)
-                };
-            }))
-            .child(self.menu_button("tools-menu", "Tools", cx, |this, _, _| {
-                this.menu = if this.menu == Some(Menu::Tools) {
-                    None
-                } else {
-                    Some(Menu::Tools)
-                };
-            }))
-            .child(self.menu_button("about", "About", cx, |this, _, _| {
-                this.app.about_open = true;
-                this.app.about_licenses = false;
-                this.menu = None;
-            }));
+                }))
+            });
         let sidebar_visible = self.app.files_settings.visible;
         let menu = menu.child(div().flex_1());
         let menu = if let Some(host) = &self.share_host {
@@ -2401,15 +2519,18 @@ impl Render for TerminalUi {
                     ),
             );
         }
-        let mut top = div()
+        #[cfg(target_os = "macos")]
+        let tabs = tabs.child(menu);
+        let top = div()
             .flex()
             .flex_col()
             .flex_shrink_0()
             .bg(theme.surface())
             .border_b_1()
-            .border_color(theme.border())
-            .child(menu)
-            .child(tabs);
+            .border_color(theme.border());
+        #[cfg(not(target_os = "macos"))]
+        let top = top.child(menu);
+        let mut top = top.child(tabs);
         if let Some(error) = &self.app.error {
             top = top.child(
                 div()
@@ -2612,6 +2733,10 @@ impl Render for TerminalUi {
             .when(!browser_maximized, |root| root.child(top))
             .child(content)
             .when(!browser_maximized, |root| root.child(footer));
+        #[cfg(target_os = "macos")]
+        {
+            root = self.native_menu_actions(root, cx);
+        }
         if let Some(menu) = self.menu {
             let mut items = div()
                 .id("popup-menu")
@@ -3972,6 +4097,8 @@ pub(super) fn run(app: TerminalApp) -> Result<()> {
         .with_assets(UiAssets)
         .run(move |cx: &mut App| {
             gpui_component::init(cx);
+            #[cfg(target_os = "macos")]
+            install_native_menus(cx);
             cx.bind_keys(terminal_key_bindings());
             apply_component_theme(app.theme, None, cx);
             if let Err(error) = cx.text_system().add_fonts(vec![
