@@ -269,10 +269,8 @@ impl TerminalUi {
         }
         handle!(
             OpenSettings,
-            |this: &mut Self, window: &mut Window, cx: &mut ViewContext<Self>| {
+            |this: &mut Self, _: &mut Window, _: &mut ViewContext<Self>| {
                 this.app.settings_open = true;
-                this.refresh_shell_choices(window, cx);
-                this.refresh_font_chain(window, cx);
             }
         );
         handle!(ShowAbout, |this: &mut Self, _, _| {
@@ -436,6 +434,8 @@ enum Menu {
 pub(super) struct TerminalUi {
     app: TerminalApp,
     about_window: Option<gpui::WindowHandle<AboutWindow>>,
+    settings_window: Option<gpui::WindowHandle<Root>>,
+    settings_terminal: bool,
     graphics_images: Vec<Arc<gpui::RenderImage>>,
     focus: FocusHandle,
     files_focus: FocusHandle,
@@ -578,94 +578,14 @@ impl TerminalUi {
                 .rows(3)
                 .placeholder("Commit summary, then optional description…")
         });
-        let mut settings_subscriptions = vec![
-            cx.subscribe_in(&font_select, window, Self::on_font_selected),
-            cx.subscribe_in(&font_size, window, |this, input, event, window, cx| {
-                let text = input.read(cx).value();
-                let parsed = text.parse::<f32>().ok().filter(|v| v.is_finite());
-                if matches!(event, InputEvent::Blur | InputEvent::PressEnter { .. }) {
-                    let size = parsed.unwrap_or(this.app.font_settings.size).clamp(8., 48.);
-                    input.update(cx, |input, cx| {
-                        input.set_value(size.to_string(), window, cx)
-                    });
-                    if this.app.font_settings.size != size {
-                        this.app.font_settings.size = size;
-                        this.apply_settings();
-                    }
-                } else if matches!(event, InputEvent::Change) {
-                    if let Some(size) = parsed.filter(|v| (8.0..=48.0).contains(v)) {
-                        if this.app.font_settings.size != size {
-                            this.app.font_settings.size = size;
-                            this.apply_settings();
-                        }
-                    }
-                }
-                cx.notify();
-            }),
-            cx.subscribe_in(
-                &font_size,
-                window,
-                |this, input, event: &NumberInputEvent, window, cx| {
-                    let NumberInputEvent::Step(action) = event;
-                    let delta = match action {
-                        StepAction::Increment => 1.,
-                        StepAction::Decrement => -1.,
-                    };
-                    let size = input
-                        .read(cx)
-                        .value()
-                        .parse::<f32>()
-                        .ok()
-                        .filter(|v| v.is_finite())
-                        .unwrap_or(this.app.font_settings.size);
-                    let size = (size + delta).clamp(8., 48.);
-                    input.update(cx, |input, cx| {
-                        input.set_value(size.to_string(), window, cx)
-                    });
-                    this.app.font_settings.size = size;
-                    this.apply_settings();
-                    cx.notify();
-                },
-            ),
-            cx.subscribe_in(
-                &shell_select,
-                window,
-                |this, _, event: &SelectEvent<SearchableVec<ShellChoice>>, window, cx| {
-                    if let SelectEvent::Confirm(Some(value)) = event {
-                        match value.as_str() {
-                            "Default" => {
-                                this.app.shell_settings.mode = settings::ShellMode::Default
-                            }
-                            "Program" => {
-                                this.app.shell_settings.mode = settings::ShellMode::Program
-                            }
-                            _ => {
-                                this.app.shell_settings.mode = settings::ShellMode::Program;
-                                this.app.shell_settings.program = value.clone();
-                                this.shell_program.update(cx, |input, cx| {
-                                    input.set_value(value.clone(), window, cx)
-                                });
-                            }
-                        }
-                        this.apply_settings();
-                        cx.notify();
-                    }
-                },
-            ),
-            cx.subscribe_in(&shell_program, window, |this, input, event, window, cx| {
-                if matches!(event, InputEvent::Blur | InputEvent::PressEnter { .. }) {
-                    let program = input.read(cx).value().to_string();
-                    if program.trim().is_empty() {
-                        this.app.error = Some("Shell program cannot be empty".into());
-                    } else if program != this.app.shell_settings.program {
-                        this.app.shell_settings.program = program;
-                        this.refresh_shell_choices(window, cx);
-                        this.apply_settings();
-                    }
-                    cx.notify();
-                }
-            }),
-        ];
+        let mut settings_subscriptions = Self::settings_input_subscriptions(
+            &font_select,
+            &font_size,
+            &shell_select,
+            &shell_program,
+            window,
+            cx,
+        );
         settings_subscriptions.push(cx.subscribe(&shell_arguments, |this, input, event, cx| {
             if matches!(event, InputEvent::Change) {
                 let text = input.read(cx).value().to_string();
@@ -740,6 +660,8 @@ impl TerminalUi {
         let files_split = cx.new(|_| gpui_component::resizable::ResizableState::default());
         Self {
             about_window: None,
+            settings_window: None,
+            settings_terminal: false,
             graphics_images: Vec::new(),
             git_message,
             git_message_repo: None,
@@ -2294,6 +2216,21 @@ impl Focusable for TerminalUi {
         self.focus.clone()
     }
 }
+struct SettingsWindow {
+    terminal: gpui::WeakEntity<TerminalUi>,
+    _subscription: gpui::Subscription,
+}
+
+impl Render for SettingsWindow {
+    fn render(&mut self, window: &mut Window, cx: &mut ViewContext<Self>) -> impl IntoElement {
+        let Some(terminal) = self.terminal.upgrade() else {
+            window.remove_window();
+            return div().into_any_element();
+        };
+        terminal.update(cx, |terminal, cx| terminal.settings_panel(window, cx))
+    }
+}
+
 struct AboutWindow {
     terminal: gpui::WeakEntity<TerminalUi>,
     _subscription: gpui::Subscription,
@@ -2311,6 +2248,11 @@ impl Render for AboutWindow {
 
 impl Render for TerminalUi {
     fn render(&mut self, window: &mut Window, cx: &mut ViewContext<Self>) -> impl IntoElement {
+        if self.app.settings_open {
+            self.app.settings_open = false;
+            let terminal = cx.entity();
+            cx.defer(move |cx| Self::open_settings_window(terminal, cx));
+        }
         if self.app.about_open {
             self.app.about_open = false;
             let terminal = cx.entity();
@@ -2340,14 +2282,10 @@ impl Render for TerminalUi {
             .gap(px(4.))
             .px(px(6.))
             .when(!cfg!(target_os = "macos"), |menu| {
-                menu.child(
-                    self.menu_button("settings", "Settings", cx, |this, window, cx| {
-                        this.app.settings_open = true;
-                        this.refresh_shell_choices(window, cx);
-                        this.refresh_font_chain(window, cx);
-                        this.menu = None;
-                    }),
-                )
+                menu.child(self.menu_button("settings", "Settings", cx, |this, _, _| {
+                    this.app.settings_open = true;
+                    this.menu = None;
+                }))
                 .child(self.menu_button("pane-menu", "Pane", cx, |this, _, _| {
                     this.menu = if this.menu == Some(Menu::Pane) {
                         None
@@ -3020,29 +2958,6 @@ impl Render for TerminalUi {
         if self.viewer_open() && !self.app.settings_open && !self.app.about_open {
             root = root.child(self.code_viewer(window, cx));
         }
-        if self.app.settings_open {
-            let panel = self.settings_panel(window, cx);
-            root = root.child(
-                div()
-                    .absolute()
-                    .inset_0()
-                    .occlude()
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .p(px(8.))
-                    .bg(gpui::rgba(0x00000066))
-                    .on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(|this, _, _, cx| {
-                            this.app.settings_open = false;
-                            this.app.about_open = false;
-                            cx.notify();
-                        }),
-                    )
-                    .child(panel),
-            );
-        }
         if self.app.share_address.is_some() {
             let hosting = self.share_host_dialog;
             let mut actions = div().flex().gap(px(8.)).child(self.button(
@@ -3437,12 +3352,13 @@ impl TerminalUi {
         let description = |title: &'static str, detail: &'static str| {
             div()
                 .flex_1()
-                .min_w_0()
-                .child(div().text_size(px(14.)).child(title))
+                .min_w(px(160.))
+                .child(div().text_size(px(12.)).line_height(px(18.)).child(title))
                 .child(
                     div()
-                        .mt(px(4.))
-                        .text_size(px(12.))
+                        .text_size(px(11.))
+                        .line_height(px(16.))
+                        .text_color(theme.foreground())
                         .opacity(0.65)
                         .child(detail),
                 )
@@ -3452,11 +3368,13 @@ impl TerminalUi {
                 .flex()
                 .items_center()
                 .justify_between()
-                .gap(px(20.))
-                .py(px(16.))
+                .flex_wrap()
+                .gap_x(px(16.))
+                .gap_y(px(8.))
+                .py(px(12.))
                 .flex_shrink_0()
         };
-        let divider = || div().h(px(1.)).bg(theme.border());
+        let divider = || div().h(px(1.)).flex_shrink_0().bg(theme.border());
         let mut fallbacks = div()
             .w(px(300.))
             .flex_shrink_0()
@@ -3538,31 +3456,8 @@ impl TerminalUi {
                     })),
             );
         }
-        div()
-            .id("settings-dialog")
-            .occlude()
-            .w(px(600.))
-            .max_w_full()
-            .max_h(gpui::relative(0.95))
-            .overflow_y_scroll()
-            .p(px(24.))
-            .text_size(px(13.))
-            .bg(theme.surface())
-            .border_1()
-            .border_color(theme.border())
-            .rounded(px(10.))
-            .shadow_lg()
-            .flex()
-            .flex_col()
-            .flex_shrink_0()
-            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-            .child(
-                div()
-                    .text_size(px(20.))
-                    .line_height(px(28.))
-                    .child("Settings"),
-            )
-            .child(div().mt(px(20.)).opacity(0.6).child("TERMINAL"))
+        let content = if self.settings_terminal {
+            div().flex().flex_col()
             .child(
                 row()
                     .child(description(
@@ -3648,185 +3543,296 @@ impl TerminalUi {
                     ),
             )
             .child(divider())
-            .child(div().mt(px(20.)).opacity(0.6).child("APPEARANCE"))
-            .child(
-                row().child(description("UI Font", "Font for menus, settings and other interface text."))
-                    .when_some(self.ui_font_select.as_ref(), |row, select| {
-                        row.child(div().w(px(220.)).child(
-                            Select::new(select).small().search_placeholder("Search UI fonts…").w_full()
+        } else {
+            div()
+                .flex()
+                .flex_col()
+                .child(
+                    row()
+                        .child(description(
+                            "UI Font",
+                            "Font for menus, settings and other interface text.",
                         ))
-                    }),
-            )
-            .child(divider())
-            .child(
-                row()
-                    .child(description(
-                        "Theme",
-                        "Choose the window and terminal appearance.",
-                    ))
-                    .child(themes),
-            )
-            .child(divider())
-            .child(
-                row()
-                    .child(description(
-                        "Font Size",
-                        "Terminal text size in pixels, from 8 to 48.",
-                    ))
-                    .child(
-                        div()
-                            .w(px(148.))
-                            .flex_shrink_0()
-                            .child(NumberInput::new(&self.font_size).small()),
-                    ),
-            )
-            .child(divider())
-            .child(
-                row()
-                    .child(description(
-                        "Font Family",
-                        "Use a monospace font to keep characters aligned.",
-                    ))
-                    .child(
-                        div().w(px(220.)).flex_shrink_0().child(
-                            Select::new(&self.font_select)
-                                .small()
-                                .search_placeholder("Search fonts…")
-                                .w_full(),
-                        ),
-                    ),
-            )
-            .child(divider())
-            .child(
-                row()
-                    .child(description(
-                        "Fallbacks",
-                        "Tried in order for characters the family lacks.",
-                    ))
-                    .child(fallbacks),
-            )
-            .child(divider())
-            .child(
-                row()
-                    .child(description(
-                        "CJK Font",
-                        "Draws Chinese, Japanese and Korean characters.",
-                    ))
-                    .when_some(self.cjk_select.as_ref(), |row, select| {
-                        row.child(
-                            div().w(px(300.)).child(
-                                Select::new(select)
-                                    .small()
-                                    .w_full()
-                                    .placeholder("Automatic")
-                                    .search_placeholder("Search fonts…")
-                                    .cleanable(true),
-                            ),
-                        )
-                    }),
-            )
-            .child(
-                canvas(
-                    |_, _, _| (),
-                    move |bounds, _, window, cx| {
-                        let lines = [
-                            "The quick brown fox jumps over the lazy dog.",
-                            "中文示例  日本語サンプル  한국어 예제",
-                            "Fallback symbols: → ⌘ ✓ ★ ⚠",
-                        ];
-                        window.with_content_mask(Some(ContentMask { bounds }), |window| {
-                            for (index, text) in lines.iter().enumerate() {
-                                paint_text(
-                                    &preview_font,
-                                    text,
-                                    bounds.origin
-                                        + point(
-                                            px(10.),
-                                            px(8.
-                                                + index as f32
-                                                    * preview_font.size
-                                                    * TERMINAL_LINE_HEIGHT),
-                                        ),
-                                    px(preview_font.size * TERMINAL_LINE_HEIGHT),
-                                    theme.foreground(),
-                                    None,
-                                    window,
-                                    cx,
-                                );
-                            }
-                        });
-                    },
+                        .when_some(self.ui_font_select.as_ref(), |row, select| {
+                            row.child(
+                                div().w(px(220.)).child(
+                                    Select::new(select)
+                                        .small()
+                                        .search_placeholder("Search UI fonts…")
+                                        .w_full(),
+                                ),
+                            )
+                        }),
                 )
-                .w_full()
-                .h(px(
-                    self.app.font_settings.size * TERMINAL_LINE_HEIGHT * 3. + 16.
-                )),
-            )
-            .child(div().mt(px(24.)).opacity(0.6).child("CURSOR"))
-            .child(
-                row()
-                    .child(description(
-                        "Cursor Style",
-                        "Choose the terminal cursor shape.",
-                    ))
-                    .child(shapes),
-            )
-            .child(divider())
-            .child(
-                row()
-                    .child(description(
-                        "Cursor Blinking",
-                        "Blink the cursor while the terminal is focused.",
-                    ))
-                    .child(
-                        Switch::new("cursor-blinking")
-                            .checked(self.app.cursor_settings.blinking)
-                            .small()
-                            .on_click(cx.listener(|this, checked: &bool, _, cx| {
-                                this.app.cursor_settings.blinking = *checked;
-                                this.apply_settings();
-                                cx.notify();
-                            })),
-                    ),
-            )
-            .child(divider())
-            .when(cfg!(windows), |element| {
-                element
-                    .child(
-                        row()
-                            .child(description(
-                                "Open Links in Built-in Browser",
-                                "Off uses the system browser; on uses the current SSH session.",
-                            ))
-                            .child(
-                                Switch::new("open-links-in-browser")
-                                    .checked(self.app.browser_settings.open_links_in_browser)
+                .child(divider())
+                .child(
+                    row()
+                        .child(description(
+                            "Theme",
+                            "Choose the window and terminal appearance.",
+                        ))
+                        .child(themes),
+                )
+                .child(divider())
+                .child(
+                    row()
+                        .child(description(
+                            "Font Size",
+                            "Terminal text size in pixels, from 8 to 48.",
+                        ))
+                        .child(
+                            div()
+                                .w(px(148.))
+                                .flex_shrink_0()
+                                .child(NumberInput::new(&self.font_size).small()),
+                        ),
+                )
+                .child(divider())
+                .child(
+                    row()
+                        .child(description(
+                            "Font Family",
+                            "Use a monospace font to keep characters aligned.",
+                        ))
+                        .child(
+                            div().w(px(220.)).flex_shrink_0().child(
+                                Select::new(&self.font_select)
                                     .small()
-                                    .on_click(cx.listener(|this, checked: &bool, _, cx| {
-                                        this.app.browser_settings.open_links_in_browser = *checked;
-                                        this.apply_settings();
-                                        cx.notify();
-                                    })),
+                                    .search_placeholder("Search fonts…")
+                                    .w_full(),
                             ),
+                        ),
+                )
+                .child(divider())
+                .child(
+                    row()
+                        .child(description(
+                            "Fallbacks",
+                            "Tried in order for characters the family lacks.",
+                        ))
+                        .child(fallbacks),
+                )
+                .child(divider())
+                .child(
+                    row()
+                        .child(description(
+                            "CJK Font",
+                            "Draws Chinese, Japanese and Korean characters.",
+                        ))
+                        .when_some(self.cjk_select.as_ref(), |row, select| {
+                            row.child(
+                                div().w(px(300.)).child(
+                                    Select::new(select)
+                                        .small()
+                                        .w_full()
+                                        .placeholder("Automatic")
+                                        .search_placeholder("Search fonts…")
+                                        .cleanable(true),
+                                ),
+                            )
+                        }),
+                )
+                .child(
+                    canvas(
+                        |_, _, _| (),
+                        move |bounds, _, window, cx| {
+                            let lines = [
+                                "The quick brown fox jumps over the lazy dog.",
+                                "中文示例  日本語サンプル  한국어 예제",
+                                "Fallback symbols: → ⌘ ✓ ★ ⚠",
+                            ];
+                            window.with_content_mask(Some(ContentMask { bounds }), |window| {
+                                for (index, text) in lines.iter().enumerate() {
+                                    paint_text(
+                                        &preview_font,
+                                        text,
+                                        bounds.origin
+                                            + point(
+                                                px(10.),
+                                                px(8.
+                                                    + index as f32
+                                                        * preview_font.size
+                                                        * TERMINAL_LINE_HEIGHT),
+                                            ),
+                                        px(preview_font.size * TERMINAL_LINE_HEIGHT),
+                                        theme.foreground(),
+                                        None,
+                                        window,
+                                        cx,
+                                    );
+                                }
+                            });
+                        },
                     )
-                    .child(divider())
-            })
-            .child(
+                    .w_full()
+                    .h(px(
+                        self.app.font_settings.size * TERMINAL_LINE_HEIGHT * 3. + 16.
+                    )),
+                )
+                .child(div().mt(px(24.)).opacity(0.6).child("CURSOR"))
+                .child(
+                    row()
+                        .child(description(
+                            "Cursor Style",
+                            "Choose the terminal cursor shape.",
+                        ))
+                        .child(shapes),
+                )
+                .child(divider())
+                .child(
+                    row()
+                        .child(description(
+                            "Cursor Blinking",
+                            "Blink the cursor while the terminal is focused.",
+                        ))
+                        .child(
+                            Switch::new("cursor-blinking")
+                                .checked(self.app.cursor_settings.blinking)
+                                .small()
+                                .on_click(cx.listener(|this, checked: &bool, _, cx| {
+                                    this.app.cursor_settings.blinking = *checked;
+                                    this.apply_settings();
+                                    cx.notify();
+                                })),
+                        ),
+                )
+                .child(divider())
+                .when(cfg!(windows), |element| {
+                    element
+                        .child(
+                            row()
+                                .child(description(
+                                    "Open Links in Built-in Browser",
+                                    "Off uses the system browser; on uses the current SSH session.",
+                                ))
+                                .child(
+                                    Switch::new("open-links-in-browser")
+                                        .checked(self.app.browser_settings.open_links_in_browser)
+                                        .small()
+                                        .on_click(cx.listener(|this, checked: &bool, _, cx| {
+                                            this.app.browser_settings.open_links_in_browser =
+                                                *checked;
+                                            this.apply_settings();
+                                            cx.notify();
+                                        })),
+                                ),
+                        )
+                        .child(divider())
+                })
+        };
+        let mut sidebar = div()
+            .w(px(200.))
+            .flex_shrink_0()
+            .h_full()
+            .bg(theme.surface())
+            .border_r_1()
+            .border_color(theme.border())
+            .p(px(8.))
+            .flex()
+            .flex_col()
+            .gap(px(4.));
+        for (terminal, label, icon) in [
+            (false, "Appearance", IconName::Palette),
+            (true, "Terminal", IconName::SquareTerminal),
+        ] {
+            sidebar = sidebar.child(
                 div()
-                    .mt(px(16.))
+                    .id(label)
+                    .h(px(32.))
+                    .px(px(10.))
+                    .rounded(px(6.))
                     .flex()
                     .items_center()
-                    .justify_between()
+                    .gap(px(8.))
+                    .text_size(px(12.))
+                    .when(self.settings_terminal == terminal, |row| {
+                        row.bg(theme.tab_fill(true))
+                    })
+                    .hover(|row| row.bg(theme.tab_hover()))
+                    .cursor_pointer()
+                    .child(Icon::new(icon).size(px(14.)))
+                    .child(label)
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.settings_terminal = terminal;
+                        cx.notify();
+                    })),
+            );
+        }
+        div()
+            .size_full()
+            .flex()
+            .bg(theme.surface())
+            .text_color(theme.foreground())
+            .font_family(self.app.font_settings.ui_family.clone())
+            .text_size(px(12.))
+            .line_height(px(18.))
+            .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
+                if (event.keystroke.modifiers.platform && event.keystroke.key == "w")
+                    || (cfg!(windows)
+                        && event.keystroke.modifiers.alt
+                        && event.keystroke.key == "f4")
+                {
+                    this.finish_settings_edit(cx);
+                    window.remove_window();
+                    cx.stop_propagation();
+                }
+            }))
+            .child(sidebar)
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .h_full()
+                    .flex()
+                    .flex_col()
                     .child(
                         div()
-                            .text_size(px(11.))
-                            .opacity(0.6)
-                            .child("Changes are saved automatically."),
+                            .h(px(44.))
+                            .flex_shrink_0()
+                            .px(px(24.))
+                            .flex()
+                            .items_center()
+                            .border_b_1()
+                            .border_color(theme.border())
+                            .font_weight(gpui::FontWeight::SEMIBOLD)
+                            .child(if self.settings_terminal {
+                                "Terminal"
+                            } else {
+                                "Appearance"
+                            }),
                     )
                     .child(
                         div()
+                            .id(if self.settings_terminal {
+                                "settings-terminal-content"
+                            } else {
+                                "settings-appearance-content"
+                            })
+                            .flex_1()
+                            .min_h_0()
+                            .overflow_y_scroll()
+                            .px(px(24.))
+                            .py(px(12.))
+                            .child(content),
+                    )
+                    .child(
+                        div()
+                            .flex_shrink_0()
+                            .px(px(24.))
+                            .py(px(12.))
+                            .border_t_1()
+                            .border_color(theme.border())
                             .flex()
-                            .gap(px(8.))
+                            .items_center()
+                            .justify_between()
+                            .gap(px(16.))
+                            .child(
+                                div()
+                                    .text_size(px(11.))
+                                    .text_color(theme.foreground())
+                                    .opacity(0.65)
+                                    .child("Changes are saved automatically."),
+                            )
                             .child(
                                 Button::new("settings-reset")
                                     .label("Reset Defaults")
@@ -3834,22 +3840,184 @@ impl TerminalUi {
                                     .on_click(cx.listener(|this, _, window, cx| {
                                         this.reset_settings(window, cx)
                                     })),
-                            )
-                            .child(
-                                Button::new("settings-done")
-                                    .label("Done")
-                                    .primary()
-                                    .small()
-                                    .on_click(cx.listener(|this, _, window, cx| {
-                                        this.app.settings_open = false;
-                                        this.focus.focus(window);
-                                        cx.notify();
-                                    })),
                             ),
                     ),
             )
             .into_any_element()
     }
+    fn settings_input_subscriptions(
+        font_select: &gpui::Entity<SelectState<SearchableVec<String>>>,
+        font_size: &gpui::Entity<InputState>,
+        shell_select: &gpui::Entity<SelectState<SearchableVec<ShellChoice>>>,
+        shell_program: &gpui::Entity<InputState>,
+        window: &mut Window,
+        cx: &mut ViewContext<Self>,
+    ) -> Vec<gpui::Subscription> {
+        vec![
+            cx.subscribe_in(font_select, window, Self::on_font_selected),
+            cx.subscribe_in(font_size, window, |this, input, event, window, cx| {
+                let text = input.read(cx).value();
+                let parsed = text.parse::<f32>().ok().filter(|v| v.is_finite());
+                if matches!(event, InputEvent::Blur | InputEvent::PressEnter { .. }) {
+                    let size = parsed.unwrap_or(this.app.font_settings.size).clamp(8., 48.);
+                    input.update(cx, |input, cx| {
+                        input.set_value(size.to_string(), window, cx)
+                    });
+                    if this.app.font_settings.size != size {
+                        this.app.font_settings.size = size;
+                        this.apply_settings();
+                    }
+                } else if matches!(event, InputEvent::Change) {
+                    if let Some(size) = parsed.filter(|v| (8.0..=48.0).contains(v)) {
+                        if this.app.font_settings.size != size {
+                            this.app.font_settings.size = size;
+                            this.apply_settings();
+                        }
+                    }
+                }
+                cx.notify();
+            }),
+            cx.subscribe_in(
+                font_size,
+                window,
+                |this, input, event: &NumberInputEvent, window, cx| {
+                    let NumberInputEvent::Step(action) = event;
+                    let delta = match action {
+                        StepAction::Increment => 1.,
+                        StepAction::Decrement => -1.,
+                    };
+                    let size = input
+                        .read(cx)
+                        .value()
+                        .parse::<f32>()
+                        .ok()
+                        .filter(|v| v.is_finite())
+                        .unwrap_or(this.app.font_settings.size);
+                    let size = (size + delta).clamp(8., 48.);
+                    input.update(cx, |input, cx| {
+                        input.set_value(size.to_string(), window, cx)
+                    });
+                    this.app.font_settings.size = size;
+                    this.apply_settings();
+                    cx.notify();
+                },
+            ),
+            cx.subscribe_in(
+                shell_select,
+                window,
+                |this, _, event: &SelectEvent<SearchableVec<ShellChoice>>, window, cx| {
+                    if let SelectEvent::Confirm(Some(value)) = event {
+                        match value.as_str() {
+                            "Default" => {
+                                this.app.shell_settings.mode = settings::ShellMode::Default
+                            }
+                            "Program" => {
+                                this.app.shell_settings.mode = settings::ShellMode::Program
+                            }
+                            _ => {
+                                this.app.shell_settings.mode = settings::ShellMode::Program;
+                                this.app.shell_settings.program = value.clone();
+                                this.shell_program.update(cx, |input, cx| {
+                                    input.set_value(value.clone(), window, cx)
+                                });
+                            }
+                        }
+                        this.apply_settings();
+                        cx.notify();
+                    }
+                },
+            ),
+            cx.subscribe_in(shell_program, window, |this, input, event, window, cx| {
+                if matches!(event, InputEvent::Blur | InputEvent::PressEnter { .. }) {
+                    let program = input.read(cx).value().to_string();
+                    if program.trim().is_empty() {
+                        this.app.error = Some("Shell program cannot be empty".into());
+                    } else if program != this.app.shell_settings.program {
+                        this.app.shell_settings.program = program;
+                        this.refresh_shell_choices(window, cx);
+                        this.apply_settings();
+                    }
+                    cx.notify();
+                }
+            }),
+        ]
+    }
+    fn finish_settings_edit(&mut self, cx: &mut ViewContext<Self>) {
+        let program = self.shell_program.read(cx).value().to_string();
+        if self.app.shell_settings.mode == settings::ShellMode::Program
+            && !program.trim().is_empty()
+            && !program.contains('\0')
+        {
+            self.app.shell_settings.program = program;
+        }
+        if let Ok(size) = self.font_size.read(cx).value().parse::<f32>() {
+            if size.is_finite() {
+                self.app.font_settings.size = size.clamp(8., 48.);
+            }
+        }
+        self.apply_settings();
+        cx.notify();
+    }
+
+    fn bind_settings_window(&mut self, window: &mut Window, cx: &mut ViewContext<Self>) {
+        let subscriptions = Self::settings_input_subscriptions(
+            &self.font_select,
+            &self.font_size,
+            &self.shell_select,
+            &self.shell_program,
+            window,
+            cx,
+        );
+        for (slot, subscription) in subscriptions.into_iter().enumerate() {
+            self._settings_subscriptions[slot] = subscription;
+        }
+        self.refresh_shell_choices(window, cx);
+        self.refresh_font_chain(window, cx);
+    }
+
+    fn open_settings_window(terminal: gpui::Entity<Self>, cx: &mut App) {
+        if let Some(handle) = terminal.read(cx).settings_window {
+            if handle
+                .update(cx, |_, window, _| window.activate_window())
+                .is_ok()
+            {
+                return;
+            }
+        }
+        let owner = terminal.clone();
+        let bounds = Bounds::centered(None, size(px(900.), px(640.)), cx);
+        match cx.open_window(
+            WindowOptions {
+                window_bounds: Some(WindowBounds::Windowed(bounds)),
+                window_min_size: Some(size(px(760.), px(480.))),
+                titlebar: Some(gpui::TitlebarOptions {
+                    title: Some("Settings".into()),
+                    appears_transparent: false,
+                    traffic_light_position: None,
+                }),
+                ..Default::default()
+            },
+            move |window, cx| {
+                let closing = terminal.downgrade();
+                window.on_window_should_close(cx, move |_, cx| {
+                    if let Some(terminal) = closing.upgrade() {
+                        terminal.update(cx, |terminal, cx| terminal.finish_settings_edit(cx));
+                    }
+                    true
+                });
+                terminal.update(cx, |terminal, cx| terminal.bind_settings_window(window, cx));
+                let view = cx.new(|cx| SettingsWindow {
+                    terminal: terminal.downgrade(),
+                    _subscription: cx.observe(&terminal, |_, _, cx| cx.notify()),
+                });
+                cx.new(|cx| Root::new(view, window, cx))
+            },
+        ) {
+            Ok(handle) => owner.update(cx, |terminal, _| terminal.settings_window = Some(handle)),
+            Err(error) => tracing::error!(%error, "Could not open Settings window"),
+        }
+    }
+
     fn open_about_window(terminal: gpui::Entity<Self>, cx: &mut App) {
         let existing = terminal.read(cx).about_window;
         if let Some(handle) = existing {

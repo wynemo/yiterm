@@ -559,6 +559,12 @@ GPUI Git 列表位于 `src/ui/git.rs`，文件与 diff 大面板共用 `src/ui/v
 - [ ] Git 扩展操作：Linux 丢弃修改、amend 和分支切换另行设计。
 - [ ] macOS Unicode 路径规范化和 WSL 仓库支持。
 
+## 设置界面
+
+macOS / Windows 使用独立的 Settings 原生窗口，Linux 使用 egui 原生子窗口；重复打开会显示已有设置窗口。左侧 **Appearance** 管理界面字体、主题、终端字体与光标，**Terminal** 管理 Shell、启动参数和环境变量。窗口可调整大小，右侧内容独立滚动，底部保留自动保存提示与 **Reset Defaults**；关闭设置窗口不会关闭终端会话。
+
+设置界面参照 ELYTerminal 的布局与文字层级，保留 YiTerm 原有配色：设置项标题 12px，说明 11px，每行上下内边距 12px，内容区左右内边距 24px。
+
 ## 字体和字号
 
 在 **Settings → Font** 选择终端字体，使用 **Font Size** 调整字号（8–48px，默认 16px）。macOS / Windows 使用 GPUI Component 的可搜索 Select 字体选择器和 NumberInput 字号输入框（支持直接输入及加减），列出系统字体及内嵌 Lilex，隐藏系统内部字体；下方显示当前字体和字号的预览。Linux 使用相同的设置项目、说明与行布局，通过 Fontconfig 枚举已安装字体，在可搜索的下拉列表中选择；搜索框固定在弹层顶部，只有字体列表随滚轮滚动，修改搜索词后列表回到顶部。字号支持加减和直接输入。字体列表在首次打开设置时读取并缓存，新安装字体后重启程序刷新。建议选择等宽字体；平台使用可用字体回退。**UI Font** 独立设置菜单、设置页和其他界面文字的字体，支持搜索已安装字体，选择后立即生效并自动保存，不改变终端字体、字号或字符网格。macOS / Windows 默认 `.SystemUIFont`：macOS 映射到 `.AppleSystemUIFont`（San Francisco / SF Pro）；Windows 通过 `SPI_GETICONTITLELOGFONT` 读取系统界面字体，读取失败时回退到 Segoe UI，不固定指定 Segoe UI Variable。Linux 默认保持内嵌 IBM Plex Sans。界面字号保持 13px。
@@ -577,7 +583,7 @@ fallbacks = [] # 按顺序填写已安装的字体名称
 # cjk_family = "PingFang SC" # 可选；不设置时使用自动回退
 ```
 
-在 Settings 底部点击 **Reset Defaults**，立即恢复当前平台默认界面字体、默认主题（Dark）、终端字体（Lilex，16px）及光标（闪烁方块），清空回退字体列表并将 CJK Font 恢复为 Automatic，恢复 Shell 为 Default，并恢复 Windows 终端链接默认在内置浏览器打开，随后自动保存。其他配置项（例如日志）保持不变。
+在 Settings 窗口底部点击 **Reset Defaults**，立即恢复当前平台默认界面字体、默认主题（Dark）、终端字体（Lilex，16px）及光标（闪烁方块），清空回退字体列表并将 CJK Font 恢复为 Automatic，恢复 Shell 为 Default，并恢复 Windows 终端链接默认在内置浏览器打开，随后自动保存。其他配置项（例如日志）保持不变。
 
 ## YiTerm 直连屏幕共享
 

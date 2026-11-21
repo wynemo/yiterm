@@ -1247,16 +1247,16 @@ impl eframe::App for TerminalApp {
                 self.font_settings.clone(),
                 self.shell_settings.clone(),
             );
-            let modal = show_settings(
+            let close = show_settings(
                 ctx,
                 &mut self.cursor_settings,
                 &mut self.theme,
                 &mut self.font_settings,
                 &mut self.shell_settings,
             );
-            if modal.inner || modal.should_close() {
-                // Done/outside clicks can move focus after TextEdit was rendered.
-                // Commit its draft here as well, before removing the dialog.
+            if close {
+                // Native close can arrive while the shell field still owns focus.
+                // Commit its valid draft before removing the settings viewport.
                 if self.shell_settings.mode == settings::ShellMode::Program
                     && let Some(draft) = ctx.data_mut(|data| {
                         data.get_temp::<String>(egui::Id::new("shell-program-draft"))
@@ -1498,16 +1498,15 @@ fn settings_row(
     width: f32,
     controls: impl FnOnce(&mut egui::Ui),
 ) {
-    ui.add_space(16.0);
+    ui.add_space(12.0);
     ui.horizontal(|ui| {
-        let label_width = (ui.available_width() - width - 20.0).max(80.0);
+        let label_width = (ui.available_width() - width - 16.0).max(160.0);
         ui.allocate_ui_with_layout(
             Vec2::new(label_width, 0.0),
             egui::Layout::top_down(egui::Align::Min),
             |ui| {
-                ui.label(egui::RichText::new(title).size(14.0));
-                ui.add_space(4.0);
-                ui.label(egui::RichText::new(detail).size(12.0).weak());
+                ui.label(egui::RichText::new(title).size(12.0));
+                ui.label(egui::RichText::new(detail).size(11.0).weak());
             },
         );
         ui.allocate_ui_with_layout(
@@ -1516,7 +1515,7 @@ fn settings_row(
             controls,
         );
     });
-    ui.add_space(16.0);
+    ui.add_space(12.0);
 }
 
 #[derive(Clone, Default)]
@@ -1824,132 +1823,142 @@ fn show_shell_settings(ui: &mut egui::Ui, shell: &mut settings::ShellSettings) {
     ctx.data_mut(|data| data.insert_temp(environment_id, environment));
 }
 
-fn show_settings(
-    ctx: &egui::Context,
+fn show_appearance_settings(
+    ui: &mut egui::Ui,
     settings: &mut CursorSettings,
     theme: &mut ThemeMode,
     font: &mut settings::FontSettings,
-    shell: &mut settings::ShellSettings,
-) -> egui::ModalResponse<bool> {
-    let families = system_font_families(ctx);
-    egui::Modal::new(egui::Id::new("settings"))
-        .area(
-            egui::Modal::default_area(egui::Id::new("settings"))
-                .default_size(Vec2::new(600.0, ctx.content_rect().height() * 0.95)),
-        )
-        .frame(
-            egui::Frame::window(&ctx.style())
-                .inner_margin(24.0)
-                .corner_radius(10.0),
-        )
-        .show(ctx, |ui| {
-            ui.set_width(552.0_f32.min((ctx.content_rect().width() - 64.0).max(300.0)));
-            ui.style_mut()
-                .text_styles
-                .insert(egui::TextStyle::Body, FontId::proportional(13.0));
-            ui.spacing_mut().button_padding = Vec2::new(8.0, 5.0);
-            let mut done = false;
-            egui::ScrollArea::vertical()
-                .auto_shrink([false, true])
-                .max_height((ctx.content_rect().height() * 0.95 - 100.0).clamp(120.0, 740.0))
-                .show(ui, |ui| {
-                    ui.label(egui::RichText::new("Settings").size(20.0));
-                    ui.add_space(20.0);
-                    ui.weak("TERMINAL");
-                    show_shell_settings(ui, shell);
-                    ui.separator();
-                    ui.weak("APPEARANCE");
-                    settings_row(ui, "UI Font", "Font for menus, settings and other interface text.", 220.0, |ui| {
-                        font_picker(ui, "ui-font", &mut font.ui_family, &families, "Select UI font…");
+    families: &[String],
+) {
+    settings_row(
+        ui,
+        "UI Font",
+        "Font for menus, settings and other interface text.",
+        220.0,
+        |ui| {
+            font_picker(
+                ui,
+                "ui-font",
+                &mut font.ui_family,
+                families,
+                "Select UI font…",
+            );
+        },
+    );
+    ui.separator();
+    settings_row(
+        ui,
+        "Theme",
+        "Choose the window and terminal appearance.",
+        148.0,
+        |ui| {
+            ui.selectable_value(theme, ThemeMode::Dark, "Dark");
+            ui.selectable_value(theme, ThemeMode::Light, "Light");
+        },
+    );
+    ui.separator();
+    settings_row(
+        ui,
+        "Font Size",
+        "Terminal text size in pixels, from 8 to 48.",
+        148.0,
+        |ui| {
+            ui.spacing_mut().item_spacing.x = 0.0;
+            if ui
+                .add_enabled(
+                    font.size > 8.0,
+                    egui::Button::new("−").min_size(Vec2::new(30.0, 28.0)),
+                )
+                .clicked()
+            {
+                font.size = (font.size - 1.0).max(8.0);
+            }
+            ui.add_sized(
+                [82.0, 28.0],
+                egui::DragValue::new(&mut font.size)
+                    .range(8.0..=48.0)
+                    .speed(1.0)
+                    .suffix(" px"),
+            );
+            if ui
+                .add_enabled(
+                    font.size < 48.0,
+                    egui::Button::new("+").min_size(Vec2::new(30.0, 28.0)),
+                )
+                .clicked()
+            {
+                font.size = (font.size + 1.0).min(48.0);
+            }
+        },
+    );
+    ui.separator();
+    settings_row(
+        ui,
+        "Font Family",
+        "Use a monospace font to keep characters aligned.",
+        220.0,
+        |ui| {
+            font_picker(ui, "primary", &mut font.family, families, "Select font…");
+        },
+    );
+    ui.separator();
+    settings_row(
+        ui,
+        "Fallbacks",
+        "Tried in order for characters the family lacks.",
+        280.0,
+        |ui| {
+            ui.vertical(|ui| {
+                let mut remove = None;
+                let mut swap = None;
+                let count = font.fallbacks.len();
+                for (index, family) in font.fallbacks.iter_mut().enumerate() {
+                    ui.horizontal(|ui| {
+                        font_picker(ui, ("fallback", index), family, families, "Select font…");
+                        if ui.small_button("×").clicked() {
+                            remove = Some(index);
+                        }
+                        if index > 0 && ui.small_button("↑").clicked() {
+                            swap = Some((index, index - 1));
+                        }
+                        if index + 1 < count && ui.small_button("↓").clicked() {
+                            swap = Some((index, index + 1));
+                        }
                     });
-                    ui.separator();
-                    settings_row(
-                        ui,
-                        "Theme",
-                        "Choose the window and terminal appearance.",
-                        148.0,
-                        |ui| {
-                            ui.selectable_value(theme, ThemeMode::Dark, "Dark");
-                            ui.selectable_value(theme, ThemeMode::Light, "Light");
-                        },
-                    );
-                    ui.separator();
-                    settings_row(
-                        ui,
-                        "Font Size",
-                        "Terminal text size in pixels, from 8 to 48.",
-                        148.0,
-                        |ui| {
-                            ui.spacing_mut().item_spacing.x = 0.0;
-                            if ui
-                                .add_enabled(
-                                    font.size > 8.0,
-                                    egui::Button::new("−").min_size(Vec2::new(30.0, 28.0)),
-                                )
-                                .clicked()
-                            {
-                                font.size = (font.size - 1.0).max(8.0);
-                            }
-                            ui.add_sized(
-                                [82.0, 28.0],
-                                egui::DragValue::new(&mut font.size)
-                                    .range(8.0..=48.0)
-                                    .speed(1.0)
-                                    .suffix(" px"),
-                            );
-                            if ui
-                                .add_enabled(
-                                    font.size < 48.0,
-                                    egui::Button::new("+").min_size(Vec2::new(30.0, 28.0)),
-                                )
-                                .clicked()
-                            {
-                                font.size = (font.size + 1.0).min(48.0);
-                            }
-                        },
-                    );
-                    ui.separator();
-                    settings_row(
-                        ui,
-                        "Font Family",
-                        "Use a monospace font to keep characters aligned.",
-                        220.0,
-                        |ui| {
-                            font_picker(ui, "primary", &mut font.family, &families, "Select font…");
-                        },
-                    );
-                    ui.separator();
-                    settings_row(ui, "Fallbacks", "Tried in order for characters the family lacks.", 280.0, |ui| {
-                        ui.vertical(|ui| {
-                            let mut remove = None;
-                            let mut swap = None;
-                            let count = font.fallbacks.len();
-                            for (index, family) in font.fallbacks.iter_mut().enumerate() {
-                                ui.horizontal(|ui| {
-                                    font_picker(ui, ("fallback", index), family, &families, "Select font…");
-                                    if ui.small_button("×").clicked() { remove = Some(index); }
-                                    if index > 0 && ui.small_button("↑").clicked() { swap = Some((index, index - 1)); }
-                                    if index + 1 < count && ui.small_button("↓").clicked() { swap = Some((index, index + 1)); }
-                                });
-                            }
-                            if let Some(index) = remove { font.fallbacks.remove(index); }
-                            if let Some((a, b)) = swap { font.fallbacks.swap(a, b); }
-                            let mut new = String::new();
-                            font_picker(ui, "add-fallback", &mut new, &families, "Add fallback font…");
-                            if !new.is_empty() { font.fallbacks.push(new); }
-                        });
-                    });
-                    ui.separator();
-                    settings_row(ui, "CJK Font", "Draws Chinese, Japanese and Korean characters.", 240.0, |ui| {
-                        ui.horizontal(|ui| {
-                            let mut value = font.cjk_family.clone().unwrap_or_default();
-                            font_picker(ui, "cjk", &mut value, &families, "Automatic");
-                            if ui.small_button("×").clicked() { value.clear(); }
-                            font.cjk_family = if value.is_empty() { None } else { Some(value) };
-                        });
-                    });
-                    let preview_height = font.size * TERMINAL_LINE_HEIGHT * 3.0 + 28.0;
-                    egui::Frame::new()
+                }
+                if let Some(index) = remove {
+                    font.fallbacks.remove(index);
+                }
+                if let Some((a, b)) = swap {
+                    font.fallbacks.swap(a, b);
+                }
+                let mut new = String::new();
+                font_picker(ui, "add-fallback", &mut new, families, "Add fallback font…");
+                if !new.is_empty() {
+                    font.fallbacks.push(new);
+                }
+            });
+        },
+    );
+    ui.separator();
+    settings_row(
+        ui,
+        "CJK Font",
+        "Draws Chinese, Japanese and Korean characters.",
+        240.0,
+        |ui| {
+            ui.horizontal(|ui| {
+                let mut value = font.cjk_family.clone().unwrap_or_default();
+                font_picker(ui, "cjk", &mut value, families, "Automatic");
+                if ui.small_button("×").clicked() {
+                    value.clear();
+                }
+                font.cjk_family = if value.is_empty() { None } else { Some(value) };
+            });
+        },
+    );
+    let preview_height = font.size * TERMINAL_LINE_HEIGHT * 3.0 + 28.0;
+    egui::Frame::new()
                         .fill(theme.background())
                         .corner_radius(6.0)
                         .inner_margin(14.0)
@@ -1966,61 +1975,154 @@ fn show_settings(
                             }
                             ui.add(egui::Label::new(preview).truncate());
                         });
-                    ui.add_space(24.0);
-                    ui.weak("CURSOR");
-                    settings_row(
-                        ui,
-                        "Cursor Style",
-                        "Choose the terminal cursor shape.",
-                        220.0,
-                        |ui| {
-                            for (shape, label) in [
-                                (CursorShape::Block, "Block"),
-                                (CursorShape::Underline, "Underline"),
-                                (CursorShape::Beam, "Bar"),
-                            ] {
-                                ui.selectable_value(&mut settings.shape, shape, label);
-                            }
-                        },
-                    );
-                    ui.separator();
-                    settings_row(
-                        ui,
-                        "Cursor Blinking",
-                        "Blink the cursor while the terminal is focused.",
-                        70.0,
-                        |ui| {
-                            ui.toggle_value(&mut settings.blinking, "Enabled");
-                        },
-                    );
-                });
-            ui.separator();
-            ui.add_space(16.0);
-            ui.horizontal(|ui| {
-                ui.label(
-                    egui::RichText::new("Changes are saved automatically.")
-                        .size(11.0)
-                        .weak(),
-                );
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    done = ui.button("Done").clicked();
-                    if ui.button("Reset Defaults").clicked() {
-                        *settings = CursorSettings::default();
-                        *theme = ThemeMode::default();
-                        *font = settings::FontSettings::default();
-                        *shell = settings::ShellSettings::default();
-                        ctx.data_mut(|data| {
-                            data.remove::<String>(egui::Id::new("font-search"));
-                            data.remove::<String>(egui::Id::new("shell-program-draft"));
-                            data.remove::<String>(egui::Id::new("shell-arguments-draft"));
-                            data.remove::<String>(egui::Id::new("shell-environment-draft"));
-                            data.remove::<ShellFilePicker>(egui::Id::new("shell-file-picker"));
-                        });
+    ui.add_space(24.0);
+    ui.weak("CURSOR");
+    settings_row(
+        ui,
+        "Cursor Style",
+        "Choose the terminal cursor shape.",
+        220.0,
+        |ui| {
+            for (shape, label) in [
+                (CursorShape::Block, "Block"),
+                (CursorShape::Underline, "Underline"),
+                (CursorShape::Beam, "Bar"),
+            ] {
+                ui.selectable_value(&mut settings.shape, shape, label);
+            }
+        },
+    );
+    ui.separator();
+    settings_row(
+        ui,
+        "Cursor Blinking",
+        "Blink the cursor while the terminal is focused.",
+        70.0,
+        |ui| {
+            ui.toggle_value(&mut settings.blinking, "Enabled");
+        },
+    );
+}
+
+fn settings_reset_button(
+    ui: &mut egui::Ui,
+    ctx: &egui::Context,
+    settings: &mut CursorSettings,
+    theme: &mut ThemeMode,
+    font: &mut settings::FontSettings,
+    shell: &mut settings::ShellSettings,
+) {
+    if ui.button("Reset Defaults").clicked() {
+        *settings = CursorSettings::default();
+        *theme = ThemeMode::default();
+        *font = settings::FontSettings::default();
+        *shell = settings::ShellSettings::default();
+        ctx.data_mut(|data| {
+            data.remove::<String>(egui::Id::new("font-search"));
+            data.remove::<String>(egui::Id::new("shell-program-draft"));
+            data.remove::<String>(egui::Id::new("shell-arguments-draft"));
+            data.remove::<String>(egui::Id::new("shell-environment-draft"));
+            data.remove::<ShellFilePicker>(egui::Id::new("shell-file-picker"));
+        });
+    }
+}
+
+fn show_settings(
+    ctx: &egui::Context,
+    settings: &mut CursorSettings,
+    theme: &mut ThemeMode,
+    font: &mut settings::FontSettings,
+    shell: &mut settings::ShellSettings,
+) -> bool {
+    let families = system_font_families(ctx);
+    ctx.show_viewport_immediate(
+        egui::ViewportId::from_hash_of("settings-window"),
+        egui::ViewportBuilder::default()
+            .with_title("Settings")
+            .with_inner_size([900.0, 640.0])
+            .with_min_inner_size([760.0, 480.0]),
+        |ctx, _| {
+            let close = ctx.input(|input| input.viewport().close_requested());
+            let palette = *theme;
+            let category_id = egui::Id::new("settings-terminal-category");
+            let mut terminal = ctx.data(|data| data.get_temp::<bool>(category_id).unwrap_or(false));
+            egui::SidePanel::left("settings-sidebar")
+                .exact_width(200.0)
+                .resizable(false)
+                .frame(
+                    egui::Frame::new()
+                        .fill(palette.surface())
+                        .inner_margin(8.0)
+                        .stroke(egui::Stroke::new(1.0, palette.border())),
+                )
+                .show(ctx, |ui| {
+                    ui.style_mut()
+                        .text_styles
+                        .insert(egui::TextStyle::Button, FontId::proportional(12.0));
+                    ui.spacing_mut().button_padding = Vec2::new(10.0, 8.0);
+                    for (value, label) in [(false, "Appearance"), (true, "Terminal")] {
+                        let button = egui::Button::new(label).selected(terminal == value);
+                        if ui.add_sized([ui.available_width(), 32.0], button).clicked() {
+                            terminal = value;
+                        }
                     }
                 });
-            });
-            done
-        })
+            ctx.data_mut(|data| data.insert_temp(category_id, terminal));
+            egui::CentralPanel::default()
+                .frame(
+                    egui::Frame::new()
+                        .fill(palette.surface())
+                        .inner_margin(24.0),
+                )
+                .show(ctx, |ui| {
+                    ui.style_mut()
+                        .text_styles
+                        .insert(egui::TextStyle::Body, FontId::proportional(12.0));
+                    ui.style_mut()
+                        .text_styles
+                        .insert(egui::TextStyle::Button, FontId::proportional(12.0));
+                    ui.spacing_mut().button_padding = Vec2::new(8.0, 5.0);
+                    egui::TopBottomPanel::bottom("settings-footer").show_inside(ui, |ui| {
+                        ui.add_space(12.0);
+                        ui.horizontal(|ui| {
+                            ui.label(
+                                egui::RichText::new("Changes are saved automatically.")
+                                    .size(11.0)
+                                    .weak(),
+                            );
+                            ui.with_layout(
+                                egui::Layout::right_to_left(egui::Align::Center),
+                                |ui| {
+                                    settings_reset_button(ui, ctx, settings, theme, font, shell);
+                                },
+                            );
+                        });
+                    });
+                    ui.label(
+                        egui::RichText::new(if terminal { "Terminal" } else { "Appearance" })
+                            .size(12.0)
+                            .strong(),
+                    );
+                    ui.add_space(12.0);
+                    ui.separator();
+                    egui::ScrollArea::vertical()
+                        .id_salt(if terminal {
+                            "settings-terminal"
+                        } else {
+                            "settings-appearance"
+                        })
+                        .auto_shrink([false, false])
+                        .show(ui, |ui| {
+                            if terminal {
+                                show_shell_settings(ui, shell);
+                            } else {
+                                show_appearance_settings(ui, settings, theme, font, &families);
+                            }
+                        });
+                });
+            close
+        },
+    )
 }
 
 fn show_about(
