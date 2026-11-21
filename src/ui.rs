@@ -435,6 +435,7 @@ enum Menu {
 
 pub(super) struct TerminalUi {
     app: TerminalApp,
+    about_window: Option<gpui::WindowHandle<AboutWindow>>,
     graphics_images: Vec<Arc<gpui::RenderImage>>,
     focus: FocusHandle,
     files_focus: FocusHandle,
@@ -737,6 +738,7 @@ impl TerminalUi {
         let files_focus = cx.focus_handle();
         let files_split = cx.new(|_| gpui_component::resizable::ResizableState::default());
         Self {
+            about_window: None,
             graphics_images: Vec::new(),
             git_message,
             git_message_repo: None,
@@ -2263,8 +2265,28 @@ impl Focusable for TerminalUi {
         self.focus.clone()
     }
 }
+struct AboutWindow {
+    terminal: gpui::WeakEntity<TerminalUi>,
+    _subscription: gpui::Subscription,
+}
+
+impl Render for AboutWindow {
+    fn render(&mut self, window: &mut Window, cx: &mut ViewContext<Self>) -> impl IntoElement {
+        let Some(terminal) = self.terminal.upgrade() else {
+            window.remove_window();
+            return div().into_any_element();
+        };
+        terminal.update(cx, |terminal, cx| terminal.about_panel(cx))
+    }
+}
+
 impl Render for TerminalUi {
     fn render(&mut self, window: &mut Window, cx: &mut ViewContext<Self>) -> impl IntoElement {
+        if self.app.about_open {
+            self.app.about_open = false;
+            let terminal = cx.entity();
+            cx.defer(move |cx| Self::open_about_window(terminal, cx));
+        }
         if self.app.tabs.is_empty() {
             #[cfg(windows)]
             self.shutdown(cx);
@@ -2969,12 +2991,8 @@ impl Render for TerminalUi {
         if self.viewer_open() && !self.app.settings_open && !self.app.about_open {
             root = root.child(self.code_viewer(window, cx));
         }
-        if self.app.settings_open || self.app.about_open {
-            let panel = if self.app.settings_open {
-                self.settings_panel(window, cx)
-            } else {
-                self.about_panel(cx)
-            };
+        if self.app.settings_open {
+            let panel = self.settings_panel(window, cx);
             root = root.child(
                 div()
                     .absolute()
@@ -3792,56 +3810,117 @@ impl TerminalUi {
             )
             .into_any_element()
     }
+    fn open_about_window(terminal: gpui::Entity<Self>, cx: &mut App) {
+        let existing = terminal.read(cx).about_window;
+        if let Some(handle) = existing {
+            if handle
+                .update(cx, |_, window, _| window.activate_window())
+                .is_ok()
+            {
+                return;
+            }
+        }
+        let owner = terminal.clone();
+        let bounds = Bounds::centered(None, size(px(360.), px(460.)), cx);
+        match cx.open_window(
+            WindowOptions {
+                window_bounds: Some(WindowBounds::Windowed(bounds)),
+                titlebar: Some(gpui::TitlebarOptions {
+                    title: None,
+                    appears_transparent: false,
+                    traffic_light_position: None,
+                }),
+                is_resizable: false,
+                is_minimizable: false,
+                ..Default::default()
+            },
+            move |_, cx| {
+                cx.new(|cx| AboutWindow {
+                    terminal: terminal.downgrade(),
+                    _subscription: cx.observe(&terminal, |_, _, cx| cx.notify()),
+                })
+            },
+        ) {
+            Ok(handle) => owner.update(cx, |terminal, _| terminal.about_window = Some(handle)),
+            Err(error) => tracing::error!(%error, "Could not open About window"),
+        }
+    }
+
+    fn about_button(
+        &self,
+        id: &'static str,
+        label: impl Into<SharedString>,
+        cx: &ViewContext<Self>,
+        action: impl Fn(&mut Self, &mut Window, &mut ViewContext<Self>) + 'static,
+    ) -> impl IntoElement {
+        div()
+            .id(id)
+            .min_w(px(64.))
+            .h(px(24.))
+            .px(px(12.))
+            .rounded(px(6.))
+            .bg(if self.app.theme == ThemeMode::Dark {
+                rgb(0x39393D)
+            } else {
+                rgb(0xD6D6DC)
+            })
+            .flex()
+            .items_center()
+            .justify_center()
+            .cursor_pointer()
+            .hover(|d| d.bg(self.app.theme.selection()))
+            .child(label.into())
+            .on_click(cx.listener(move |this, _, window, cx| {
+                action(this, window, cx);
+                cx.notify();
+            }))
+    }
     fn about_panel(&self, cx: &ViewContext<Self>) -> gpui::AnyElement {
         let theme = self.app.theme;
         let mut panel = div()
             .id("about-dialog")
             .occlude()
-            .w(px(376.))
-            .max_w_full()
-            .max_h(gpui::relative(0.95))
+            .size_full()
             .overflow_y_scroll()
-            .p(px(8.))
-            .bg(theme.surface())
-            .border_1()
-            .border_color(theme.border())
-            .rounded(px(6.))
-            .shadow_lg()
+            .px(px(32.))
+            .pt(px(40.))
+            .pb(px(24.))
+            .text_size(px(13.))
+            .line_height(px(18.))
+            .bg(if theme == ThemeMode::Dark {
+                rgb(0x29292E)
+            } else {
+                rgb(0xE7E7ED)
+            })
             .flex()
             .flex_col()
             .items_center()
             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .child(gpui::img("icons/yiterm.png").size(px(80.)).flex_shrink_0())
             .child(
                 div()
-                    .mt(px(18.))
-                    .size(px(72.))
-                    .rounded(px(18.))
-                    .bg(theme.selection())
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .font_family("Lilex")
-                    .text_size(px(30.))
-                    .text_color(theme.accent())
-                    .child(">_"),
-            )
-            .child(
-                div()
-                    .mt(px(12.))
-                    .text_size(px(28.))
-                    .line_height(px(36.))
+                    .mt(px(16.))
+                    .text_size(px(24.))
+                    .line_height(px(28.))
                     .font_weight(gpui::FontWeight::BOLD)
                     .child("YiTerm"),
             )
             .child(
                 div()
                     .mt(px(8.))
-                    .child("A lightweight terminal for macOS, Windows and Linux."),
+                    .text_size(px(12.))
+                    .opacity(0.8)
+                    .child("A lightweight terminal for"),
             )
-            .child("Tabs, split panes and image paste over SSH.")
             .child(
                 div()
-                    .mt(px(20.))
+                    .text_size(px(12.))
+                    .opacity(0.8)
+                    .child("macOS, Windows and Linux."),
+            )
+            .child(
+                div()
+                    .mt(px(24.))
                     .child(format!("Version  {}", env!("CARGO_PKG_VERSION"))),
             );
         if let Some(revision) = option_env!("YITERM_BUILD_REV") {
@@ -3859,40 +3938,41 @@ impl TerminalUi {
                     })),
             );
         } else {
-            panel = panel.child(div().opacity(0.65).child("Local development build"));
+            panel = panel.child(
+                div()
+                    .text_size(px(11.))
+                    .opacity(0.5)
+                    .child("Local development build"),
+            );
         }
         panel = panel.child(
             div()
-                .mt(px(20.))
+                .mt(px(24.))
                 .flex()
                 .items_center()
                 .gap(px(8.))
-                .child(self.menu_button("docs", "Docs", cx, |_, _, cx| {
+                .child(self.about_button("docs", "Docs", cx, |_, _, cx| {
                     cx.open_url("https://github.com/wynemo/yiterm/blob/main/TECHNICAL.md")
                 }))
-                .child("|")
-                .child(self.menu_button("github", "GitHub", cx, |_, _, cx| {
+                .child(self.about_button("github", "GitHub", cx, |_, _, cx| {
                     cx.open_url("https://github.com/wynemo/yiterm")
                 }))
-                .child("|")
-                .child(self.button("licenses", "Licenses", cx, |this, _, _| {
+                .child(self.about_button("licenses", "Licenses", cx, |this, _, _| {
                     this.app.about_licenses = !this.app.about_licenses
                 })),
         );
         if let Some(label) = self.app.updater.state.action_label() {
-            panel = panel.child(div().mt(px(12.)).child(self.button(
+            panel = panel.child(div().mt(px(8.)).child(self.menu_button(
                 "update-action",
                 label,
                 cx,
                 |this, _, _| this.app.updater.act(),
             )));
         }
-        panel = panel.child(
-            div()
-                .w_full()
-                .mt(px(8.))
-                .child(self.app.updater.state.message()),
-        );
+        let message = self.app.updater.state.message();
+        if !message.is_empty() {
+            panel = panel.child(div().w_full().mt(px(12.)).text_size(px(12.)).child(message));
+        }
         if let Some(url) = self.app.updater.state.notes_url() {
             panel = panel.child(self.menu_button(
                 "release-notes",
@@ -3917,14 +3997,7 @@ impl TerminalUi {
                     .child(include_str!("../licenses/gpui-LICENSE-APACHE")),
             );
         }
-        panel
-            .child(div().mt(px(12.)).child(self.button(
-                "close-about",
-                "Close",
-                cx,
-                |this, _, _| this.app.about_open = false,
-            )))
-            .into_any_element()
+        panel.into_any_element()
     }
 }
 
@@ -4074,6 +4147,11 @@ fn apply_component_theme(theme: ThemeMode, window: Option<&mut Window>, cx: &mut
 struct UiAssets;
 impl gpui::AssetSource for UiAssets {
     fn load(&self, path: &str) -> Result<Option<Cow<'static, [u8]>>> {
+        if path == "icons/yiterm.png" {
+            return Ok(Some(Cow::Borrowed(include_bytes!(
+                "../assets/icons/yiterm.png"
+            ))));
+        }
         if path == "icons/git-branch.svg" {
             return Ok(Some(Cow::Borrowed(include_bytes!(
                 "../assets/icons/git-branch.svg"
@@ -4083,6 +4161,9 @@ impl gpui::AssetSource for UiAssets {
     }
     fn list(&self, path: &str) -> Result<Vec<SharedString>> {
         let mut assets = gpui::AssetSource::list(&gpui_component_assets::Assets, path)?;
+        if "icons/yiterm.png".starts_with(path) {
+            assets.push("icons/yiterm.png".into());
+        }
         if "icons/git-branch.svg".starts_with(path) {
             assets.push("icons/git-branch.svg".into());
         }

@@ -2027,21 +2027,32 @@ fn show_about(
         ui.set_width(360.0);
         ui.vertical_centered(|ui| {
             ui.add_space(18.0);
-            let (rect, _) = ui.allocate_exact_size(Vec2::splat(72.0), egui::Sense::hover());
-            ui.painter()
-                .rect_filled(rect, 18.0, ThemeMode::from_context(ctx).selection());
-            ui.painter().text(
-                rect.center(),
-                egui::Align2::CENTER_CENTER,
-                ">_",
-                FontId::monospace(30.0),
-                ThemeMode::from_context(ui.ctx()).accent(),
-            );
+            let icon_id = egui::Id::new("about-app-icon");
+            let icon = ctx.data_mut(|data| {
+                data.get_temp::<egui::TextureHandle>(icon_id)
+                    .unwrap_or_else(|| {
+                        let image =
+                            image::load_from_memory(include_bytes!("../assets/icons/yiterm.png"))
+                                .expect("embedded application icon")
+                                .into_rgba8();
+                        let texture = ctx.load_texture(
+                            "about-app-icon",
+                            egui::ColorImage::from_rgba_unmultiplied(
+                                [image.width() as usize, image.height() as usize],
+                                image.as_raw(),
+                            ),
+                            egui::TextureOptions::LINEAR,
+                        );
+                        data.insert_temp(icon_id, texture.clone());
+                        texture
+                    })
+            });
+            ui.image((icon.id(), Vec2::splat(88.0)));
             ui.add_space(12.0);
             ui.label(egui::RichText::new("YiTerm").size(28.0).strong());
             ui.add_space(8.0);
-            ui.label("A lightweight terminal for macOS, Windows and Linux.");
-            ui.label("Tabs, split panes and image paste over SSH.");
+            ui.label("A lightweight terminal for");
+            ui.label("macOS, Windows and Linux.");
             ui.add_space(20.0);
             ui.label(format!("Version  {}", env!("CARGO_PKG_VERSION")));
             if let Some(revision) = option_env!("YITERM_BUILD_REV") {
