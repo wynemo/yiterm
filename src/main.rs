@@ -734,9 +734,11 @@ impl TerminalSession {
             self.repaint.store(true, Ordering::Release);
             wake_ui();
         }
+        let direct_share = self.is_direct_share();
+        let mut replies = String::new();
         while let Ok(event) = self.events.try_recv() {
-            match event {
-                Event::PtyWrite(text) => self.write(text.as_bytes()),
+            let reply = match event {
+                Event::PtyWrite(text) => text,
                 Event::ColorRequest(index, format) => {
                     // Use the same palette as the renderer so applications can
                     // detect a light background through OSC 10/11 queries.
@@ -752,24 +754,26 @@ impl TerminalSession {
                     #[cfg(not(target_os = "linux"))]
                     let [r, g, b] =
                         [value.r, value.g, value.b].map(|channel| (channel * 255.).round() as u8);
-                    let text = format(alacritty_terminal::vte::ansi::Rgb { r, g, b });
-                    self.write(text.as_bytes());
+                    format(alacritty_terminal::vte::ansi::Rgb { r, g, b })
                 }
                 Event::TextAreaSizeRequest(format) => {
                     let [cell_width, cell_height] = self.graphics.cell_pixels();
-                    let text = format(alacritty_terminal::event::WindowSize {
+                    format(alacritty_terminal::event::WindowSize {
                         num_lines: self.size.rows as u16,
                         num_cols: self.size.cols as u16,
                         cell_width: cell_width.min(u16::MAX / self.size.cols as u16),
                         cell_height: cell_height.min(u16::MAX / self.size.rows as u16),
-                    });
-                    self.write(text.as_bytes());
+                    })
                 }
-                Event::Title(title) => self.title = title,
-                Event::ResetTitle => self.title.clone_from(&self.default_title),
-                Event::ClipboardStore(ClipboardType::Clipboard, text)
-                    if !self.is_direct_share() =>
-                {
+                Event::Title(title) => {
+                    self.title = title;
+                    continue;
+                }
+                Event::ResetTitle => {
+                    self.title.clone_from(&self.default_title);
+                    continue;
+                }
+                Event::ClipboardStore(ClipboardType::Clipboard, text) if !direct_share => {
                     if text.len() > MAX_OSC52_CLIPBOARD_BYTES {
                         self.pending_clipboard = None;
                         tracing::warn!(
@@ -787,9 +791,19 @@ impl TerminalSession {
                         self.pending_clipboard = Some(text);
                         self.status = "Writing remote text to host clipboard…".into();
                     }
+                    continue;
                 }
-                _ => {}
+                _ => continue,
+            };
+            if direct_share {
+                // Keep terminal replies ordered while sharing a transport frame.
+                replies.push_str(&reply);
+            } else {
+                self.write(reply.as_bytes());
             }
+        }
+        if !replies.is_empty() {
+            self.write(replies.as_bytes());
         }
         if let Ok(result) = self.paste_result.try_recv() {
             self.paste_busy = false;

@@ -35,6 +35,7 @@ const INPUT: u8 = 1;
 const RESIZE: u8 = 2;
 const PING: u8 = 3;
 const RECENT_LIMIT: usize = 5;
+const INPUT_QUEUE_FULL: &str = "YiTerm input queue full; disconnected";
 
 fn data_dir() -> Result<PathBuf> {
     let path = yiterm::logging::config_path()?.with_file_name("direct-share");
@@ -160,7 +161,12 @@ impl ServerCertVerifier for ServerIdentity {
 pub struct Client {
     input: mpsc::Sender<Zeroizing<Vec<u8>>>,
     size: watch::Sender<PtySize>,
-    stop: Option<oneshot::Sender<()>>,
+    stop: Option<oneshot::Sender<StopReason>>,
+}
+
+enum StopReason {
+    Closed,
+    InputQueueFull,
 }
 
 type Output = mpsc::Receiver<Vec<u8>>;
@@ -177,22 +183,24 @@ impl Client {
             .build()?;
         std::thread::Builder::new().name("yiterm-direct-share".into()).spawn(move || {
             runtime.block_on(async {
-                let mut stopped = stopped;
                 let result = tokio::select! {
                     biased;
-                    _ = &mut stopped => return,
+                    reason = stopped => match reason {
+                        Ok(StopReason::InputQueueFull) => Err(anyhow::anyhow!(INPUT_QUEUE_FULL)),
+                        _ => return,
+                    },
                     result = connect(address, rx, sizes, &output) => result,
                 };
                 let message = match result {
                     Ok(()) => "YiTerm sharing ended".to_owned(),
-                    Err(error) => format!("YiTerm direct connection: {error:#}"),
+                    Err(error) => {
+                        tracing::warn!(%address, error = %format!("{error:#}"), "YiTerm connection ended");
+                        format!("YiTerm direct connection: {error:#}")
+                    }
                 };
                 let message: String = message.chars().filter(|c| !c.is_control()).collect();
-                let bytes = format!("\x18\x18\x1b_Ga=d,d=A,q=2;\x1b\\\x1b[?2026l\x1b[?1003l\x1b[?1006l\x1b[?1016l\x1b[?1004l\x1b[?2004l\x1b[?25h\x1b[?1049l\r\n{message}\r\n").into_bytes();
-                tokio::select! {
-                    _ = &mut stopped => {},
-                    _ = output.send(bytes) => {},
-                }
+                let bytes = format!("\x18\x18\x1b_Ga=d,d=A,q=2;\x1b\\\x1b[?2026l\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l\x1b[?1016l\x1b[?1004l\x1b[?2004l\x1b[?25h\x1b[?1049l\r\n{message}\r\n").into_bytes();
+                let _ = output.send(bytes).await;
             });
         })?;
         Ok((
@@ -210,8 +218,12 @@ impl Client {
     }
 
     pub fn close(&mut self) {
+        self.stop(StopReason::Closed);
+    }
+
+    fn stop(&mut self, reason: StopReason) {
         if let Some(stop) = self.stop.take() {
-            let _ = stop.send(());
+            let _ = stop.send(reason);
         }
     }
 }
@@ -222,14 +234,17 @@ impl Write for Client {
         if n == 0 {
             return Ok(0);
         }
+        if self.stop.is_none() {
+            return Err(io::Error::new(
+                io::ErrorKind::BrokenPipe,
+                "YiTerm connection closed",
+            ));
+        }
         match self.input.try_send(Zeroizing::new(bytes[..n].to_vec())) {
             Ok(()) => Ok(n),
             Err(mpsc::error::TrySendError::Full(_)) => {
-                self.close();
-                Err(io::Error::new(
-                    io::ErrorKind::WouldBlock,
-                    "YiTerm input queue full; disconnected",
-                ))
+                self.stop(StopReason::InputQueueFull);
+                Err(io::Error::new(io::ErrorKind::WouldBlock, INPUT_QUEUE_FULL))
             }
             Err(mpsc::error::TrySendError::Closed(_)) => Err(io::Error::new(
                 io::ErrorKind::BrokenPipe,

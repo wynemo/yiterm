@@ -574,7 +574,7 @@ mod macos {
         out.flush()?;
         let query_started = Instant::now();
         let mut last_query = Instant::now();
-        let mut terminal_size = geometry(None, None, None, None)?;
+        let mut queried_terminal_size = geometry(None, None, None, None)?;
         let mut previous: Option<Arc<Frame>> = None;
         let mut current: Option<Arc<Frame>> = None;
         let mut old_geometry = (0, 0);
@@ -648,12 +648,16 @@ mod macos {
                     input_pump.reset.store(true, Ordering::Relaxed);
                 }
                 let next_terminal_size = geometry(None, None, None, None)?;
-                let resized = next_terminal_size != terminal_size;
-                terminal_size = next_terminal_size;
-                if resized || last_query.elapsed() >= Duration::from_secs(2) {
+                let query_age = last_query.elapsed();
+                // Keep the latest resize pending until the next query can be sent.
+                if query_age >= Duration::from_secs(2)
+                    || (next_terminal_size != queried_terminal_size
+                        && query_age >= Duration::from_millis(100))
+                {
                     out.write_all(b"\x1b[14t\x1b[16t\x1b[18t\x1b[?9002$p")?;
                     out.flush()?;
                     last_query = Instant::now();
+                    queried_terminal_size = next_terminal_size;
                 }
                 if (measured_cell.is_none() || input.canvas.is_none())
                     && query_started.elapsed() < Duration::from_millis(750)
