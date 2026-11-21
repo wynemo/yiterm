@@ -464,6 +464,7 @@ pub(super) struct TerminalUi {
     font_select: gpui::Entity<SelectState<SearchableVec<String>>>,
     font_size: gpui::Entity<InputState>,
     fallback_selects: Vec<gpui::Entity<SelectState<SearchableVec<String>>>>,
+    ui_font_select: Option<gpui::Entity<SelectState<SearchableVec<String>>>>,
     cjk_select: Option<gpui::Entity<SelectState<SearchableVec<String>>>>,
     font_chain_subscriptions: Vec<gpui::Subscription>,
     shell_select: gpui::Entity<SelectState<SearchableVec<ShellChoice>>>,
@@ -768,6 +769,7 @@ impl TerminalUi {
             font_select,
             font_size,
             fallback_selects: Vec::new(),
+            ui_font_select: None,
             cjk_select: None,
             font_chain_subscriptions: Vec::new(),
             shell_select,
@@ -997,6 +999,31 @@ impl TerminalUi {
     }
     fn refresh_font_chain(&mut self, window: &mut Window, cx: &mut ViewContext<Self>) {
         self.font_chain_subscriptions.clear();
+        let current = &self.app.font_settings.ui_family;
+        let mut names = available_font_families(cx, current);
+        names.push(".SystemUIFont".into());
+        names.sort();
+        names.dedup();
+        let selected = names
+            .iter()
+            .position(|name| name == current)
+            .map(|row| IndexPath::default().row(row));
+        let select = cx.new(|cx| {
+            SelectState::new(SearchableVec::new(names), selected, window, cx).searchable(true)
+        });
+        self.font_chain_subscriptions.push(cx.subscribe_in(
+            &select,
+            window,
+            |this, _, event, _, cx| {
+                if let SelectEvent::Confirm(Some(family)) = event {
+                    this.app.font_settings.ui_family = family.clone();
+                    gpui_component::Theme::global_mut(cx).font_family = family.clone().into();
+                    this.apply_settings();
+                    cx.notify();
+                }
+            },
+        ));
+        self.ui_font_select = Some(select);
         self.fallback_selects.clear();
         // The final empty selector appends a new fallback.
         for index in 0..=self.app.font_settings.fallbacks.len() {
@@ -1119,6 +1146,8 @@ impl TerminalUi {
         self.shell_environment
             .update(cx, |input, cx| input.set_value("", window, cx));
         apply_component_theme(self.app.theme, Some(window), cx);
+        gpui_component::Theme::global_mut(cx).font_family =
+            self.app.font_settings.ui_family.clone().into();
         let names = available_font_families(cx, &self.app.font_settings.family);
         let selected = names
             .iter()
@@ -2736,7 +2765,7 @@ impl Render for TerminalUi {
             .flex_col()
             .bg(theme.background())
             .text_color(theme.foreground())
-            .font_family("IBM Plex Sans")
+            .font_family(self.app.font_settings.ui_family.clone())
             .font_weight(gpui::FontWeight::NORMAL)
             .text_size(px(13.))
             .line_height(px(18.))
@@ -3484,6 +3513,8 @@ impl TerminalUi {
                     .on_click(cx.listener(move |this, _, window, cx| {
                         this.app.theme = value;
                         apply_component_theme(value, Some(window), cx);
+                        gpui_component::Theme::global_mut(cx).font_family =
+                            this.app.font_settings.ui_family.clone().into();
                         this.apply_settings();
                         cx.notify();
                     })),
@@ -3618,6 +3649,15 @@ impl TerminalUi {
             )
             .child(divider())
             .child(div().mt(px(20.)).opacity(0.6).child("APPEARANCE"))
+            .child(
+                row().child(description("UI Font", "Font for menus, settings and other interface text."))
+                    .when_some(self.ui_font_select.as_ref(), |row, select| {
+                        row.child(div().w(px(220.)).child(
+                            Select::new(select).small().search_placeholder("Search UI fonts…").w_full()
+                        ))
+                    }),
+            )
+            .child(divider())
             .child(
                 row()
                     .child(description(
@@ -3885,6 +3925,8 @@ impl TerminalUi {
             .px(px(32.))
             .pt(px(40.))
             .pb(px(24.))
+            .font_family(self.app.font_settings.ui_family.clone())
+            .text_color(theme.foreground())
             .text_size(px(13.))
             .line_height(px(18.))
             .bg(if theme == ThemeMode::Dark {
@@ -4140,7 +4182,7 @@ fn apply_component_theme(theme: ThemeMode, window: Option<&mut Window>, cx: &mut
     gpui_component::Theme::change(component_theme(theme), window, cx);
     let theme = gpui_component::Theme::global_mut(cx);
     theme.ring = gpui::rgb(0x3B82F6).into();
-    theme.font_family = "IBM Plex Sans".into();
+    theme.font_family = settings::default_ui_font().into();
     theme.font_size = px(13.);
 }
 
@@ -4182,6 +4224,8 @@ pub(super) fn run(app: TerminalApp) -> Result<()> {
             install_native_menus(cx);
             cx.bind_keys(terminal_key_bindings());
             apply_component_theme(app.theme, None, cx);
+            gpui_component::Theme::global_mut(cx).font_family =
+                app.font_settings.ui_family.clone().into();
             if let Err(error) = cx.text_system().add_fonts(vec![
                 Cow::Borrowed(include_bytes!("../assets/fonts/lilex/Lilex-Regular.ttf")),
                 Cow::Borrowed(include_bytes!(

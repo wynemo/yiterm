@@ -140,6 +140,7 @@ pub fn save_all(path: &Path, cursor: CursorSettings, theme: crate::theme::ThemeM
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct FontSettings {
+    pub ui_family: String,
     pub family: String,
     pub size: f32,
     pub fallbacks: Vec<String>,
@@ -148,6 +149,7 @@ pub struct FontSettings {
 impl Default for FontSettings {
     fn default() -> Self {
         Self {
+            ui_family: default_ui_font().into(),
             family: "Lilex".into(),
             size: 16.0,
             fallbacks: Vec::new(),
@@ -155,6 +157,14 @@ impl Default for FontSettings {
         }
     }
 }
+pub fn default_ui_font() -> &'static str {
+    if cfg!(any(target_os = "macos", windows)) {
+        ".SystemUIFont"
+    } else {
+        "IBM Plex Sans"
+    }
+}
+
 impl FontSettings {
     pub fn family_for(&self, ch: char) -> &str {
         if is_cjk(ch) {
@@ -174,7 +184,7 @@ impl FontSettings {
             "Fallback and CJK font names cannot be empty"
         );
         anyhow::ensure!(
-            !self.family.trim().is_empty(),
+            !self.family.trim().is_empty() && !self.ui_family.trim().is_empty(),
             "Font family cannot be empty"
         );
         anyhow::ensure!(

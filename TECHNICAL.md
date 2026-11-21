@@ -2,7 +2,7 @@
 
 Rust 原生终端，Windows / macOS 使用 GPUI 0.2.2，Linux 保留原有 egui / eframe / OpenGL 界面后端，使用 `alacritty_terminal` 解析终端协议、`portable-pty` 启动本地 shell / ConPTY。支持 macOS、Windows，Linux CI 保留 CentOS 7 / glibc 2.17 的 x64 兼容目标。
 
-终端内嵌 Lilex 字体；界面内嵌 IBM Plex Sans Regular 字体（Zed 的 `.ZedSans` 别名所对应的字体，13px、字重 400；[许可证](assets/fonts/ibm-plex-sans/OFL.txt)），无需系统安装；终端默认 16px 字号配合 1.3 倍行高。macOS / Windows 将常用单线框线字符 `│─┌┐└┘├┤┬┴┼` 按终端单元格直接绘制并对齐物理像素，保证 Herdr 等终端程序的框线跨行、跨列连续衔接，不依赖所选字体的字形高度；滚动条使用的实心块、左右分数块和上下分数块（如 `█▕▐▏▀▄`）同样按单元格绘制。复制仍保留原始字符。其他框线字符和 Linux 仍使用字体绘制。字体许可证见 [OFL.txt](assets/fonts/lilex/OFL.txt)。
+终端内嵌 Lilex 字体；界面默认 13px、字重 400，macOS / Windows 使用系统界面字体，Linux 使用内嵌 IBM Plex Sans Regular（[许可证](assets/fonts/ibm-plex-sans/OFL.txt)），可在 Settings → UI Font 中独立修改；终端默认 16px 字号配合 1.3 倍行高。macOS / Windows 将常用单线框线字符 `│─┌┐└┘├┤┬┴┼` 按终端单元格直接绘制并对齐物理像素，保证 Herdr 等终端程序的框线跨行、跨列连续衔接，不依赖所选字体的字形高度；滚动条使用的实心块、左右分数块和上下分数块（如 `█▕▐▏▀▄`）同样按单元格绘制。复制仍保留原始字符。其他框线字符和 Linux 仍使用字体绘制。字体许可证见 [OFL.txt](assets/fonts/lilex/OFL.txt)。
 
 字符显示按终端网格定位，Windows / macOS 由 GPUI 排版每个单元格中的完整 Unicode 序列，保留变体选择符、连接符与组合标记，字体优先级由 Settings 中的 Font Family、Fallbacks 与 CJK Font 配置，最终由平台系统字体补足。超出单元格分配宽度的字形会被裁剪，不会覆盖相邻字符；原始文本与复制内容保持原样。终端内核识别 VS16 将文本符号切换为 emoji 的序列（例如 `⚠️`、`❤️`），为这些序列保留两列；字符与变体选择符分批到达时也保持相同占位。跨多个独立终端单元格的复杂文字排版仍受字符网格限制。Linux 保持原有 egui 绘制逻辑：过滤默认不可见字符，保留组合标记，回退字形过宽时只在水平方向压缩；原始复制内容不变。
 
@@ -75,7 +75,7 @@ Windows 默认启动 `powershell.exe`；macOS 默认使用 `$SHELL`。`--shell` 
 
 ### Linux x64 / CentOS 7.8
 
-Linux 启动时通过 Fontconfig 的 `fc-match` 加载系统中日韩字体回退，并保留 TTC 字体集合的 face index；终端与界面均使用这些回退字体，终端 ASCII 优先使用内置 Lilex，界面使用内嵌 IBM Plex Sans。需要系统安装 Fontconfig 和中文字体（Ubuntu 通常已安装），无需把字体复制到远程 shell 所在机器。
+Linux 启动时通过 Fontconfig 的 `fc-match` 加载系统中日韩字体回退，并保留 TTC 字体集合的 face index；终端与界面均使用这些回退字体，终端 ASCII 优先使用内置 Lilex，界面默认使用内嵌 IBM Plex Sans，可在 UI Font 中修改。需要系统安装 Fontconfig 和中文字体（Ubuntu 通常已安装），无需把字体复制到远程 shell 所在机器。
 
 Linux 打包时从可执行文件分离 DWARF 调试符号，下载包只包含精简后的程序。CI 另外保存 `profiling-linux-<commit>` artifact，其中的 `yiterm` 和 `yiterm.debug` 必须配套使用；放在同一目录时 GDB 可通过 `.gnu_debuglink` 加载符号。原始 Cargo 编译产物保留，避免影响构建缓存。
 
@@ -561,7 +561,7 @@ GPUI Git 列表位于 `src/ui/git.rs`，文件与 diff 大面板共用 `src/ui/v
 
 ## 字体和字号
 
-在 **Settings → Font** 选择终端字体，使用 **Font Size** 调整字号（8–48px，默认 16px）。macOS / Windows 使用 GPUI Component 的可搜索 Select 字体选择器和 NumberInput 字号输入框（支持直接输入及加减），列出系统字体及内嵌 Lilex，隐藏系统内部字体；下方显示当前字体和字号的预览。Linux 使用相同的设置项目、说明与行布局，通过 Fontconfig 枚举已安装字体，在可搜索的下拉列表中选择；搜索框固定在弹层顶部，只有字体列表随滚轮滚动，修改搜索词后列表回到顶部。字号支持加减和直接输入。字体列表在首次打开设置时读取并缓存，新安装字体后重启程序刷新。建议选择等宽字体；平台使用可用字体回退。界面字体固定为 IBM Plex Sans Regular（13px、字重 400），独立于终端字体设置。
+在 **Settings → Font** 选择终端字体，使用 **Font Size** 调整字号（8–48px，默认 16px）。macOS / Windows 使用 GPUI Component 的可搜索 Select 字体选择器和 NumberInput 字号输入框（支持直接输入及加减），列出系统字体及内嵌 Lilex，隐藏系统内部字体；下方显示当前字体和字号的预览。Linux 使用相同的设置项目、说明与行布局，通过 Fontconfig 枚举已安装字体，在可搜索的下拉列表中选择；搜索框固定在弹层顶部，只有字体列表随滚轮滚动，修改搜索词后列表回到顶部。字号支持加减和直接输入。字体列表在首次打开设置时读取并缓存，新安装字体后重启程序刷新。建议选择等宽字体；平台使用可用字体回退。**UI Font** 独立设置菜单、设置页和其他界面文字的字体，支持搜索已安装字体，选择后立即生效并自动保存，不改变终端字体、字号或字符网格。macOS / Windows 默认 `.SystemUIFont`：macOS 映射到 `.AppleSystemUIFont`（San Francisco / SF Pro）；Windows 通过 `SPI_GETICONTITLELOGFONT` 读取系统界面字体，读取失败时回退到 Segoe UI，不固定指定 Segoe UI Variable。Linux 默认保持内嵌 IBM Plex Sans。界面字号保持 13px。
 
 **Fallbacks** 可搜索添加多个回退字体，按列表从上到下依次尝试主字体缺少的字符；使用 `↑` / `↓` 调整顺序，使用 `×` 删除。**CJK Font** 单独指定中文、日文、韩文及相关标点的字体；清空后显示 **Automatic**，随主字体和回退列表自动选择。指定 CJK 字体时，中日韩字符优先使用该字体，缺字时依次尝试主字体、回退列表和系统字体；其他字符优先使用主字体。预览包含英文、中日韩文字和符号，并使用终端相同的字体配置。回退字体不改变主字体决定的终端列宽，中日韩宽字符仍占两列。字体需要安装在运行 yiterm 的本机，远程会话无需安装。
 
@@ -569,13 +569,15 @@ GPUI Git 列表位于 `src/ui/git.rs`，文件与 diff 大面板共用 `src/ui/v
 
 ```toml
 [font]
+# UI 字体默认：macOS / Windows 为 ".SystemUIFont"，Linux 为 "IBM Plex Sans"
+# ui_family = ".SystemUIFont"
 family = "Lilex"
 size = 16.0
 fallbacks = [] # 按顺序填写已安装的字体名称
 # cjk_family = "PingFang SC" # 可选；不设置时使用自动回退
 ```
 
-在 Settings 底部点击 **Reset Defaults**，立即恢复默认主题（Dark）、终端字体（Lilex，16px）及光标（闪烁方块），清空回退字体列表并将 CJK Font 恢复为 Automatic，恢复 Shell 为 Default，并恢复 Windows 终端链接默认在内置浏览器打开，随后自动保存。其他配置项（例如日志）保持不变。
+在 Settings 底部点击 **Reset Defaults**，立即恢复当前平台默认界面字体、默认主题（Dark）、终端字体（Lilex，16px）及光标（闪烁方块），清空回退字体列表并将 CJK Font 恢复为 Automatic，恢复 Shell 为 Default，并恢复 Windows 终端链接默认在内置浏览器打开，随后自动保存。其他配置项（例如日志）保持不变。
 
 ## YiTerm 直连屏幕共享
 

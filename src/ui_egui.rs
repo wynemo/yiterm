@@ -1276,7 +1276,8 @@ impl eframe::App for TerminalApp {
                     self.shell_settings.clone(),
                 )
             {
-                if before.2.family != self.font_settings.family
+                if before.2.ui_family != self.font_settings.ui_family
+                    || before.2.family != self.font_settings.family
                     || before.2.fallbacks != self.font_settings.fallbacks
                     || before.2.cjk_family != self.font_settings.cjk_family
                 {
@@ -1470,7 +1471,7 @@ fn system_font_families(ctx: &egui::Context) -> std::sync::Arc<Vec<String>> {
     let output = std::process::Command::new("fc-list")
         .arg("--format=%{family[0]}\n")
         .output();
-    let mut names = vec!["Lilex".to_owned()];
+    let mut names = vec!["Lilex".to_owned(), "IBM Plex Sans".to_owned()];
     match output {
         Ok(output) if output.status.success() => {
             names.extend(
@@ -1858,6 +1859,10 @@ fn show_settings(
                     show_shell_settings(ui, shell);
                     ui.separator();
                     ui.weak("APPEARANCE");
+                    settings_row(ui, "UI Font", "Font for menus, settings and other interface text.", 220.0, |ui| {
+                        font_picker(ui, "ui-font", &mut font.ui_family, &families, "Select UI font…");
+                    });
+                    ui.separator();
                     settings_row(
                         ui,
                         "Theme",
@@ -2538,6 +2543,14 @@ fn configure_fonts_for(ctx: &egui::Context, settings: &settings::FontSettings) {
     fonts
         .families
         .insert(egui::FontFamily::Name("terminal-cjk".into()), cjk);
+    if let Some(name) = load_terminal_font(&mut fonts, &settings.ui_family) {
+        let family = fonts
+            .families
+            .entry(egui::FontFamily::Proportional)
+            .or_default();
+        family.retain(|existing| existing != &name);
+        family.insert(0, name);
+    }
     ctx.set_fonts(fonts);
 }
 
