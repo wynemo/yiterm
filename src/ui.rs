@@ -2086,6 +2086,9 @@ fn mouse_bytes(
 }
 
 pub(super) fn key_bytes(key: &str, m: Modifiers, app_cursor: bool) -> Option<Vec<u8>> {
+    if m.control && matches!(key, "space" | " ") {
+        return Some(yiterm::keyboard::modified(vec![0], m.shift, m.alt, true));
+    }
     if m.control && key.len() == 1 {
         let c = key.as_bytes()[0].to_ascii_uppercase();
         if (b'@'..=b'_').contains(&c) {
@@ -2094,9 +2097,6 @@ pub(super) fn key_bytes(key: &str, m: Modifiers, app_cursor: bool) -> Option<Vec
             } else {
                 vec![c & 0x1f]
             });
-        }
-        if key == " " {
-            return Some(if m.alt { vec![27, 0] } else { vec![0] });
         }
     }
     let arrow = if app_cursor { "\x1bO" } else { "\x1b[" };

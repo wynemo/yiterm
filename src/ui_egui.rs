@@ -2218,6 +2218,14 @@ fn selection_point(
 }
 
 fn key_bytes(key: Key, modifiers: egui::Modifiers, app_cursor: bool) -> Option<Vec<u8>> {
+    if modifiers.ctrl && key == Key::Space {
+        return Some(yiterm::keyboard::modified(
+            vec![0],
+            modifiers.shift,
+            modifiers.alt,
+            true,
+        ));
+    }
     if modifiers.ctrl && !modifiers.shift {
         let name = format!("{key:?}");
         if name.len() == 1 && name.as_bytes()[0].is_ascii_uppercase() {

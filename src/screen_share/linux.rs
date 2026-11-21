@@ -10,7 +10,7 @@ use tokio::sync::{mpsc, watch};
 use x11rb::{
     connection::Connection,
     image::{BitsPerPixel, Image, ImageOrder, PixelLayout},
-    protocol::{xproto::*, xtest},
+    protocol::{xkb, xproto::*, xtest},
     rust_connection::RustConnection,
 };
 use zeroize::Zeroizing;
@@ -58,6 +58,7 @@ struct X11Desktop {
     root: Window,
     colors: PixelLayout,
     bgr_masks: bool,
+    xkb: bool,
     displayed_size: (i32, i32),
     buttons: [bool; 3],
 }
@@ -86,17 +87,25 @@ impl X11Desktop {
         let colors = PixelLayout::from_visual_type(*visual)?;
         let bgr_masks = (visual.red_mask, visual.green_mask, visual.blue_mask)
             == (0x00ff0000, 0x0000ff00, 0x000000ff);
-        if !options.share_read_only {
+        let xkb = if options.share_read_only {
+            false
+        } else {
             xtest::get_version(&connection, 2, 2)
                 .context("X11 control needs the XTEST extension. Use --share-read-only to share the screen.")?
                 .reply()
                 .context("Could not initialize X11 input control")?;
-        }
+            connection
+                .query_extension(xkb::X11_EXTENSION_NAME.as_bytes())?
+                .reply()?
+                .present
+                && xkb::use_extension(&connection, 1, 0)?.reply()?.supported
+        };
         Ok(Self {
             root: screen.root,
             connection,
             colors,
             bgr_masks,
+            xkb,
             displayed_size: (0, 0),
             buttons: [false; 3],
         })
@@ -180,6 +189,76 @@ impl X11Desktop {
         Ok(())
     }
 
+    fn keyboard_mapping(&self) -> Result<Vec<(Keycode, [Keysym; 2])>> {
+        if self.xkb {
+            let keyboard = u16::from(xkb::ID::USE_CORE_KBD);
+            let state = xkb::get_state(&self.connection, keyboard)?;
+            let mapping = xkb::get_map(
+                &self.connection,
+                keyboard,
+                xkb::MapPart::KEY_SYMS,
+                xkb::MapPart::default(),
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                xkb::VMod::default(),
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+            )?;
+            let group = u8::from(state.reply()?.group);
+            let mapping = mapping.reply()?;
+            let symbols = mapping
+                .map
+                .syms_rtrn
+                .context("XKB keyboard mapping is empty")?;
+            let keys = symbols.iter().enumerate().map(|(index, map)| {
+                (
+                    mapping.first_key_sym + index as u8,
+                    group_symbols(map, group),
+                )
+            });
+            let mut keys: Vec<_> = keys.collect();
+            if group != 0 {
+                // Retain the primary layout as a fallback for keysyms absent from this group.
+                keys.extend(symbols.iter().enumerate().map(|(index, map)| {
+                    (mapping.first_key_sym + index as u8, group_symbols(map, 0))
+                }));
+            }
+            return Ok(keys);
+        }
+
+        let setup = self.connection.setup();
+        let first = setup.min_keycode;
+        let count = setup.max_keycode - first + 1;
+        let mapping = self
+            .connection
+            .get_keyboard_mapping(first, count)?
+            .reply()?;
+        let stride = usize::from(mapping.keysyms_per_keycode);
+        ensure!(stride != 0, "X11 keyboard mapping is empty");
+
+        Ok(mapping
+            .keysyms
+            .chunks_exact(stride)
+            .enumerate()
+            .map(|(index, symbols)| {
+                (
+                    first + index as u8,
+                    [symbols[0], symbols.get(1).copied().unwrap_or(0)],
+                )
+            })
+            .collect())
+    }
+
     fn keyboard(
         &self,
         keys: impl Iterator<Item = (u32, u32)>,
@@ -204,29 +283,14 @@ impl X11Desktop {
             },
         }
 
-        let setup = self.connection.setup();
-        let first = setup.min_keycode;
-        let count = setup.max_keycode - first + 1;
-        let mapping = self
-            .connection
-            .get_keyboard_mapping(first, count)?
-            .reply()?;
-        let stride = usize::from(mapping.keysyms_per_keycode);
-        ensure!(stride != 0, "X11 keyboard mapping is empty");
-
-        // Resolve the two core levels of the host's primary X11 keyboard layout.
+        let mapping = self.keyboard_mapping()?;
         let lookup = |symbol| {
-            mapping
-                .keysyms
-                .chunks_exact(stride)
-                .enumerate()
-                .find_map(|(index, levels)| {
-                    levels
-                        .iter()
-                        .take(2)
-                        .position(|&value| value == symbol)
-                        .map(|level| (first + index as u8, level == 1))
-                })
+            mapping.iter().find_map(|(key, levels)| {
+                levels
+                    .iter()
+                    .position(|&value| value == symbol)
+                    .map(|level| (*key, level == 1))
+            })
         };
         let mut modifiers = [None; 4];
         for (slot, symbols) in modifiers.iter_mut().zip([
@@ -344,6 +408,36 @@ impl Drop for X11Desktop {
     fn drop(&mut self) {
         self.release();
     }
+}
+
+fn group_symbols(map: &xkb::KeySymMap, group: u8) -> [Keysym; 2] {
+    // In XKB's group_info byte, the low nibble holds the group count.
+    let groups = map.group_info & 0x0f;
+    if groups == 0 || map.width == 0 {
+        return [0; 2];
+    }
+    let group = if group < groups {
+        group
+    } else {
+        let action = map.group_info & 0xc0;
+        if action == u8::from(xkb::GroupsWrap::CLAMP_INTO_RANGE) {
+            groups - 1
+        } else if action == u8::from(xkb::GroupsWrap::REDIRECT_INTO_RANGE) {
+            let redirect = (map.group_info >> 4) & 3;
+            if redirect < groups { redirect } else { 0 }
+        } else {
+            group % groups
+        }
+    };
+    let start = usize::from(group) * usize::from(map.width);
+    let levels = map
+        .syms
+        .get(start..start + usize::from(map.width))
+        .unwrap_or_default();
+    [
+        levels.first().copied().unwrap_or(0),
+        levels.get(1).copied().unwrap_or(0),
+    ]
 }
 
 fn keysym(code: u32) -> Option<u32> {

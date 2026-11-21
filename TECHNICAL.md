@@ -586,7 +586,9 @@ fallbacks = [] # 按顺序填写已安装的字体名称
 ./yiterm --share-screen --share-listen 0.0.0.0:9443 --share-read-only
 ```
 
-需要键鼠控制时，在菜单选 **Allow Control**，或从命令中去掉 `--share-read-only`。控制通过 X11 的 XTEST 扩展发送按键、鼠标移动、点击、拖动和上下滚动。文本输入取决于服务端 X11 键盘布局能生成的字符。
+需要键鼠控制时，在菜单选 **Allow Control**，或从命令中去掉 `--share-read-only`。控制通过 X11 的 XTEST 扩展发送按键、鼠标移动、点击、拖动和上下滚动。可用 XKB 时优先使用远程桌面的当前键盘布局，切换布局后无需重连。
+
+使用 Linux 端的中文输入法时，观看端保持英文输入。在远程应用里启用中文输入模式，例如按输入法配置的 **Ctrl+Space** 或点击远程输入法菜单，再键入拼音并选词。拼音、数字和空格由 Linux 输入法处理。观看端已提交的字符和粘贴文本仍依赖远程键盘布局中可用的键位。
 
 默认共享 `DISPLAY` 指定的 X11 screen。可用 `--share-display ID` 选择同一 X server 上的其他 screen，ID 来自 `--share-list`。同一 X11 screen 上的多台显示器作为一个桌面共享。Linux 共享范围为整个 X11 screen，支持可访问的 TrueColor X11 桌面。通过命令行启动时需要正确的 `DISPLAY` 和 X11 授权。Wayland 和 XWayland 桌面、单窗口选择暂不支持。
 
