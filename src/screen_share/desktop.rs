@@ -22,6 +22,9 @@ pub(super) trait Desktop {
     fn recoverable(&self) -> bool {
         false
     }
+    fn viewport(&mut self, _size: PtySize) -> bool {
+        false
+    }
     fn frame(&mut self, width: u32, divisor: usize) -> Result<Frame>;
     fn input(&mut self, event: Event, view: View, stopped: impl Fn() -> bool) -> Result<()>;
     fn release(&mut self);
@@ -301,6 +304,13 @@ pub(super) fn stream(
         {
             let size = *sizes.borrow_and_update();
             let tick = Instant::now();
+            if !options.share_read_only && desktop.viewport(size) {
+                // Coordinates from the preceding mode are no longer usable.
+                desktop.release();
+                shown = None;
+                renderer.previous = None;
+                renderer.previous_view = None;
+            }
             let captured = desktop
                 .frame(options.share_width, divisor)
                 .and_then(|frame| {

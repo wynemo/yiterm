@@ -25,6 +25,9 @@ use zeroize::Zeroizing;
 
 mod console;
 mod control;
+mod display;
+
+static RESOLUTION_OWNER: std::sync::Mutex<()> = std::sync::Mutex::new(());
 pub mod privilege;
 
 pub fn prepare() -> Result<()> {
@@ -557,6 +560,10 @@ struct WindowsDesktop {
     binding: Option<DesktopBinding>,
     lock_source: Source,
     changed: bool,
+    resolution: display::DesktopResolution,
+    resolution_owner: Option<std::sync::MutexGuard<'static, ()>>,
+    viewport: Option<((u16, u16), std::time::Instant)>,
+    applied_viewport: Option<(u16, u16)>,
 }
 
 impl Desktop for WindowsDesktop {
@@ -589,6 +596,46 @@ impl Desktop for WindowsDesktop {
 
     fn recoverable(&self) -> bool {
         privilege::effective_system()
+    }
+
+    fn viewport(&mut self, size: PtySize) -> bool {
+        if self.resolution_owner.is_none()
+            || !matches!(&self.source, Source::Display(display) if display.primary)
+            || self
+                .binding
+                .as_ref()
+                .is_none_or(|binding| binding.name != "Default")
+        {
+            return false;
+        }
+        let size = (size.pixel_width, size.pixel_height);
+        if size.0 < 320 || size.1 < 200 {
+            self.viewport = None;
+            return false;
+        }
+        let size = (size.0.clamp(640, 3840), size.1.clamp(480, 3840));
+        let now = std::time::Instant::now();
+        if self.viewport.is_none_or(|(previous, _)| previous != size) {
+            self.viewport = Some((size, now));
+            return false;
+        }
+        if self.applied_viewport == Some(size)
+            || self.viewport.is_some_and(|(_, since)| {
+                now.duration_since(since) < std::time::Duration::from_millis(500)
+            })
+        {
+            return false;
+        }
+        self.applied_viewport = Some(size);
+        self.release();
+        match self.resolution.resize(u32::from(size.0), u32::from(size.1)) {
+            Ok(()) => true,
+            Err(error) => {
+                tracing::warn!(%error, "Windows 自动分辨率不可用，继续缩放画面");
+                // A driver can partially apply a mode even when verification fails.
+                true
+            }
+        }
     }
 
     fn frame(&mut self, width: u32, divisor: usize) -> Result<Frame> {
@@ -650,6 +697,8 @@ impl Drop for WindowsDesktop {
     fn drop(&mut self) {
         self.release();
         self.control.abandon();
+        // Restore while we still own both the desktop binding and resize lock.
+        drop(std::mem::take(&mut self.resolution));
     }
 }
 
@@ -682,6 +731,14 @@ pub fn stream(
             binding: Some(binding),
             lock_source,
             changed: false,
+            resolution: display::DesktopResolution::default(),
+            resolution_owner: if !options.share_read_only && options.share_window.is_none() {
+                RESOLUTION_OWNER.try_lock().ok()
+            } else {
+                None
+            },
+            viewport: None,
+            applied_viewport: None,
         },
         options,
         sizes,
