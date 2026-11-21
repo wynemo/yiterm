@@ -412,7 +412,7 @@ struct WindowsDesktop {
 }
 
 impl Desktop for WindowsDesktop {
-    fn check(&self) -> Result<()> {
+    fn check(&mut self) -> Result<()> {
         check_desktop()
     }
 

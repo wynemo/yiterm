@@ -1,3 +1,5 @@
+mod clipboard;
+
 use super::{
     Options,
     desktop::{self, Desktop, View, capture_size},
@@ -6,6 +8,7 @@ use super::{
 };
 use anyhow::{Context, Result, ensure};
 use portable_pty::PtySize;
+use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, watch};
 use x11rb::{
     connection::Connection,
@@ -59,6 +62,7 @@ struct X11Desktop {
     colors: PixelLayout,
     bgr_masks: bool,
     xkb: bool,
+    clipboard: Option<clipboard::Clipboard>,
     displayed_size: (i32, i32),
     buttons: [bool; 3],
 }
@@ -100,12 +104,18 @@ impl X11Desktop {
                 .present
                 && xkb::use_extension(&connection, 1, 0)?.reply()?.supported
         };
+        let clipboard = if options.share_read_only {
+            None
+        } else {
+            Some(clipboard::Clipboard::new(&connection, screen.root)?)
+        };
         Ok(Self {
             root: screen.root,
             connection,
             colors,
             bgr_masks,
             xkb,
+            clipboard,
             displayed_size: (0, 0),
             buttons: [false; 3],
         })
@@ -259,30 +269,42 @@ impl X11Desktop {
             .collect())
     }
 
+    fn focused_window(&self) -> Result<Option<Window>> {
+        // XTEST keys target the focused window. Keep them on the shared X screen.
+        let focus = self.connection.get_input_focus()?.reply()?.focus;
+        let on_screen = match focus {
+            0 => false,
+            1 => {
+                self.connection
+                    .query_pointer(self.root)?
+                    .reply()?
+                    .same_screen
+            }
+            window => self
+                .connection
+                .get_geometry(window)?
+                .reply()
+                .is_ok_and(|geometry| geometry.root == self.root),
+        };
+        Ok(on_screen.then_some(focus))
+    }
+
     fn keyboard(
         &self,
         keys: impl Iterator<Item = (u32, u32)>,
         stopped: impl Fn() -> bool,
     ) -> Result<()> {
-        // XTEST keys target the focused window. Keep them on the shared X screen.
-        let focus = self.connection.get_input_focus()?.reply()?.focus;
-        match focus {
-            0 => return Ok(()),
-            1 if !self
-                .connection
-                .query_pointer(self.root)?
-                .reply()?
-                .same_screen =>
-            {
-                return Ok(());
-            }
-            1 => {}
-            window => match self.connection.get_geometry(window)?.reply() {
-                Ok(geometry) if geometry.root == self.root => {}
-                _ => return Ok(()),
-            },
+        if self.focused_window()?.is_some() {
+            self.send_keys(keys, stopped)?;
         }
+        Ok(())
+    }
 
+    fn send_keys(
+        &self,
+        keys: impl Iterator<Item = (u32, u32)>,
+        stopped: impl Fn() -> bool,
+    ) -> Result<()> {
         let mapping = self.keyboard_mapping()?;
         let lookup = |symbol| {
             mapping.iter().find_map(|(key, levels)| {
@@ -334,9 +356,47 @@ impl X11Desktop {
         }
         Ok(())
     }
+
+    fn paste(&mut self, text: String, stopped: impl Fn() -> bool) -> Result<()> {
+        if text.is_empty() || stopped() {
+            return Ok(());
+        }
+        let Some(focus) = self.focused_window()? else {
+            return Ok(());
+        };
+        let Some(clipboard) = &mut self.clipboard else {
+            return Ok(());
+        };
+        clipboard.dispatch(&self.connection, None)?;
+        if !clipboard.offer(&self.connection, text)? || self.focused_window()? != Some(focus) {
+            return Ok(());
+        }
+
+        self.send_keys(std::iter::once((u32::from(b'v'), 4)), &stopped)?;
+        self.connection.flush()?;
+        // X11 selection conversion is asynchronous. Give the application a chance
+        // to fetch this payload before the next input event can replace it.
+        let deadline = Instant::now() + Duration::from_millis(200);
+        if let Some(clipboard) = &mut self.clipboard {
+            while clipboard.has_text() && !stopped() && Instant::now() < deadline {
+                if clipboard.dispatch(&self.connection, Some(focus))? {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(2));
+            }
+        }
+        Ok(())
+    }
 }
 
 impl Desktop for X11Desktop {
+    fn check(&mut self) -> Result<()> {
+        if let Some(clipboard) = &mut self.clipboard {
+            clipboard.dispatch(&self.connection, None)?;
+        }
+        Ok(())
+    }
+
     fn frame(&mut self, width: u32, divisor: usize) -> Result<Frame> {
         let (mut sw, mut sh) = self.geometry()?;
         let capture = |w, h| Image::get(&self.connection, self.root, 0, 0, w, h);
@@ -383,11 +443,12 @@ impl Desktop for X11Desktop {
                 keysym(code).map(|sym| (sym, modifiers)).into_iter(),
                 stopped,
             )?,
-            Event::Text(text) | Event::Paste(text) => self.keyboard(
+            Event::Text(text) if text.is_ascii() => self.keyboard(
                 text.chars()
                     .filter_map(|ch| text_keysym(u32::from(ch)).map(|sym| (sym, 0))),
                 stopped,
             )?,
+            Event::Text(text) | Event::Paste(text) => self.paste(text, stopped)?,
             _ => {}
         }
         self.connection.flush()?;

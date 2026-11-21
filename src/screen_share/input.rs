@@ -17,6 +17,13 @@ pub const LEFT: u32 = 0xe00c;
 pub const RIGHT: u32 = 0xe00d;
 pub const F1: u32 = 0xe010;
 
+// Linux pastes one clipboard payload at a time, so keep normal multi-line
+// pastes together even when the transport splits them across multiple reads.
+#[cfg(target_os = "linux")]
+const PASTE_CHUNK_BYTES: usize = 64 * 1024;
+#[cfg(not(target_os = "linux"))]
+const PASTE_CHUNK_BYTES: usize = 4096;
+
 pub enum Event {
     Canvas(bool),
     Text(String),
@@ -67,11 +74,11 @@ impl Decoder {
                     self.paste = false;
                     return Some(Event::Paste(text));
                 }
-                if self.bytes.len() < 4096 {
+                if self.bytes.len() < PASTE_CHUNK_BYTES {
                     return None;
                 }
                 // Keep a possible partial end marker and partial UTF-8 codepoint.
-                let limit = self.bytes.len().min(4096) - marker.len();
+                let limit = PASTE_CHUNK_BYTES - marker.len();
                 let end = std::str::from_utf8(&self.bytes[..limit])
                     .map_or_else(|e| e.valid_up_to(), |_| limit);
                 if end == 0 {

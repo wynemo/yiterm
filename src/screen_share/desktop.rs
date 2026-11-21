@@ -13,7 +13,7 @@ use tokio::sync::{mpsc, watch};
 use zeroize::Zeroizing;
 
 pub(super) trait Desktop {
-    fn check(&self) -> Result<()> {
+    fn check(&mut self) -> Result<()> {
         Ok(())
     }
     fn frame(&mut self, width: u32, divisor: usize) -> Result<Frame>;
