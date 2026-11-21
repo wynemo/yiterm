@@ -1178,6 +1178,9 @@ impl TerminalUi {
                 rows,
             );
             if cols != pane.size.cols || rows != pane.size.rows || pixels_changed {
+                if let Err(error) = pane.sync_display_scale(window.scale_factor()) {
+                    pane.status = format!("Display scale sync failed: {error}");
+                }
                 let [pixel_width, pixel_height] = pane.graphics.pixels;
                 if let Err(error) = pane.resize_transport(PtySize {
                     cols: cols as u16,

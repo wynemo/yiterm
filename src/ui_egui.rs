@@ -247,6 +247,9 @@ impl TerminalSession {
             size.rows,
         );
         if size.cols != self.size.cols || size.rows != self.size.rows || pixels_changed {
+            if let Err(error) = self.sync_display_scale(ctx.pixels_per_point()) {
+                self.status = format!("Display scale sync failed: {error}");
+            }
             if let Err(error) = self.resize_transport(PtySize {
                 cols: size.cols as u16,
                 rows: size.rows as u16,

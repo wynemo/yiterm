@@ -391,6 +391,14 @@ impl TerminalSession {
         }
     }
 
+    fn sync_display_scale(&mut self, scale: f32) -> std::io::Result<()> {
+        if self.is_direct_share() {
+            let percent = (scale * 100.).round().clamp(100., 500.) as u32;
+            self.send_input(format!("\x1b[?9003;{percent}t").as_bytes())?;
+        }
+        Ok(())
+    }
+
     fn is_direct_share(&self) -> bool {
         matches!(self.transport, TerminalTransport::Direct(_))
     }

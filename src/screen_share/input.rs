@@ -26,6 +26,8 @@ const PASTE_CHUNK_BYTES: usize = 4096;
 
 pub enum Event {
     Canvas(bool),
+    #[cfg(windows)]
+    DisplayScale(u32),
     Text(String),
     Paste(String),
     Key(u32, u32), // Shift=1, Option=2, Control=4, Command=8.
@@ -150,6 +152,17 @@ impl Decoder {
                 }
                 if final_byte == b'y' && text.starts_with("?9002;") {
                     return Some(Event::Canvas(matches!(text, "?9002;1$" | "?9002;2$")));
+                }
+                // YiTerm display metadata travels inside the existing bounded input
+                // channel. Older peers discard this private CSI without typing it.
+                if final_byte == b't' && text.starts_with("?9003;") {
+                    #[cfg(windows)]
+                    if let Ok(scale) = text[6..].parse::<u32>() {
+                        if (100..=500).contains(&scale) {
+                            return Some(Event::DisplayScale(scale));
+                        }
+                    }
+                    continue;
                 }
                 #[cfg(target_os = "macos")]
                 if final_byte == b't' {

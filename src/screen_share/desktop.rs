@@ -22,6 +22,8 @@ pub(super) trait Desktop {
     fn recoverable(&self) -> bool {
         false
     }
+    #[cfg(windows)]
+    fn display_scale(&mut self, _scale: u32) {}
     fn viewport(&mut self, _size: PtySize) -> bool {
         false
     }
@@ -283,6 +285,10 @@ pub(super) fn stream(
                     }
                 }
                 Event::Canvas(value) => canvas = Some(value),
+                #[cfg(windows)]
+                Event::DisplayScale(scale) if !options.share_read_only => {
+                    desktop.display_scale(scale)
+                }
                 Event::Text(text) | Event::Paste(text)
                     if options.share_read_only && text.contains('q') =>
                 {

@@ -69,6 +69,7 @@ x11rb = { version = "0.13.2", features = ["image", "xkb", "xtest"] }
 clipboard-win = { version = "5.4", features = ["std"] }
 raw-window-handle = { version = "0.6", features = ["std"] }
 windows-sys = { version = "0.61", features = [
+    "Win32_Devices_Display",
     "Win32_Graphics_Gdi",
     "Win32_Security",
     "Win32_Security_Authorization",

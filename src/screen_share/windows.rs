@@ -26,6 +26,7 @@ use zeroize::Zeroizing;
 mod console;
 mod control;
 mod display;
+mod dpi;
 
 static RESOLUTION_OWNER: std::sync::Mutex<()> = std::sync::Mutex::new(());
 pub mod privilege;
@@ -561,6 +562,8 @@ struct WindowsDesktop {
     lock_source: Source,
     changed: bool,
     resolution: display::DesktopResolution,
+    dpi: dpi::DesktopDpi,
+    display_scale: Option<u32>,
     resolution_owner: Option<std::sync::MutexGuard<'static, ()>>,
     viewport: Option<((u16, u16), std::time::Instant)>,
     applied_viewport: Option<(u16, u16)>,
@@ -598,6 +601,14 @@ impl Desktop for WindowsDesktop {
         privilege::effective_system()
     }
 
+    fn display_scale(&mut self, scale: u32) {
+        if self.display_scale != Some(scale) {
+            self.display_scale = Some(scale);
+            self.viewport = None;
+            self.applied_viewport = None;
+        }
+    }
+
     fn viewport(&mut self, size: PtySize) -> bool {
         if self.resolution_owner.is_none()
             || !matches!(&self.source, Source::Display(display) if display.primary)
@@ -628,14 +639,28 @@ impl Desktop for WindowsDesktop {
         }
         self.applied_viewport = Some(size);
         self.release();
-        match self.resolution.resize(u32::from(size.0), u32::from(size.1)) {
-            Ok(()) => true,
-            Err(error) => {
-                tracing::warn!(%error, "Windows 自动分辨率不可用，继续缩放画面");
-                // A driver can partially apply a mode even when verification fails.
-                true
+        // Remember DPI before resolution changes can alter the driver's range.
+        if let Some(scale) = self.display_scale {
+            match display::primary() {
+                Ok(device) => {
+                    if let Err(error) = self.dpi.remember(&device) {
+                        tracing::warn!(%error, "Windows DPI 查询不可用");
+                    }
+                    if let Err(error) = self.resolution.resize(u32::from(size.0), u32::from(size.1))
+                    {
+                        tracing::warn!(%error, "Windows 自动分辨率不可用，继续缩放画面");
+                    }
+                    if let Err(error) = self.dpi.apply(&device, scale) {
+                        tracing::warn!(%error, scale, "Windows DPI 同步不可用，保留当前缩放");
+                    }
+                }
+                Err(error) => tracing::warn!(%error, "Windows 自动显示配置不可用"),
             }
+        } else if let Err(error) = self.resolution.resize(u32::from(size.0), u32::from(size.1)) {
+            tracing::warn!(%error, "Windows 自动分辨率不可用，继续缩放画面");
         }
+        // Invalidate old coordinates even if a driver only partially applied a mode.
+        true
     }
 
     fn frame(&mut self, width: u32, divisor: usize) -> Result<Frame> {
@@ -699,6 +724,7 @@ impl Drop for WindowsDesktop {
         self.control.abandon();
         // Restore while we still own both the desktop binding and resize lock.
         drop(std::mem::take(&mut self.resolution));
+        drop(std::mem::take(&mut self.dpi));
     }
 }
 
@@ -732,6 +758,8 @@ pub fn stream(
             lock_source,
             changed: false,
             resolution: display::DesktopResolution::default(),
+            dpi: dpi::DesktopDpi::default(),
+            display_scale: None,
             resolution_owner: if !options.share_read_only && options.share_window.is_none() {
                 RESOLUTION_OWNER.try_lock().ok()
             } else {
