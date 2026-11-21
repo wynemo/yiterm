@@ -8,7 +8,7 @@ use super::{
 };
 use anyhow::{Context, Result, ensure};
 use portable_pty::PtySize;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 use tokio::sync::{mpsc, watch};
 use x11rb::{
     connection::Connection,
@@ -289,9 +289,7 @@ impl X11Desktop {
         Ok(on_screen.then_some(focus))
     }
 
-    fn paste_modifiers(&self, mut window: Window) -> Result<u32> {
-        const CONTROL: u32 = 4;
-        const SHIFT: u32 = 1;
+    fn uses_terminal_paste(&self, mut window: Window) -> Result<bool> {
         const TERMINAL_CLASSES: &[&[u8]] = &[
             b"gnome-terminal",
             b"gnome-terminal-server",
@@ -316,19 +314,18 @@ impl X11Desktop {
                 break;
             };
             if class.format == 8 && !class.value.is_empty() {
-                let terminal = class.value.split(|&byte| byte == 0).any(|name| {
+                return Ok(class.value.split(|&byte| byte == 0).any(|name| {
                     TERMINAL_CLASSES
                         .iter()
                         .any(|terminal| name.eq_ignore_ascii_case(terminal))
-                });
-                return Ok(CONTROL | if terminal { SHIFT } else { 0 });
+                }));
             }
             let Ok(tree) = self.connection.query_tree(window)?.reply() else {
                 break;
             };
             window = tree.parent;
         }
-        Ok(CONTROL)
+        Ok(false)
     }
 
     fn keyboard(
@@ -406,27 +403,42 @@ impl X11Desktop {
         let Some(focus) = self.focused_window()? else {
             return Ok(());
         };
-        let modifiers = self.paste_modifiers(focus)?;
+        let terminal = self.uses_terminal_paste(focus)?;
         let Some(clipboard) = &mut self.clipboard else {
             return Ok(());
         };
         clipboard.dispatch(&self.connection, None)?;
-        if !clipboard.offer(&self.connection, text)? || self.focused_window()? != Some(focus) {
+        if !clipboard.offer(&self.connection, text)? {
+            return Ok(());
+        }
+        // GNOME Terminal disables its paste action on clipboard changes until
+        // GTK has fetched TARGETS and recognized the new owner as a text source.
+        if terminal {
+            clipboard.wait_for(
+                &self.connection,
+                focus,
+                clipboard::Conversion::Targets,
+                Duration::from_millis(120),
+                &stopped,
+            )?;
+        }
+        if stopped() || self.focused_window()? != Some(focus) {
             return Ok(());
         }
 
+        let modifiers = if terminal { 4 | 1 } else { 4 }; // Control and optional Shift.
         self.send_keys(std::iter::once((u32::from(b'v'), modifiers)), &stopped)?;
         self.connection.flush()?;
         // X11 selection conversion is asynchronous. Give the application a chance
         // to fetch this payload before the next input event can replace it.
-        let deadline = Instant::now() + Duration::from_millis(200);
         if let Some(clipboard) = &mut self.clipboard {
-            while clipboard.has_text() && !stopped() && Instant::now() < deadline {
-                if clipboard.dispatch(&self.connection, Some(focus))? {
-                    break;
-                }
-                std::thread::sleep(Duration::from_millis(2));
-            }
+            clipboard.wait_for(
+                &self.connection,
+                focus,
+                clipboard::Conversion::Text,
+                Duration::from_millis(200),
+                stopped,
+            )?;
         }
         Ok(())
     }

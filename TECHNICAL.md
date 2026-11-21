@@ -590,6 +590,8 @@ fallbacks = [] # 按顺序填写已安装的字体名称
 
 可以在观看端直接用输入法选词。提交的中文、emoji 等非 ASCII 文本，以及通过 YiTerm 粘贴的文本，会写入远端 X11 的 UTF-8 剪贴板，再粘贴到聚焦的应用。GNOME Terminal、Konsole、MATE Terminal、Terminator 和 Xfce Terminal 使用 **Ctrl+Shift+V**，其他应用默认使用 **Ctrl+V**。在终端里的 `vi` 中编辑时，先进入插入模式再输入中文。若远端应用使用自定义快捷键，可从远端应用的「粘贴」菜单取出文字。远端剪贴板的原内容会被替换，剪贴板管理器也可能保留这段文字。较长的粘贴内容可能分批发送。
 
+向上述终端粘贴时，共享端先短暂等待并回应终端的剪贴板格式查询，再发送快捷键。GNOME Terminal 会根据查询结果启用粘贴操作。
+
 也可以用 Linux 端的中文输入法。观看端切到英文输入，在远端应用里启用中文输入模式，例如按输入法配置的 **Ctrl+Space**，再键入拼音并选词。普通 ASCII 输入仍按远端键盘布局发送按键，拼音、数字和空格由远端输入法处理。
 
 默认共享 `DISPLAY` 指定的 X11 screen。可用 `--share-display ID` 选择同一 X server 上的其他 screen，ID 来自 `--share-list`。同一 X11 screen 上的多台显示器作为一个桌面共享。Linux 共享范围为整个 X11 screen，支持可访问的 TrueColor X11 桌面。通过命令行启动时需要正确的 `DISPLAY` 和 X11 授权。Wayland 和 XWayland 桌面、单窗口选择暂不支持。

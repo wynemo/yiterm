@@ -1,4 +1,5 @@
 use anyhow::Result;
+use std::time::{Duration, Instant};
 use x11rb::{
     connection::Connection,
     protocol::{Event, xproto::*},
@@ -20,6 +21,12 @@ pub(super) struct Clipboard {
     window: Window,
     atoms: ClipboardAtoms,
     text: Option<Zeroizing<String>>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum Conversion {
+    Targets,
+    Text,
 }
 
 impl Clipboard {
@@ -58,8 +65,22 @@ impl Clipboard {
         Ok(owns_selection)
     }
 
-    pub(super) fn has_text(&self) -> bool {
-        self.text.is_some()
+    pub(super) fn wait_for(
+        &mut self,
+        connection: &RustConnection,
+        focus: Window,
+        conversion: Conversion,
+        timeout: Duration,
+        stopped: impl Fn() -> bool,
+    ) -> Result<()> {
+        let deadline = Instant::now() + timeout;
+        while self.text.is_some() && !stopped() {
+            if self.dispatch(connection, Some((focus, conversion)))? || Instant::now() >= deadline {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        Ok(())
     }
 
     fn owns_selection(&self, connection: &RustConnection) -> Result<bool> {
@@ -73,19 +94,19 @@ impl Clipboard {
     pub(super) fn dispatch(
         &mut self,
         connection: &RustConnection,
-        focus: Option<Window>,
+        expected: Option<(Window, Conversion)>,
     ) -> Result<bool> {
         let client_bits = !connection.setup().resource_id_mask;
         let mut delivered = false;
         for _ in 0..32 {
             match connection.poll_for_event()? {
                 Some(Event::SelectionRequest(request)) if request.owner == self.window => {
-                    let text_sent = self.respond(connection, request)?;
-                    delivered |= text_sent
-                        && focus.is_some_and(|window| {
-                            // Toolkits often use a separate window for selection requests.
-                            window & client_bits == request.requestor & client_bits
-                        });
+                    let conversion = self.respond(connection, request)?;
+                    delivered |= expected.is_some_and(|(window, expected)| {
+                        // Toolkits often use a separate window for selection requests.
+                        conversion == Some(expected)
+                            && window & client_bits == request.requestor & client_bits
+                    });
                 }
                 Some(Event::SelectionClear(event))
                     if event.owner == self.window && event.selection == self.atoms.CLIPBOARD =>
@@ -102,19 +123,22 @@ impl Clipboard {
         Ok(delivered)
     }
 
-    fn respond(&self, connection: &RustConnection, request: SelectionRequestEvent) -> Result<bool> {
+    fn respond(
+        &self,
+        connection: &RustConnection,
+        request: SelectionRequestEvent,
+    ) -> Result<Option<Conversion>> {
         let property = if request.property == x11rb::NONE {
             request.target
         } else {
             request.property
         };
-        let mut text_sent = false;
-        let mut converted = false;
+        let mut conversion = None;
         if let Some(text) = &self.text
             && request.selection == self.atoms.CLIPBOARD
         {
             if request.target == self.atoms.TARGETS {
-                converted = connection
+                conversion = connection
                     .change_property32(
                         PropMode::REPLACE,
                         request.requestor,
@@ -127,9 +151,10 @@ impl Clipboard {
                         ],
                     )?
                     .check()
-                    .is_ok();
+                    .is_ok()
+                    .then_some(Conversion::Targets);
             } else if [self.atoms.UTF8_STRING, self.atoms.TEXT_UTF8].contains(&request.target) {
-                converted = true;
+                conversion = Some(Conversion::Text);
                 // Stay below the minimum X11 request size even without BIG-REQUESTS.
                 for (index, bytes) in text.as_bytes().chunks(16_000).enumerate() {
                     let mode = if index == 0 {
@@ -142,11 +167,10 @@ impl Clipboard {
                         .check()
                         .is_err()
                     {
-                        converted = false;
+                        conversion = None;
                         break;
                     }
                 }
-                text_sent = converted;
             }
         }
         connection
@@ -161,10 +185,14 @@ impl Clipboard {
                     requestor: request.requestor,
                     selection: request.selection,
                     target: request.target,
-                    property: if converted { property } else { x11rb::NONE },
+                    property: if conversion.is_some() {
+                        property
+                    } else {
+                        x11rb::NONE
+                    },
                 },
             )?
             .ignore_error();
-        Ok(text_sent)
+        Ok(conversion)
     }
 }
