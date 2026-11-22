@@ -458,6 +458,8 @@ pub(super) struct TerminalUi {
     focused: bool,
     hover: Option<(usize, TerminalLink)>,
     context_menu: bool,
+    workspace_sidebar_visible: bool,
+    workspace_context: Option<u64>,
     tab_context: Option<u64>,
     rename_input: gpui::Entity<InputState>,
     share_input: gpui::Entity<InputState>,
@@ -685,6 +687,8 @@ impl TerminalUi {
             focused: true,
             hover: None,
             context_menu: false,
+            workspace_sidebar_visible: true,
+            workspace_context: None,
             tab_context: None,
             rename_input,
             share_input,
@@ -877,6 +881,7 @@ impl TerminalUi {
         self.app.settings_open
             || self.app.about_open
             || self.context_menu
+            || self.workspace_context.is_some()
             || self.tab_context.is_some()
             || self.app.rename_tab.is_some()
             || self.app.share_address.is_some()
@@ -1121,6 +1126,7 @@ impl TerminalUi {
                 self.app.settings_open = false;
                 self.app.about_open = false;
                 self.context_menu = false;
+                self.workspace_context = None;
                 self.tab_context = None;
                 self.app.rename_tab = None;
                 self.app.share_address = None;
@@ -1183,9 +1189,22 @@ impl TerminalUi {
             return;
         }
         if key == "tab" && m.control && self.app.tabs.len() > 1 {
-            let n = self.app.tabs.len();
+            let workspace = self.app.tabs[self.app.active].workspace;
+            let indices: Vec<_> = self
+                .app
+                .tabs
+                .iter()
+                .enumerate()
+                .filter(|(_, tab)| tab.workspace == workspace)
+                .map(|(index, _)| index)
+                .collect();
+            let n = indices.len();
+            let current = indices
+                .iter()
+                .position(|index| *index == self.app.active)
+                .unwrap_or(0);
             let delta = if m.shift { n - 1 } else { 1 };
-            self.select_tab((self.app.active + delta) % n, cx);
+            self.select_tab(indices[(current + delta) % n], cx);
             cx.stop_propagation();
             cx.notify();
             return;
@@ -1592,11 +1611,7 @@ impl TerminalUi {
         for geo in &self.panes {
             window.paint_quad(gpui::outline(
                 geo.outer,
-                if geo.index == tab.active {
-                    theme.accent()
-                } else {
-                    theme.border()
-                },
+                theme.border(),
                 gpui::BorderStyle::Solid,
             ));
         }
@@ -2361,6 +2376,9 @@ impl Render for TerminalUi {
             .overflow_x_scroll()
             .flex_shrink_0();
         for (index, tab) in self.app.tabs.iter().enumerate() {
+            if tab.workspace != self.app.tabs[self.app.active].workspace {
+                continue;
+            }
             let tab_id = tab.id;
             let title = SharedString::from(tab.title().to_owned());
             let drag_title = title.clone();
@@ -2375,6 +2393,7 @@ impl Render for TerminalUi {
                         cx.listener(move |this, event: &MouseDownEvent, window, cx| {
                             this.menu = None;
                             this.context_menu = false;
+                            this.workspace_context = None;
                             this.tab_context = Some(tab_id);
                             this.context_anchor = event.position;
                             this.focus.focus(window);
@@ -2508,23 +2527,17 @@ impl Render for TerminalUi {
                                 cx.notify();
                             })),
                     )
-                    .child(
-                        div()
-                            .id("new-tab-blank")
-                            .flex_1()
-                            .h_full()
-                            .on_mouse_down(
-                                MouseButton::Left,
-                                cx.listener(|this, event: &MouseDownEvent, window, cx| {
-                                    if event.click_count == 2 {
-                                        this.new_tab(cx);
-                                        this.focus.focus(window);
-                                        cx.stop_propagation();
-                                        cx.notify();
-                                    }
-                                }),
-                            ),
-                    ),
+                    .child(div().id("new-tab-blank").flex_1().h_full().on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|this, event: &MouseDownEvent, window, cx| {
+                            if event.click_count == 2 {
+                                this.new_tab(cx);
+                                this.focus.focus(window);
+                                cx.stop_propagation();
+                                cx.notify();
+                            }
+                        }),
+                    )),
             );
         }
         #[cfg(target_os = "macos")]
@@ -2538,7 +2551,36 @@ impl Render for TerminalUi {
             .border_color(theme.border());
         #[cfg(not(target_os = "macos"))]
         let top = top.child(menu);
-        let mut top = top.child(tabs);
+        let workspace_name = self
+            .app
+            .workspaces
+            .iter()
+            .find(|workspace| workspace.id == self.app.tabs[self.app.active].workspace)
+            .map(|workspace| {
+                if workspace.name.is_empty() {
+                    self.app.tabs[self.app.active].title().to_owned()
+                } else {
+                    workspace.name.clone()
+                }
+            })
+            .unwrap_or_default();
+        let mut top = top
+            .child(
+                div()
+                    .h(px(34.))
+                    .px(px(12.))
+                    .flex()
+                    .items_center()
+                    .gap(px(8.))
+                    .when(!self.workspace_sidebar_visible, |header| {
+                        header
+                            .when(cfg!(target_os = "macos"), |header| header.pl(px(78.)))
+                            .child(self.workspace_toggle(cx))
+                    })
+                    .child(Icon::new(IconName::Folder).size(px(16.)))
+                    .child(workspace_name),
+            )
+            .child(tabs);
         if let Some(error) = &self.app.error {
             top = top.child(
                 div()
@@ -2702,6 +2744,166 @@ impl Render for TerminalUi {
         } else {
             content.into_any_element()
         };
+        let mut workspaces = div().w_full().flex().flex_col().gap(px(4.)).child(
+            div()
+                .h(px(34.))
+                .flex_shrink_0()
+                .px(px(8.))
+                .flex()
+                .items_center()
+                .when(cfg!(target_os = "macos"), |toolbar| toolbar.pl(px(78.)))
+                .child(self.workspace_toggle(cx))
+                .child(div().flex_1().h_full().on_mouse_down(
+                    MouseButton::Left,
+                    |event, window, _| {
+                        if event.click_count == 2 {
+                            window.zoom_window();
+                        } else {
+                            window.start_window_move();
+                        }
+                    },
+                ))
+                .child(
+                    self.menu_button("new-workspace", "+", cx, |this, window, cx| {
+                        this.app.new_workspace();
+                        this.focus.focus(window);
+                        cx.notify();
+                    }),
+                ),
+        );
+        let active_workspace = self.app.tabs[self.app.active].workspace;
+        for workspace in &self.app.workspaces {
+            let id = workspace.id;
+            let active = id == active_workspace;
+            let tab = self
+                .app
+                .tabs
+                .iter()
+                .find(|tab| tab.workspace == id && tab.id == workspace.selected_tab)
+                .or_else(|| self.app.tabs.iter().find(|tab| tab.workspace == id));
+            let Some(tab) = tab else {
+                continue;
+            };
+            let pane = tab.focused();
+            let directory = match &pane.reported_directory {
+                Some(directory) => directory.clone(),
+                None if self.app.args.local_shell() && !pane.is_direct_share() => pane
+                    .foreground_group()
+                    .and_then(|pid| u32::try_from(pid).ok())
+                    .and_then(crate::files::process_directory)
+                    .or_else(|| pane.process_id().and_then(crate::files::process_directory)),
+                None => None,
+            }
+            .map(|directory| {
+                let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
+                home.and_then(|home| {
+                    directory.strip_prefix(home).ok().map(|relative| {
+                        if relative.as_os_str().is_empty() {
+                            "~".to_owned()
+                        } else {
+                            format!("~/{}", relative.display())
+                        }
+                    })
+                })
+                .unwrap_or_else(|| directory.display().to_string())
+            });
+            let name = if workspace.name.is_empty() {
+                tab.title().to_owned()
+            } else {
+                workspace.name.clone()
+            };
+            let mut details = div()
+                .flex_1()
+                .min_w_0()
+                .flex()
+                .flex_col()
+                .gap(px(3.))
+                .child(div().truncate().text_size(px(16.)).child(name));
+            if let Some(directory) = directory {
+                details = details.child(
+                    div()
+                        .truncate()
+                        .text_size(px(14.))
+                        .opacity(0.7)
+                        .child(directory),
+                );
+            }
+            let entry = div()
+                .id(("workspace", id))
+                .mx(px(7.))
+                .px(px(16.))
+                .py(px(10.))
+                .rounded(px(9.))
+                .flex()
+                .items_center()
+                .gap(px(12.))
+                .overflow_hidden()
+                .cursor_pointer()
+                .when(active, |entry| {
+                    entry.bg(theme.accent()).text_color(gpui::rgb(0xffffff))
+                })
+                .when(!active, |entry| {
+                    entry.hover(|entry| entry.bg(theme.tab_hover()))
+                })
+                .child(details)
+                .child(
+                    div()
+                        .id(("close-workspace-card", id))
+                        .size(px(24.))
+                        .flex_shrink_0()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .rounded(px(4.))
+                        .cursor_pointer()
+                        .child(Icon::new(IconName::Close).size(px(14.)))
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            this.app.close_workspace(id);
+                            this.focus.focus(window);
+                            cx.stop_propagation();
+                            cx.notify();
+                        })),
+                );
+            workspaces = workspaces.child(
+                entry
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        if let Some(index) =
+                            this.app.tabs.iter().position(|tab| tab.workspace == id)
+                        {
+                            // Use the UI selection path to hide any Windows browser panel.
+                            let selected = this
+                                .app
+                                .workspaces
+                                .iter()
+                                .find(|workspace| workspace.id == id)
+                                .map(|workspace| workspace.selected_tab);
+                            let index = this
+                                .app
+                                .tabs
+                                .iter()
+                                .position(|tab| tab.workspace == id && Some(tab.id) == selected)
+                                .unwrap_or(index);
+                            this.select_tab(index, cx);
+                        }
+                        this.focus.focus(window);
+                        cx.notify();
+                    }))
+                    .on_mouse_down(
+                        MouseButton::Right,
+                        cx.listener(move |this, event: &MouseDownEvent, window, cx| {
+                            this.menu = None;
+                            this.context_menu = false;
+                            this.workspace_context = None;
+                            this.tab_context = None;
+                            this.workspace_context = Some(id);
+                            this.context_anchor = event.position;
+                            this.focus.focus(window);
+                            cx.stop_propagation();
+                            cx.notify();
+                        }),
+                    ),
+            );
+        }
         let status = self.app.tabs[self.app.active].focused().status.clone();
         let footer = div()
             .flex()
@@ -2738,9 +2940,36 @@ impl Render for TerminalUi {
                         this.complete(true, window, cx);
                     }))
             })
-            .when(!browser_maximized, |root| root.child(top))
-            .child(content)
-            .when(!browser_maximized, |root| root.child(footer));
+            .child(
+                div()
+                    .flex()
+                    .size_full()
+                    .when(self.workspace_sidebar_visible, |layout| {
+                        layout.child(
+                            div()
+                                .id("workspace-list")
+                                .w(px(280.))
+                                .flex_shrink_0()
+                                .h_full()
+                                .bg(theme.surface())
+                                .border_r_1()
+                                .border_color(theme.border())
+                                .overflow_y_scroll()
+                                .child(workspaces),
+                        )
+                    })
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .h_full()
+                            .flex()
+                            .flex_col()
+                            .when(!browser_maximized, |right| right.child(top))
+                            .child(content)
+                            .when(!browser_maximized, |right| right.child(footer)),
+                    ),
+            );
         #[cfg(target_os = "macos")]
         {
             root = self.native_menu_actions(root, cx);
@@ -2877,7 +3106,7 @@ impl Render for TerminalUi {
                     .child(items),
             );
         }
-        if self.context_menu || self.tab_context.is_some() {
+        if self.context_menu || self.tab_context.is_some() || self.workspace_context.is_some() {
             let pane = self.app.tabs[self.app.active].focused();
             let can_copy = pane
                 .term
@@ -2911,12 +3140,47 @@ impl Render for TerminalUi {
                 .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                 .on_mouse_down(MouseButton::Right, |_, _, cx| cx.stop_propagation())
                 .on_mouse_down(MouseButton::Middle, |_, _, cx| cx.stop_propagation());
-            if let Some(tab_id) = self.tab_context {
+            if let Some(id) = self.workspace_context {
+                items = items
+                    .child(self.menu_button(
+                        "rename-workspace",
+                        "Rename…",
+                        cx,
+                        move |this, window, cx| {
+                            this.workspace_context = None;
+                            if let Some(workspace) = this
+                                .app
+                                .workspaces
+                                .iter()
+                                .find(|workspace| workspace.id == id)
+                            {
+                                let name = workspace.name.clone();
+                                this.app.rename_workspace = Some(id);
+                                this.app.rename_tab = Some((0, name.clone()));
+                                this.rename_input.update(cx, |input, cx| {
+                                    input.set_value(name, window, cx);
+                                    input.focus(window, cx);
+                                });
+                            }
+                        },
+                    ))
+                    .child(self.menu_button(
+                        "close-workspace",
+                        "Close Workspace",
+                        cx,
+                        move |this, window, _| {
+                            this.workspace_context = None;
+                            this.app.close_workspace(id);
+                            this.focus.focus(window);
+                        },
+                    ));
+            } else if let Some(tab_id) = self.tab_context {
                 items = items.child(self.menu_button(
                     "rename-tab",
                     "Rename Tab…",
                     cx,
                     move |this, window, cx| {
+                        this.workspace_context = None;
                         this.tab_context = None;
                         this.app.begin_rename_tab(tab_id);
                         if let Some((_, title)) = &this.app.rename_tab {
@@ -2933,6 +3197,7 @@ impl Render for TerminalUi {
                     "Close Tab",
                     cx,
                     move |this, window, _| {
+                        this.workspace_context = None;
                         this.tab_context = None;
                         if let Some(index) = this.app.tabs.iter().position(|tab| tab.id == tab_id) {
                             this.app.close_tab(index);
@@ -2971,6 +3236,7 @@ impl Render for TerminalUi {
                            window: &mut Window,
                            cx: &mut ViewContext<Self>| {
                 this.context_menu = false;
+                this.workspace_context = None;
                 this.tab_context = None;
                 this.focus.focus(window);
                 cx.stop_propagation();
@@ -3369,6 +3635,27 @@ impl TerminalUi {
         }
         self.hover = None;
     }
+    fn workspace_toggle(&self, cx: &mut ViewContext<Self>) -> impl IntoElement {
+        let theme = self.app.theme;
+        div()
+            .id("toggle-workspace-sidebar")
+            .size(px(24.))
+            .flex_shrink_0()
+            .flex()
+            .items_center()
+            .justify_center()
+            .rounded(px(6.))
+            .cursor_pointer()
+            .text_color(theme.foreground())
+            .hover(|d| d.bg(gpui::Hsla::from(theme.border()).opacity(0.4)))
+            .child(Icon::new(IconName::PanelLeft).size(px(16.)))
+            .tooltip(|window, cx| Tooltip::new("Toggle Sidebar").build(window, cx))
+            .on_click(cx.listener(|this, _, _, cx| {
+                this.workspace_sidebar_visible = !this.workspace_sidebar_visible;
+                cx.notify();
+            }))
+    }
+
     fn menu_button(
         &self,
         id: impl Into<gpui::ElementId>,
@@ -4467,6 +4754,12 @@ pub(super) fn run(app: TerminalApp) -> Result<()> {
                 WindowOptions {
                     window_bounds: Some(WindowBounds::Windowed(bounds)),
                     window_min_size: Some(size(px(420.), px(260.))),
+                    #[cfg(target_os = "macos")]
+                    titlebar: Some(gpui::TitlebarOptions {
+                        title: None,
+                        appears_transparent: true,
+                        traffic_light_position: Some(point(px(12.), px(10.))),
+                    }),
                     ..Default::default()
                 },
                 move |window, cx| {

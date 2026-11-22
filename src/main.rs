@@ -366,9 +366,7 @@ impl TerminalSession {
             reported_focus: None,
             cursor_settings: CursorSettings::default(),
             font_settings: settings::FontSettings::default(),
-            status: warning
-                .map(str::to_owned)
-                .unwrap_or_else(|| "Ready · paste: Cmd+V / Ctrl+Shift+V / Shift+Insert".into()),
+            status: warning.map(str::to_owned).unwrap_or_default(),
             size,
         })
     }
@@ -931,7 +929,14 @@ const TAB_ACTIVE_LINE_HEIGHT: f32 = 2.;
 
 struct TabDrag(u64);
 
+struct Workspace {
+    id: u64,
+    name: String,
+    selected_tab: u64,
+}
+
 struct TerminalTab {
+    workspace: u64,
     files: files::FileState,
     id: u64,
     custom_title: Option<String>,
@@ -947,6 +952,7 @@ impl TerminalTab {
         static NEXT_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
         Self {
             id: NEXT_ID.fetch_add(1, Ordering::Relaxed),
+            workspace: 1,
             custom_title: None,
             files: Default::default(),
             panes: vec![session],
@@ -1011,6 +1017,9 @@ struct TerminalApp {
     #[cfg(target_os = "linux")]
     profile: Option<profiling::Profile>,
     window_title: String,
+    workspaces: Vec<Workspace>,
+    next_workspace: u64,
+    rename_workspace: Option<u64>,
     tabs: Vec<TerminalTab>,
     active: usize,
     args: Args,
@@ -1041,6 +1050,7 @@ struct TerminalApp {
 
 impl TerminalApp {
     fn begin_rename_tab(&mut self, id: u64) {
+        self.rename_workspace = None;
         self.rename_tab = self
             .tabs
             .iter()
@@ -1049,6 +1059,16 @@ impl TerminalApp {
     }
 
     fn finish_rename_tab(&mut self) {
+        if let Some(workspace) = self.rename_workspace.take() {
+            if let Some((_, title)) = self.rename_tab.take()
+                && let Some(workspace) =
+                    self.workspaces.iter_mut().find(|item| item.id == workspace)
+                && !title.trim().is_empty()
+            {
+                workspace.name = title.trim().to_owned();
+            }
+            return;
+        }
         if let Some((id, title)) = self.rename_tab.take()
             && let Some(tab) = self.tabs.iter_mut().find(|tab| tab.id == id)
         {
@@ -1092,6 +1112,13 @@ impl TerminalApp {
             #[cfg(target_os = "linux")]
             profile: profiling::Profile::new(),
             window_title: String::new(),
+            workspaces: vec![Workspace {
+                id: 1,
+                name: String::new(),
+                selected_tab: 0,
+            }],
+            next_workspace: 2,
+            rename_workspace: None,
             tabs: vec![TerminalTab::new(session)],
             active: 0,
             args,
@@ -1296,7 +1323,10 @@ impl TerminalApp {
             .and_then(|address| self.new_share_session(address));
         match result {
             Ok(session) => {
-                self.tabs.push(TerminalTab::new(session));
+                let workspace = self.tabs.get(self.active).map_or(1, |tab| tab.workspace);
+                let mut tab = TerminalTab::new(session);
+                tab.workspace = workspace;
+                self.tabs.push(tab);
                 self.select(self.tabs.len() - 1);
                 self.error = None;
             }
@@ -1307,13 +1337,44 @@ impl TerminalApp {
     fn new_tab(&mut self) {
         match self.new_session(None) {
             Ok(session) => {
-                self.tabs.push(TerminalTab::new(session));
+                let workspace = self.tabs.get(self.active).map_or(1, |tab| tab.workspace);
+                let mut tab = TerminalTab::new(session);
+                tab.workspace = workspace;
+                self.tabs.push(tab);
                 self.select(self.tabs.len() - 1);
                 self.error = None;
             }
             Err(error) => {
                 tracing::warn!(%error, "Cannot create terminal tab");
                 self.error = Some(format!("Cannot create tab: {error:#}"));
+            }
+        }
+    }
+
+    fn new_workspace(&mut self) {
+        match self.new_session(None) {
+            Ok(session) => {
+                let id = self.next_workspace;
+                self.next_workspace += 1;
+                let mut tab = TerminalTab::new(session);
+                tab.workspace = id;
+                self.workspaces.push(Workspace {
+                    id,
+                    name: String::new(),
+                    selected_tab: tab.id,
+                });
+                self.tabs.push(tab);
+                self.select(self.tabs.len() - 1);
+                self.error = None;
+            }
+            Err(error) => self.error = Some(format!("Cannot create workspace: {error:#}")),
+        }
+    }
+
+    fn close_workspace(&mut self, id: u64) {
+        for index in (0..self.tabs.len()).rev() {
+            if self.tabs[index].workspace == id {
+                self.close_tab(index);
             }
         }
     }
@@ -1350,6 +1411,14 @@ impl TerminalApp {
             previous.focused_mut().mouse_wheel.reset();
         }
         self.active = index;
+        let tab = &self.tabs[index];
+        if let Some(workspace) = self
+            .workspaces
+            .iter_mut()
+            .find(|workspace| workspace.id == tab.workspace)
+        {
+            workspace.selected_tab = tab.id;
+        }
         self.tabs[index].focused_mut().cursor_blink_started = Instant::now();
     }
 
@@ -1362,9 +1431,17 @@ impl TerminalApp {
             self.rename_tab = None;
         }
         let was_active = index == self.active;
+        let workspace = self.tabs[index].workspace;
         self.tabs.remove(index);
+        self.workspaces
+            .retain(|workspace| self.tabs.iter().any(|tab| tab.workspace == workspace.id));
         self.active = active_after_close(self.active, index, self.tabs.len());
         if was_active && !self.tabs.is_empty() {
+            self.active = self
+                .tabs
+                .iter()
+                .position(|tab| tab.workspace == workspace)
+                .unwrap_or(self.active);
             self.select(self.active);
         }
     }
@@ -1379,6 +1456,9 @@ impl TerminalApp {
         let Some(target) = self.tabs.iter().position(|tab| tab.id == target_id) else {
             return;
         };
+        if self.tabs[source].workspace != self.tabs[target].workspace {
+            return;
+        }
         let insertion = target + usize::from(!before) - usize::from(source < target);
         if insertion == source {
             return;
