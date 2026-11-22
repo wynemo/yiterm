@@ -137,7 +137,8 @@ pub fn submit_once(read_only: bool) -> Result<()> {
     );
     match unsafe { yiterm_capture_unlock(password.as_ptr(), password.len(), Some(cancelled)) } {
         0 => Ok(()),
-        1 => bail!("Mac did not unlock. Password submitted once; no automatic retry"),
+        1 => bail!("Mac is still locked after waiting 30 seconds. This does not confirm an incorrect password. Check the Mac login screen; password submitted once, no automatic retry"),
+        2 => bail!("Mac loginwindow did not confirm the submit action and the session is still locked after 30 seconds. Check the Mac login screen; no automatic retry"),
         -2 => bail!("Unlock rate limit reached; no password resubmitted"),
         _ => bail!("Unlock unavailable or cancelled; no automatic retry"),
     }

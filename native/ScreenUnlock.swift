@@ -18,6 +18,11 @@ func sessionLockState() -> Int32 {
 public func captureLocked() -> Int32 { sessionLockState() }
 
 private struct UnlockUnavailable: Error {}
+// These waits execute on the main thread. Keep servicing its run loop while
+// loginwindow and the session notifications complete their asynchronous work.
+private func waitForUnlockUI(_ interval: TimeInterval) {
+    RunLoop.current.run(until: Date(timeIntervalSinceNow: interval))
+}
 private func ax(_ element: AXUIElement, _ name: String) -> CFTypeRef? {
     var value: CFTypeRef?
     guard AXUIElementCopyAttributeValue(element, name as CFString, &value) == .success else { return nil }
@@ -123,7 +128,7 @@ private func revealUnlockTarget() throws -> UnlockTarget {
                 revealed = true
             }
         }
-        Thread.sleep(forTimeInterval: 0.1)
+        waitForUnlockUI(0.1)
     }
     throw UnlockUnavailable()
 }
@@ -151,6 +156,12 @@ public func captureUnlock(_ bytes: UnsafePointer<UInt8>, _ length: Int, _ cancel
             unlockAttempts.removeAll { now-$0 >= 60 }
             guard unlockAttempts.count < 3, unlockAttempts.last.map({ now-$0 >= 5 }) ?? true else { return -2 }
             unlockAttempts.append(now)
+            // Keep the display awake throughout password entry/submission and
+            // confirmation, rather than releasing the assertion after reveal.
+            var assertion: IOPMAssertionID = 0
+            guard IOPMAssertionDeclareUserActivity("YiTerm manual unlock" as CFString,
+                kIOPMUserActiveLocal, &assertion) == kIOReturnSuccess else { return -1 }
+            defer { IOPMAssertionRelease(assertion) }
             let original = try revealUnlockTarget()
             try active()
             let current = try unlockTarget()
@@ -163,6 +174,7 @@ public func captureUnlock(_ bytes: UnsafePointer<UInt8>, _ length: Int, _ cancel
                 }
             }
             try active()
+            guard AXUIElementSetAttributeValue(field, "AXFocused" as CFString, kCFBooleanTrue) == .success else { return -1 }
             guard AXUIElementSetAttributeValue(field,"AXValue" as CFString,password as CFString) == .success else { return -1 }
             let deadline = ProcessInfo.processInfo.systemUptime + 2
             var ready: UnlockTarget?
@@ -171,7 +183,7 @@ public func captureUnlock(_ bytes: UnsafePointer<UInt8>, _ length: Int, _ cancel
                 let next = try unlockTarget()
                 guard sameUnlockTarget(original,next) else { return -1 }
                 if next.button != nil { ready = next; break }
-                Thread.sleep(forTimeInterval: 0.05)
+                waitForUnlockUI(0.05)
             }
             guard let ready, let button = ready.button else { return -1 }
             let final = try unlockTarget()
@@ -179,13 +191,15 @@ public func captureUnlock(_ bytes: UnsafePointer<UInt8>, _ length: Int, _ cancel
             try active()
             let status = AXUIElementPerformAction(finalButton,"AXPress" as CFString)
             guard status == .success || status == .cannotComplete else { return -1 }
-            let completionDeadline = ProcessInfo.processInfo.systemUptime + 7
+            let completionDeadline = ProcessInfo.processInfo.systemUptime + 30
             while ProcessInfo.processInfo.systemUptime < completionDeadline {
                 try active()
                 if sessionLockState() == 0 { return 0 }
-                Thread.sleep(forTimeInterval: 0.1)
+                waitForUnlockUI(0.1)
             }
-            return 1 // Rejected/timed out. Never submit the same password again.
+            // AXPress can time out after dispatching the action. Never press
+            // again: the authentication request may already have been received.
+            return status == .cannotComplete ? 2 : 1
         } catch { return -1 }
     }
     return Thread.isMainThread ? body() : DispatchQueue.main.sync(execute: body)
