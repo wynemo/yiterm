@@ -220,6 +220,8 @@ fn install_native_menus(cx: &mut App) {
     cx.bind_keys([
         gpui::KeyBinding::new("cmd-q", Quit, None),
         gpui::KeyBinding::new("cmd-,", OpenSettings, None),
+        gpui::KeyBinding::new("cmd-d", SplitRight, Some("Terminal")),
+        gpui::KeyBinding::new("cmd-shift-d", SplitDown, Some("Terminal")),
     ]);
     cx.set_menus(vec![
         NativeMenu {
