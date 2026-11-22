@@ -2507,6 +2507,23 @@ impl Render for TerminalUi {
                                 this.new_tab(cx);
                                 cx.notify();
                             })),
+                    )
+                    .child(
+                        div()
+                            .id("new-tab-blank")
+                            .flex_1()
+                            .h_full()
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(|this, event: &MouseDownEvent, window, cx| {
+                                    if event.click_count == 2 {
+                                        this.new_tab(cx);
+                                        this.focus.focus(window);
+                                        cx.stop_propagation();
+                                        cx.notify();
+                                    }
+                                }),
+                            ),
                     ),
             );
         }
@@ -2909,6 +2926,19 @@ impl Render for TerminalUi {
                                 input.focus(window, cx);
                             });
                         }
+                    },
+                ));
+                items = items.child(self.menu_button(
+                    "close-tab",
+                    "Close Tab",
+                    cx,
+                    move |this, window, _| {
+                        this.tab_context = None;
+                        if let Some(index) = this.app.tabs.iter().position(|tab| tab.id == tab_id) {
+                            this.app.close_tab(index);
+                        }
+                        this.hover = None;
+                        this.focus.focus(window);
                     },
                 ));
             } else {

@@ -1165,6 +1165,10 @@ impl eframe::App for TerminalApp {
                                         rename = Some(session.id);
                                         ui.close();
                                     }
+                                    if ui.button("Close Tab").clicked() {
+                                        closed = Some(index);
+                                        ui.close();
+                                    }
                                 });
                                 if response.clicked() {
                                     selected = Some(index);
@@ -1191,8 +1195,11 @@ impl eframe::App for TerminalApp {
                             if remaining > 0. {
                                 let (_, blank) = ui.allocate_exact_size(
                                     Vec2::new(remaining, TAB_HEIGHT),
-                                    egui::Sense::hover(),
+                                    egui::Sense::click(),
                                 );
+                                if blank.double_clicked_by(egui::PointerButton::Primary) {
+                                    new = true;
+                                }
                                 trailing = trailing.union(blank);
                             }
                             drop_target(ui, &trailing, last.id, false, gap_rect.left() + 1.);
