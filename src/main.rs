@@ -1038,6 +1038,7 @@ struct TerminalApp {
     #[cfg(target_os = "linux")]
     share_host: Option<direct_share::host::Host>,
     theme: ThemeMode,
+    show_status_bar: bool,
     cursor_settings: CursorSettings,
     font_settings: settings::FontSettings,
     browser_settings: settings::BrowserSettings,
@@ -1137,6 +1138,7 @@ impl TerminalApp {
             #[cfg(target_os = "linux")]
             share_host: None,
             theme: settings::load_theme(&path)?,
+            show_status_bar: settings::load_show_status_bar(&path)?,
             cursor_settings,
             font_settings: settings::load_font(&path)?,
             browser_settings: settings::load_browser(&path)?,

@@ -15,6 +15,8 @@ blinking = true
 [appearance]
 # dark / light
 theme = "dark"
+# Show the bottom bar with Paste and session status.
+show_status_bar = true
 
 # Terminal font (size in pixels, 8–48).
 [font]

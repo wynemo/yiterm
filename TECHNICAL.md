@@ -420,6 +420,7 @@ blinking = true
 ```toml
 [appearance]
 theme = "dark" # 或 "light"
+show_status_bar = true # 显示底部状态栏
 ```
 
 两种主题分别配置 ANSI 16 色；其余 256 色和程序指定的 RGB 真彩色保持原值。程序自行指定的背景颜色也会保留。浅色主题仅在单元格实际背景为主题白底时，将 ANSI 白色文字调整为深色；程序指定其他背景时，若默认前景色或 ANSI 白色/亮白色文字与实际背景的对比度低于 4.5:1，则从主题深色与纯白中选择对比度更高的颜色（例如 PowerShell 的 Ctrl+R 历史搜索区域显示为黑底白字）。程序指定的其他 ANSI 文字颜色、256 色扩展色和 RGB 真彩色文字保持原值。此规则在反显颜色交换后应用。手动编辑配置后需重启生效。
@@ -587,7 +588,9 @@ fallbacks = [] # 按顺序填写已安装的字体名称
 # cjk_family = "PingFang SC" # 可选；不设置时使用自动回退
 ```
 
-在 Settings 窗口底部点击 **Reset Defaults**，立即恢复当前平台默认界面字体、默认主题（Dark）、终端字体（Lilex，16px）及光标（闪烁方块），清空回退字体列表并将 CJK Font 恢复为 Automatic，恢复 Shell 为 Default，并恢复 Windows 终端链接默认在内置浏览器打开，随后自动保存。其他配置项（例如日志）保持不变。
+在 **Settings → Appearance** 中使用 **Status Bar** 开关（Linux 为 **Show status bar**）可显示或隐藏最底部包含 Paste 按钮和会话状态的栏。默认显示，修改立即生效并保存到当前配置文件，重启后保留；隐藏后终端会使用释放的空间。
+
+在 Settings 窗口底部点击 **Reset Defaults**，立即恢复当前平台默认界面字体、默认主题（Dark）、底部状态栏（显示）、终端字体（Lilex，16px）及光标（闪烁方块），清空回退字体列表并将 CJK Font 恢复为 Automatic，恢复 Shell 为 Default，并恢复 Windows 终端链接默认在内置浏览器打开，随后自动保存。其他配置项（例如日志）保持不变。
 
 ## YiTerm 直连屏幕共享
 

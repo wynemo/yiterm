@@ -44,7 +44,7 @@ pub fn load(path: &Path) -> Result<CursorSettings> {
 }
 
 pub fn save(path: &Path, cursor: CursorSettings) -> Result<()> {
-    save_values(path, cursor, None, None, None, None)
+    save_values(path, cursor, None, None, None, None, None)
 }
 
 fn save_values(
@@ -54,6 +54,7 @@ fn save_values(
     font: Option<&FontSettings>,
     browser: Option<BrowserSettings>,
     shell: Option<&ShellSettings>,
+    show_status_bar: Option<bool>,
 ) -> Result<()> {
     let mut value = match std::fs::read_to_string(path) {
         Ok(text) => toml::from_str::<toml::Value>(&text)?,
@@ -66,14 +67,23 @@ fn save_values(
         .as_table_mut()
         .context("Expected configuration table")?
         .insert("cursor".into(), toml::Value::try_from(cursor)?);
-    if let Some(theme) = theme {
+    if theme.is_some() || show_status_bar.is_some() {
+        let mut appearance = value
+            .get("appearance")
+            .cloned()
+            .map(|v| v.try_into::<AppearanceSettings>())
+            .transpose()?
+            .unwrap_or_default();
+        if let Some(theme) = theme {
+            appearance.theme = theme;
+        }
+        if let Some(visible) = show_status_bar {
+            appearance.show_status_bar = visible;
+        }
         value
             .as_table_mut()
             .context("Expected configuration table")?
-            .insert(
-                "appearance".into(),
-                toml::Value::try_from(AppearanceSettings { theme })?,
-            );
+            .insert("appearance".into(), toml::Value::try_from(appearance)?);
     }
     if let Some(font) = font {
         font.validate()?;
@@ -109,13 +119,22 @@ fn save_values(
     Ok(())
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub(crate) struct AppearanceSettings {
     theme: crate::theme::ThemeMode,
+    show_status_bar: bool,
+}
+impl Default for AppearanceSettings {
+    fn default() -> Self {
+        Self {
+            theme: Default::default(),
+            show_status_bar: true,
+        }
+    }
 }
 
-pub fn load_theme(path: &Path) -> Result<crate::theme::ThemeMode> {
+fn load_appearance(path: &Path) -> Result<AppearanceSettings> {
     match std::fs::read_to_string(path) {
         Ok(text) => {
             let value: toml::Value = toml::from_str(&text)?;
@@ -125,16 +144,22 @@ pub fn load_theme(path: &Path) -> Result<crate::theme::ThemeMode> {
                 .map(|v| v.try_into::<AppearanceSettings>())
                 .transpose()
                 .context("Invalid appearance settings")?
-                .unwrap_or_default()
-                .theme)
+                .unwrap_or_default())
         }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(Default::default()),
         Err(error) => Err(error.into()),
     }
 }
 
+pub fn load_theme(path: &Path) -> Result<crate::theme::ThemeMode> {
+    Ok(load_appearance(path)?.theme)
+}
+pub fn load_show_status_bar(path: &Path) -> Result<bool> {
+    Ok(load_appearance(path)?.show_status_bar)
+}
+
 pub fn save_all(path: &Path, cursor: CursorSettings, theme: crate::theme::ThemeMode) -> Result<()> {
-    save_values(path, cursor, Some(theme), None, None, None)
+    save_values(path, cursor, Some(theme), None, None, None, None)
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -225,7 +250,7 @@ pub fn save_with_font(
     theme: crate::theme::ThemeMode,
     font: &FontSettings,
 ) -> Result<()> {
-    save_values(path, cursor, Some(theme), Some(font), None, None)
+    save_values(path, cursor, Some(theme), Some(font), None, None, None)
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
@@ -264,7 +289,15 @@ pub fn save_preferences(
     font: &FontSettings,
     browser: BrowserSettings,
 ) -> Result<()> {
-    save_values(path, cursor, Some(theme), Some(font), Some(browser), None)
+    save_values(
+        path,
+        cursor,
+        Some(theme),
+        Some(font),
+        Some(browser),
+        None,
+        None,
+    )
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -400,6 +433,7 @@ pub fn save_terminal_preferences(
     font: &FontSettings,
     browser: BrowserSettings,
     shell: &ShellSettings,
+    show_status_bar: bool,
 ) -> Result<()> {
     save_values(
         path,
@@ -408,6 +442,7 @@ pub fn save_terminal_preferences(
         Some(font),
         Some(browser),
         Some(shell),
+        Some(show_status_bar),
     )
 }
 

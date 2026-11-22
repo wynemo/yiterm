@@ -1252,6 +1252,7 @@ impl eframe::App for TerminalApp {
                 self.theme,
                 self.font_settings.clone(),
                 self.shell_settings.clone(),
+                self.show_status_bar,
             );
             let close = show_settings(
                 ctx,
@@ -1259,6 +1260,7 @@ impl eframe::App for TerminalApp {
                 &mut self.theme,
                 &mut self.font_settings,
                 &mut self.shell_settings,
+                &mut self.show_status_bar,
             );
             if close {
                 // Native close can arrive while the shell field still owns focus.
@@ -1280,6 +1282,7 @@ impl eframe::App for TerminalApp {
                     self.theme,
                     self.font_settings.clone(),
                     self.shell_settings.clone(),
+                    self.show_status_bar,
                 )
             {
                 if before.2.ui_family != self.font_settings.ui_family
@@ -1304,6 +1307,7 @@ impl eframe::App for TerminalApp {
                             &self.font_settings,
                             self.browser_settings,
                             &self.shell_settings,
+                            self.show_status_bar,
                         )
                     });
                 if let Err(error) = result {
@@ -1443,15 +1447,17 @@ impl eframe::App for TerminalApp {
                 self.finish_rename_tab();
             }
         }
-        egui::TopBottomPanel::bottom("status").show(ctx, |ui| {
-            let session = self.tabs[self.active].focused_mut();
-            ui.horizontal(|ui| {
-                if ui.button("Paste").clicked() {
-                    session.paste();
-                }
-                ui.label(&session.status);
+        if self.show_status_bar {
+            egui::TopBottomPanel::bottom("status").show(ctx, |ui| {
+                let session = self.tabs[self.active].focused_mut();
+                ui.horizontal(|ui| {
+                    if ui.button("Paste").clicked() {
+                        session.paste();
+                    }
+                    ui.label(&session.status);
+                });
             });
-        });
+        }
         if self.files_settings.visible && !self.settings_open && !self.about_open {
             self.show_files(ctx);
         }
@@ -1845,7 +1851,10 @@ fn show_appearance_settings(
     theme: &mut ThemeMode,
     font: &mut settings::FontSettings,
     families: &[String],
+    show_status_bar: &mut bool,
 ) {
+    ui.checkbox(show_status_bar, "Show status bar");
+    ui.separator();
     settings_row(
         ui,
         "UI Font",
@@ -2027,12 +2036,14 @@ fn settings_reset_button(
     theme: &mut ThemeMode,
     font: &mut settings::FontSettings,
     shell: &mut settings::ShellSettings,
+    show_status_bar: &mut bool,
 ) {
     if ui.button("Reset Defaults").clicked() {
         *settings = CursorSettings::default();
         *theme = ThemeMode::default();
         *font = settings::FontSettings::default();
         *shell = settings::ShellSettings::default();
+        *show_status_bar = true;
         ctx.data_mut(|data| {
             data.remove::<String>(egui::Id::new("font-search"));
             data.remove::<String>(egui::Id::new("shell-program-draft"));
@@ -2049,6 +2060,7 @@ fn show_settings(
     theme: &mut ThemeMode,
     font: &mut settings::FontSettings,
     shell: &mut settings::ShellSettings,
+    show_status_bar: &mut bool,
 ) -> bool {
     let families = system_font_families(ctx);
     ctx.show_viewport_immediate(
@@ -2109,7 +2121,15 @@ fn show_settings(
                             ui.with_layout(
                                 egui::Layout::right_to_left(egui::Align::Center),
                                 |ui| {
-                                    settings_reset_button(ui, ctx, settings, theme, font, shell);
+                                    settings_reset_button(
+                                        ui,
+                                        ctx,
+                                        settings,
+                                        theme,
+                                        font,
+                                        shell,
+                                        show_status_bar,
+                                    );
                                 },
                             );
                         });
@@ -2132,7 +2152,14 @@ fn show_settings(
                             if terminal {
                                 show_shell_settings(ui, shell);
                             } else {
-                                show_appearance_settings(ui, settings, theme, font, &families);
+                                show_appearance_settings(
+                                    ui,
+                                    settings,
+                                    theme,
+                                    font,
+                                    &families,
+                                    show_status_bar,
+                                );
                             }
                         });
                 });

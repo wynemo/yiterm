@@ -909,6 +909,7 @@ impl TerminalUi {
                     &self.app.font_settings,
                     self.app.browser_settings,
                     &self.app.shell_settings,
+                    self.app.show_status_bar,
                 )
             });
         if let Err(error) = result {
@@ -1062,6 +1063,7 @@ impl TerminalUi {
         self.app.cursor_settings = CursorSettings::default();
         self.app.theme = ThemeMode::default();
         self.app.font_settings = settings::FontSettings::default();
+        self.app.show_status_bar = true;
         self.app.browser_settings = settings::BrowserSettings::default();
         self.app.shell_settings = settings::ShellSettings::default();
         self.shell_select.update(cx, |select, cx| {
@@ -2927,7 +2929,9 @@ impl Render for TerminalUi {
             .flex_col()
             .when(!browser_maximized, |right| right.child(top))
             .child(content)
-            .when(!browser_maximized, |right| right.child(footer));
+            .when(!browser_maximized && self.app.show_status_bar, |right| {
+                right.child(footer)
+            });
         let layout = if self.workspace_sidebar_visible {
             use gpui_component::resizable::{h_resizable, resizable_panel};
             h_resizable("workspace-split")
@@ -3900,6 +3904,24 @@ impl TerminalUi {
             div()
                 .flex()
                 .flex_col()
+                .child(
+                    row()
+                        .child(description(
+                            "Status Bar",
+                            "Show the bottom bar with Paste and session status.",
+                        ))
+                        .child(
+                            Switch::new("show-status-bar")
+                                .checked(self.app.show_status_bar)
+                                .small()
+                                .on_click(cx.listener(|this, checked: &bool, _, cx| {
+                                    this.app.show_status_bar = *checked;
+                                    this.apply_settings();
+                                    cx.notify();
+                                })),
+                        ),
+                )
+                .child(divider())
                 .child(
                     row()
                         .child(description(
