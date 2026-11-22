@@ -3011,19 +3011,45 @@ impl Render for TerminalUi {
                             .child(div().text_size(px(12.)).child("Recent connections"))
                             .children(self.app.share_recent.iter().enumerate().map(
                                 |(index, address)| {
+                                    let saved_address = *address;
                                     let address = address.to_string();
-                                    self.menu_button(
-                                        ("recent-share", index),
-                                        address.clone(),
-                                        cx,
-                                        move |this, window, cx| {
-                                            this.app.share_address = Some(address.clone());
-                                            this.share_input.update(cx, |input, cx| {
-                                                input.set_value(address.clone(), window, cx);
-                                                input.focus(window, cx);
-                                            });
-                                        },
-                                    )
+                                    div()
+                                        .flex()
+                                        .items_center()
+                                        .child(div().flex_1().min_w_0().child(self.menu_button(
+                                            ("recent-share", index),
+                                            address.clone(),
+                                            cx,
+                                            move |this, window, cx| {
+                                                this.app.share_address = Some(address.clone());
+                                                this.share_input.update(cx, |input, cx| {
+                                                    input.set_value(address.clone(), window, cx);
+                                                    input.focus(window, cx);
+                                                });
+                                            },
+                                        )))
+                                        .child(
+                                            div()
+                                                .id(("forget-share", index))
+                                                .size(px(20.))
+                                                .flex_shrink_0()
+                                                .flex()
+                                                .items_center()
+                                                .justify_center()
+                                                .rounded(px(2.))
+                                                .cursor_pointer()
+                                                .hover(|d| d.bg(theme.border()))
+                                                .child(Icon::new(IconName::Close).size(px(14.)))
+                                                .tooltip(|window, cx| {
+                                                    Tooltip::new("Remove connection")
+                                                        .build(window, cx)
+                                                })
+                                                .on_click(cx.listener(move |this, _, _, cx| {
+                                                    this.app.forget_share_address(saved_address);
+                                                    cx.stop_propagation();
+                                                    cx.notify();
+                                                })),
+                                        )
                                 },
                             )),
                     )

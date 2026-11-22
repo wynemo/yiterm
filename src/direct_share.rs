@@ -62,6 +62,14 @@ fn load_recent(path: &Path) -> Result<Vec<SocketAddr>> {
 }
 
 fn remember_address(directory: &Path, address: SocketAddr) -> Result<()> {
+    update_recent(directory, address, true)
+}
+
+pub fn forget_address(address: SocketAddr) -> Result<()> {
+    update_recent(&data_dir()?, address, false)
+}
+
+fn update_recent(directory: &Path, address: SocketAddr, remember: bool) -> Result<()> {
     // Keep the lock on a separate file so it survives atomic history replacement.
     let lock = fs::OpenOptions::new()
         .write(true)
@@ -71,11 +79,13 @@ fn remember_address(directory: &Path, address: SocketAddr) -> Result<()> {
     lock.lock()?;
     let path = directory.join("recent.json");
     let mut addresses = load_recent(&path)?;
-    if addresses.first() == Some(&address) {
+    if remember && addresses.first() == Some(&address) {
         return Ok(());
     }
     addresses.retain(|saved| *saved != address);
-    addresses.insert(0, address);
+    if remember {
+        addresses.insert(0, address);
+    }
     addresses.truncate(RECENT_LIMIT);
     let mut file = tempfile::NamedTempFile::new_in(directory)?;
     serde_json::to_writer(&mut file, &addresses)?;

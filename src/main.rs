@@ -1251,6 +1251,13 @@ impl TerminalApp {
         );
     }
 
+    fn forget_share_address(&mut self, address: std::net::SocketAddr) {
+        match direct_share::forget_address(address) {
+            Ok(()) => self.share_recent.retain(|saved| *saved != address),
+            Err(error) => self.error = Some(format!("Cannot remove YiTerm connection: {error:#}")),
+        }
+    }
+
     fn new_share_session(&self, address: std::net::SocketAddr) -> Result<TerminalSession> {
         let mut args = self.args.clone();
         args.ssh = None;

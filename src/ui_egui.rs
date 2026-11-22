@@ -1187,8 +1187,7 @@ impl eframe::App for TerminalApp {
                         new = plus.clicked();
                         if let Some(last) = self.tabs.last() {
                             let mut trailing = gap.union(plus);
-                            let remaining =
-                                tab_bar_left + tab_bar_width - trailing.rect.right();
+                            let remaining = tab_bar_left + tab_bar_width - trailing.rect.right();
                             if remaining > 0. {
                                 let (_, blank) = ui.allocate_exact_size(
                                     Vec2::new(remaining, TAB_HEIGHT),
@@ -1323,6 +1322,7 @@ impl eframe::App for TerminalApp {
             }
         }
         let modal_open = self.rename_tab.is_some() || self.share_address.is_some();
+        let mut forget_share = None;
         if let Some(address) = &mut self.share_address {
             let hosting = self.share_host_dialog;
             let title = if hosting {
@@ -1349,14 +1349,20 @@ impl eframe::App for TerminalApp {
                 if !hosting && !self.share_recent.is_empty() {
                     ui.label("Recent connections");
                     for recent in &self.share_recent {
-                        let recent = recent.to_string();
-                        if ui
-                            .selectable_label(*address == recent, recent.as_str())
-                            .clicked()
-                        {
-                            *address = recent;
-                            input.request_focus();
-                        }
+                        ui.horizontal(|ui| {
+                            let label = recent.to_string();
+                            if ui.selectable_label(*address == label, &label).clicked() {
+                                *address = label;
+                                input.request_focus();
+                            }
+                            if ui
+                                .small_button("×")
+                                .on_hover_text("Remove connection")
+                                .clicked()
+                            {
+                                forget_share = Some(*recent);
+                            }
+                        });
                     }
                 }
                 if hosting && let Some(error) = &self.error {
@@ -1403,6 +1409,9 @@ impl eframe::App for TerminalApp {
                     self.connect_share();
                 }
             }
+        }
+        if let Some(address) = forget_share {
+            self.forget_share_address(address);
         }
         if let Some((id, draft)) = &mut self.rename_tab {
             let modal = egui::Modal::new(egui::Id::new(("rename-tab", *id))).show(ctx, |ui| {
