@@ -459,6 +459,7 @@ pub(super) struct TerminalUi {
     hover: Option<(usize, TerminalLink)>,
     context_menu: bool,
     workspace_sidebar_visible: bool,
+    workspace_split: gpui::Entity<gpui_component::resizable::ResizableState>,
     workspace_context: Option<u64>,
     tab_context: Option<u64>,
     rename_input: gpui::Entity<InputState>,
@@ -688,6 +689,7 @@ impl TerminalUi {
             hover: None,
             context_menu: false,
             workspace_sidebar_visible: true,
+            workspace_split: cx.new(|_| gpui_component::resizable::ResizableState::default()),
             workspace_context: None,
             tab_context: None,
             rename_input,
@@ -2917,6 +2919,41 @@ impl Render for TerminalUi {
             .border_color(theme.border())
             .child(self.button("paste", "Paste", cx, |this, _, _| this.session().paste()))
             .child(div().overflow_hidden().text_ellipsis().child(status));
+        let right = div()
+            .flex_1()
+            .min_w_0()
+            .h_full()
+            .flex()
+            .flex_col()
+            .when(!browser_maximized, |right| right.child(top))
+            .child(content)
+            .when(!browser_maximized, |right| right.child(footer));
+        let layout = if self.workspace_sidebar_visible {
+            use gpui_component::resizable::{h_resizable, resizable_panel};
+            h_resizable("workspace-split")
+                .with_state(&self.workspace_split)
+                .child(
+                    resizable_panel()
+                        .size(px(280.))
+                        .size_range(px(180.)..px(600.))
+                        .child(
+                            div()
+                                .id("workspace-list")
+                                .size_full()
+                                .bg(theme.surface())
+                                .overflow_y_scroll()
+                                .child(workspaces),
+                        ),
+                )
+                .child(
+                    resizable_panel()
+                        .size_range(px(240.)..Pixels::MAX)
+                        .child(right),
+                )
+                .into_any_element()
+        } else {
+            right.into_any_element()
+        };
         let mut root = div()
             .relative()
             .size_full()
@@ -2940,36 +2977,7 @@ impl Render for TerminalUi {
                         this.complete(true, window, cx);
                     }))
             })
-            .child(
-                div()
-                    .flex()
-                    .size_full()
-                    .when(self.workspace_sidebar_visible, |layout| {
-                        layout.child(
-                            div()
-                                .id("workspace-list")
-                                .w(px(280.))
-                                .flex_shrink_0()
-                                .h_full()
-                                .bg(theme.surface())
-                                .border_r_1()
-                                .border_color(theme.border())
-                                .overflow_y_scroll()
-                                .child(workspaces),
-                        )
-                    })
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .h_full()
-                            .flex()
-                            .flex_col()
-                            .when(!browser_maximized, |right| right.child(top))
-                            .child(content)
-                            .when(!browser_maximized, |right| right.child(footer)),
-                    ),
-            );
+            .child(layout);
         #[cfg(target_os = "macos")]
         {
             root = self.native_menu_actions(root, cx);
