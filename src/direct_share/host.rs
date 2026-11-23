@@ -263,6 +263,8 @@ fn config() -> Result<ServerConfig> {
     config.alpn_protocols = vec![ALPN.to_vec()];
     #[cfg(target_os = "macos")]
     config.alpn_protocols.insert(0, DESKTOP_ALPN.to_vec());
+    #[cfg(windows)]
+    config.alpn_protocols.insert(0, WINDOWS_ALPN.to_vec());
     config.send_tls13_tickets = 0;
     Ok(config)
 }
@@ -292,8 +294,10 @@ async fn serve(
     let setup = async {
         let mut stream = acceptor.accept(socket).await?;
         let desktop = stream.get_ref().1.alpn_protocol() == Some(DESKTOP_ALPN);
-        ensure!(stream.get_ref().1.alpn_protocol() == Some(ALPN) || desktop,
+        let windows = stream.get_ref().1.alpn_protocol() == Some(WINDOWS_ALPN);
+        ensure!(stream.get_ref().1.alpn_protocol() == Some(ALPN) || desktop || windows,
                 "Incompatible YiTerm sharing protocol");
+        ensure!(!windows || cfg!(windows), "Windows desktop protocol requires Windows");
         ensure!(!desktop || cfg!(target_os = "macos"), "Virtual desktop requires macOS");
         ensure!(!desktop || (options.share_window.is_none() && options.share_display.is_none()),
                 "Tenimon virtual desktop requires sharing without --share-window or --share-display");
@@ -306,14 +310,15 @@ async fn serve(
             ensure!(stream.read_u8().await? == DESKTOP_SIZE, "Missing initial iPad desktop size");
             Some(read_desktop_size(&mut stream).await?)
         } else { None };
-        Ok::<_, anyhow::Error>((stream, size, desktop_size))
+        Ok::<_, anyhow::Error>((stream, size, desktop_size, windows))
     };
-    let (mut stream, size, desktop_size) = tokio::select! {
+    let (mut stream, size, desktop_size, windows) = tokio::select! {
         _ = stop.as_mut() => return Ok(()),
         result = timeout(IO_TIMEOUT, setup) => result??,
     };
     #[cfg(target_os = "macos")]
     let result = {
+        let _ = windows;
         let prepared = (|| -> Result<()> {
             if let Some(requested) = desktop_size {
                 if workspace.is_none() { *workspace = Some(VirtualDesktop::create(requested)?); }
@@ -332,7 +337,7 @@ async fn serve(
     #[cfg(not(target_os = "macos"))]
     let result = {
         let _ = (workspace, desktop_size);
-        platform::session(stream, size, options, stop).await
+        platform::session(stream, size, options, stop, windows).await
     };
     eprintln!("YiTerm viewer disconnected.");
     result

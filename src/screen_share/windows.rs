@@ -734,6 +734,27 @@ pub fn stream(
     input: mpsc::Receiver<Zeroizing<Vec<u8>>>,
     output: &mpsc::Sender<Vec<u8>>,
 ) -> Result<()> {
+    stream_with_display_policy(options, sizes, input, output, true)
+}
+
+/// Tenimon controls the existing desktop without changing its resolution/DPI.
+/// Secure-desktop capture/input is shared with the normal Windows host path.
+pub fn stream_preserving_display(
+    options: &Options,
+    sizes: watch::Receiver<PtySize>,
+    input: mpsc::Receiver<Zeroizing<Vec<u8>>>,
+    output: &mpsc::Sender<Vec<u8>>,
+) -> Result<()> {
+    stream_with_display_policy(options, sizes, input, output, false)
+}
+
+fn stream_with_display_policy(
+    options: &Options,
+    sizes: watch::Receiver<PtySize>,
+    input: mpsc::Receiver<Zeroizing<Vec<u8>>>,
+    output: &mpsc::Sender<Vec<u8>>,
+    adjusts_display: bool,
+) -> Result<()> {
     // This worker owns the capture DCs and uses physical coordinates throughout.
     unsafe { SetThreadDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2) };
     let binding = DesktopBinding::open()?;
@@ -760,7 +781,7 @@ pub fn stream(
             resolution: display::DesktopResolution::default(),
             dpi: dpi::DesktopDpi::default(),
             display_scale: None,
-            resolution_owner: if !options.share_read_only && options.share_window.is_none() {
+            resolution_owner: if adjusts_display && !options.share_read_only && options.share_window.is_none() {
                 RESOLUTION_OWNER.try_lock().ok()
             } else {
                 None

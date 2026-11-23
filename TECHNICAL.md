@@ -884,4 +884,17 @@ Mac 端用现有 `--share-screen --share-listen IP:PORT` 监听即可。Tenimon 
 
 这是同一 macOS 用户会话的一块额外显示器，不是独立用户登录桌面；现有实体屏窗口不会自动复制或搬入虚拟屏。需要在虚拟屏上使用应用窗口。锁屏解锁仍复用原流程，不支持开机登录和 FileVault。
 
-明天先构建 Release 二进制并重新启动服务，再安装新版 Tenimon。重点检查：虚拟屏是否成功创建、实体屏模式及窗口是否保持原样、iPad 横竖屏／分屏／键盘改变后的尺寸和 HiDPI 清晰度、键鼠坐标、锁屏解锁、断线保留及退出释放。私有接口在不同 macOS 上的可用性尚待实机验证；Windows 不在本轮虚拟屏实现范围内。
+明天先构建 Release 二进制并重新启动服务，再安装新版 Tenimon。重点检查：虚拟屏是否成功创建、实体屏模式及窗口是否保持原样、iPad 横竖屏／分屏／键盘改变后的尺寸和 HiDPI 清晰度、键鼠坐标、锁屏解锁、断线保留及退出释放。私有接口在不同 macOS 上的可用性尚待实机验证；Windows 不使用这条 Mac 虚拟屏协议，另见下面的 Windows 连接说明。
+
+
+## Tenimon 连接 Windows 与锁屏解锁（源码准备，未验证）
+
+Tenimon 新增 ALPN `tenimon-windows/1`，Windows 服务端优先提供这一协议，Mac 仍使用 `tenimon-desktop/1` 虚拟屏，两者不可互换。普通 YiTerm 观看端继续使用原来的 `yiterm-screen/1`。
+
+Windows 专用连接只发送既有终端尺寸帧和输入／保活，不发送 Mac 的类型 4 虚拟屏尺寸帧。Windows 复用现有桌面／Winlogon 安全桌面采集及键鼠路径；`stream_preserving_display` 不取得分辨率／DPI 调整权限，不因 Tenimon 视口变化修改实体显示器。原普通 YiTerm 观看端的自动分辨率行为不变。
+
+锁屏解锁复用原管理员启动流程：以管理员身份启动共享，YiTerm 创建当前登录会话的独立 SYSTEM 共享进程；只有专用采集／输入工作线程跟随安全桌面，网络运行时不保留模拟身份。Tenimon 看到 Windows 登录画面后手动点选输入框、输入登录密码或当前选中的 PIN 并提交，不新增凭据存储、自动认证重试或其他解锁程序。只读模式不能输入密码。普通权限不能操作锁屏，应结束共享后以管理员权限重新启动。
+
+该实现不创建 Windows 虚拟屏或独立 RDP 桌面，不支持 BitLocker、Session 0、开机磁盘解锁和要求 Ctrl+Alt+Del 的策略。从 RDP 启动管理员共享仍可能交回控制台并断开 RDP。
+
+本轮没有构建、测试或实机验证，也没有安装 Windows SDK／工具链或在 macOS 交叉编译。Windows 需要既有 CI／原生 Release 构建，并验证连接时已锁屏、连接中锁屏、密码框点击、键盘输入、解锁恢复、只读及普通权限错误路径，以及实体屏分辨率／DPI 保持不变。不能将本机代码改动视作 Windows 解锁已通过验证。
