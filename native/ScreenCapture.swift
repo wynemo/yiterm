@@ -22,6 +22,8 @@ func reportFailure(_ message: String) {
 @available(macOS 13.0, *)
 final class Capture: NSObject, SCStreamOutput, SCStreamDelegate {
     let queue = DispatchQueue(label: "yiterm.capture")
+    let virtualDesktopCapture = VirtualDesktopCapture()
+    var isVirtualDisplay = false
     var stream: SCStream?
     var configuration: SCStreamConfiguration?
     var sessionPaused = false // main thread
@@ -70,7 +72,20 @@ final class Capture: NSObject, SCStreamOutput, SCStreamDelegate {
     do {
         // Let ScreenCaptureKit make the actual access decision. Preflight alone
         // can disagree with the current launch context and is not a capture call.
-        let content = try await SCShareableContent.excludingDesktopWindows(true, onScreenWindowsOnly: true)
+        var content = try await SCShareableContent.excludingDesktopWindows(true, onScreenWindowsOnly: true)
+        let virtualID = value("--virtual-display-id").flatMap(UInt32.init)
+        if let virtualID {
+            for _ in 0..<20 where !content.displays.contains(where: { $0.displayID == virtualID }) {
+                try await Task.sleep(nanoseconds: 100_000_000)
+                guard !Task.isCancelled else { return }
+                content = try await SCShareableContent.excludingDesktopWindows(true, onScreenWindowsOnly: true)
+            }
+            guard CGDisplayVendorNumber(virtualID) == 0x594954,
+                  content.displays.contains(where: { $0.displayID == virtualID }),
+                  value("--display").flatMap(UInt32.init) == virtualID else {
+                throw CaptureFailure(message: "The iPad virtual display is unavailable; physical display capture was not started")
+            }
+        }
         guard !Task.isCancelled else { return }
         if args.contains("--list") {
             for d in content.displays { print("display\t\(d.displayID)\t\(d.width)x\(d.height)") }
@@ -127,6 +142,7 @@ final class Capture: NSObject, SCStreamOutput, SCStreamDelegate {
         if #available(macOS 14.0, *) { config.scalesToFit = true; config.preservesAspectRatio = true; config.ignoreShadowsSingleWindow = true }
         let capture = Capture()
         capture.displayID = selectedDisplay; capture.windowID = selectedWindow; capture.windowPID = selectedPID; capture.controlEnabled = control
+        capture.isVirtualDisplay = virtualID != nil
         capture.sourceAspect = Double(width) / Double(height)
         capture.configuration = config
         let stream = SCStream(filter: filter, configuration: config, delegate: capture)
@@ -228,6 +244,7 @@ public func stopCapture() {
             if #available(macOS 13.0, *), let capture = activeCapture as? Capture {
                 releasePointer(capture)
                 try? await capture.stream?.stopCapture()
+                capture.virtualDesktopCapture.cancel()
                 capture.queue.sync {} // Drain frame callbacks before Rust releases their context.
                 activeCapture = nil
             }

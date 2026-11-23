@@ -27,6 +27,8 @@ use tokio::{
 use zeroize::Zeroizing;
 
 const ALPN: &[u8] = b"yiterm-screen/1";
+const DESKTOP_ALPN: &[u8] = b"tenimon-desktop/1";
+const DESKTOP_SIZE: u8 = 4;
 const MAX_INPUT: usize = 16 * 1024;
 const IO_TIMEOUT: Duration = Duration::from_secs(10);
 const HEARTBEAT: Duration = Duration::from_secs(5);

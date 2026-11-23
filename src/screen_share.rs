@@ -204,6 +204,7 @@ mod macos {
             context: *mut libc::c_void,
         ) -> i32;
         fn yiterm_capture_stop();
+        fn yiterm_capture_resize_desktop(w: i32, h: i32, scale: i32);
         fn yiterm_capture_pointer(x: f64, y: f64, button: i32, phase: i32, modifiers: i32);
         fn yiterm_capture_key(code: u32, modifiers: u32);
         fn yiterm_capture_text(bytes: *const u8, len: usize);
@@ -280,6 +281,11 @@ mod macos {
             if let Some(value) = value {
                 args.extend([flag.to_owned(), value.to_string()]);
             }
+        }
+        if let Some(id) = std::env::var_os("YITERM_VIRTUAL_DISPLAY_ID") {
+            let id = id.to_str().and_then(|s| s.parse::<u32>().ok())
+                .filter(|id| *id != 0).ok_or_else(|| anyhow::anyhow!("Invalid virtual display identity"))?;
+            args.extend(["--virtual-display-id".into(), id.to_string()]);
         }
         args.extend([
             "--width".into(),
@@ -429,6 +435,9 @@ mod macos {
                                         }
                                     }
                                 }
+                                Event::DesktopSize(w, h, scale) => unsafe {
+                                    yiterm_capture_resize_desktop(w as i32, h as i32, scale as i32);
+                                },
                                 Event::Canvas(supported) => {
                                     v.lock().unwrap().canvas = Some(supported)
                                 }

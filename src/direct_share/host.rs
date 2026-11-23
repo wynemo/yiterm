@@ -14,6 +14,16 @@ mod platform;
 #[path = "host/desktop.rs"]
 mod platform;
 
+#[cfg(target_os = "macos")]
+#[path = "host/virtual_desktop.rs"]
+mod virtual_desktop;
+#[cfg(target_os = "macos")]
+use virtual_desktop::VirtualDesktop;
+#[cfg(target_os = "macos")]
+type HostWorkspace = Option<VirtualDesktop>;
+#[cfg(not(target_os = "macos"))]
+type HostWorkspace = ();
+
 type ServerStream = tokio_rustls::server::TlsStream<TcpStream>;
 type Stop<'a, F> = std::pin::Pin<&'a mut F>;
 
@@ -165,6 +175,11 @@ impl Drop for Host {
             let _ = stop.send(());
         }
         if let Some(worker) = self.worker.take() {
+            // The macOS listener can be waiting on CoreGraphics work on the
+            // AppKit main queue. Keep that queue free while cleanup finishes.
+            #[cfg(target_os = "macos")]
+            let _ = std::thread::spawn(move || { let _ = worker.join(); });
+            #[cfg(not(target_os = "macos"))]
             let _ = worker.join();
         }
     }
@@ -190,6 +205,7 @@ async fn listen(
     stop: impl std::future::Future<Output = ()>,
 ) -> Result<()> {
     let acceptor = tokio_rustls::TlsAcceptor::from(Arc::new(config));
+    let mut workspace = HostWorkspace::default();
     let stop = stop.fuse();
     tokio::pin!(stop);
     loop {
@@ -198,7 +214,7 @@ async fn listen(
             _ = &mut stop => return Ok(()),
             result = listener.accept() => result?,
         };
-        let result = serve(socket, &acceptor, options, stop.as_mut()).await;
+        let result = serve(socket, &acceptor, options, stop.as_mut(), &mut workspace).await;
         if stop.is_terminated() {
             return Ok(());
         }
@@ -245,6 +261,8 @@ fn config() -> Result<ServerConfig> {
                 PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(key.to_vec())),
             )?;
     config.alpn_protocols = vec![ALPN.to_vec()];
+    #[cfg(target_os = "macos")]
+    config.alpn_protocols.insert(0, DESKTOP_ALPN.to_vec());
     config.send_tls13_tickets = 0;
     Ok(config)
 }
@@ -268,34 +286,78 @@ async fn serve(
     acceptor: &tokio_rustls::TlsAcceptor,
     options: &Options,
     mut stop: std::pin::Pin<&mut impl std::future::Future<Output = ()>>,
+    workspace: &mut HostWorkspace,
 ) -> Result<()> {
     socket.set_nodelay(true)?;
     let setup = async {
         let mut stream = acceptor.accept(socket).await?;
-        ensure!(
-            stream.get_ref().1.alpn_protocol() == Some(ALPN),
-            "Incompatible YiTerm sharing protocol"
-        );
+        let desktop = stream.get_ref().1.alpn_protocol() == Some(DESKTOP_ALPN);
+        ensure!(stream.get_ref().1.alpn_protocol() == Some(ALPN) || desktop,
+                "Incompatible YiTerm sharing protocol");
+        ensure!(!desktop || cfg!(target_os = "macos"), "Virtual desktop requires macOS");
+        ensure!(!desktop || (options.share_window.is_none() && options.share_display.is_none()),
+                "Tenimon virtual desktop requires sharing without --share-window or --share-display");
         ensure!(
             stream.read_u8().await? == RESIZE,
             "Missing initial YiTerm terminal size"
         );
         let size = read_size(&mut stream).await?;
-        Ok::<_, anyhow::Error>((stream, size))
+        let desktop_size = if desktop {
+            ensure!(stream.read_u8().await? == DESKTOP_SIZE, "Missing initial iPad desktop size");
+            Some(read_desktop_size(&mut stream).await?)
+        } else { None };
+        Ok::<_, anyhow::Error>((stream, size, desktop_size))
     };
-    let (stream, size) = tokio::select! {
+    let (mut stream, size, desktop_size) = tokio::select! {
         _ = stop.as_mut() => return Ok(()),
         result = timeout(IO_TIMEOUT, setup) => result??,
     };
-    let result = platform::session(stream, size, options, stop).await;
+    #[cfg(target_os = "macos")]
+    let result = {
+        let prepared = (|| -> Result<()> {
+            if let Some(requested) = desktop_size {
+                if workspace.is_none() { *workspace = Some(VirtualDesktop::create(requested)?); }
+                workspace.as_mut().context("Missing virtual display owner")?.resize(requested)?;
+            }
+            Ok(())
+        })();
+        if let Err(error) = prepared {
+            let message = format!("\r\nYiTerm virtual desktop: {error:#}\r\n");
+            let _ = timeout(IO_TIMEOUT, stream.write_all(message.as_bytes())).await;
+            return Err(error);
+        }
+        let desktop = if desktop_size.is_some() { workspace.as_mut() } else { None };
+        platform::session(stream, size, options, stop, desktop).await
+    };
+    #[cfg(not(target_os = "macos"))]
+    let result = {
+        let _ = (workspace, desktop_size);
+        platform::session(stream, size, options, stop).await
+    };
     eprintln!("YiTerm viewer disconnected.");
     result
 }
 
+async fn read_desktop_size(reader: &mut (impl AsyncReadExt + Unpin)) -> Result<[u16; 3]> {
+    let request = [reader.read_u16().await?, reader.read_u16().await?, reader.read_u16().await?];
+    ensure!((320..=1920).contains(&request[0]) && (320..=1920).contains(&request[1])
+        && (100..=400).contains(&request[2]), "Invalid iPad virtual desktop size");
+    Ok(request)
+}
+
 async fn receive(
+    reader: &mut (impl AsyncReadExt + Unpin),
+    input: impl AsyncFnMut(&[u8]) -> Result<()>,
+    resize: impl FnMut(PtySize) -> Result<()>,
+) -> Result<()> {
+    receive_with_desktop(reader, input, resize, |_| anyhow::bail!("This session has no virtual display")).await
+}
+
+async fn receive_with_desktop(
     reader: &mut (impl AsyncReadExt + Unpin),
     mut input: impl AsyncFnMut(&[u8]) -> Result<()>,
     mut resize: impl FnMut(PtySize) -> Result<()>,
+    mut desktop: impl FnMut([u16; 3]) -> Result<()>,
 ) -> Result<()> {
     use zeroize::Zeroize;
 
@@ -315,6 +377,7 @@ async fn receive(
             }
             Ok(RESIZE) => resize(timeout(IO_TIMEOUT, read_size(reader)).await??)?,
             Ok(PING) => {}
+            Ok(DESKTOP_SIZE) => desktop(timeout(IO_TIMEOUT, read_desktop_size(reader)).await??)?,
             Ok(_) => anyhow::bail!("Unknown YiTerm input frame"),
             Err(error) if error.kind() == io::ErrorKind::UnexpectedEof => return Ok(()),
             Err(error) => return Err(error.into()),

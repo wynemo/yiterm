@@ -34,6 +34,8 @@ pub enum Event {
     Focus(bool),
     #[cfg(target_os = "macos")]
     Size(usize, usize, usize),
+    #[cfg(target_os = "macos")]
+    DesktopSize(usize, usize, usize),
     Mouse(usize, usize, usize, bool),
     Exit,
 }
@@ -152,6 +154,16 @@ impl Decoder {
                 }
                 if final_byte == b'y' && text.starts_with("?9002;") {
                     return Some(Event::Canvas(matches!(text, "?9002;1$" | "?9002;2$")));
+                }
+                #[cfg(target_os = "macos")]
+                if final_byte == b't' && text.starts_with("?9004;") {
+                    if let Some([w, h, scale]) = numbers::<3>(&text[6..]) {
+                        if (320..=1920).contains(&w) && (320..=1920).contains(&h)
+                            && (100..=400).contains(&scale) {
+                            return Some(Event::DesktopSize(w, h, scale));
+                        }
+                    }
+                    continue;
                 }
                 // YiTerm display metadata travels inside the existing bounded input
                 // channel. Older peers discard this private CSI without typing it.

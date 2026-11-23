@@ -1,6 +1,8 @@
 fn main() {
     println!("cargo:rerun-if-changed=native/ScreenCapture.swift");
     println!("cargo:rerun-if-changed=native/ScreenUnlock.swift");
+    println!("cargo:rerun-if-changed=native/VirtualDesktopCapture.swift");
+    println!("cargo:rerun-if-changed=native/VirtualDisplay.m");
     #[cfg(target_os = "macos")]
     {
         let output = std::path::PathBuf::from(std::env::var_os("OUT_DIR").unwrap())
@@ -23,6 +25,7 @@ fn main() {
                 "5",
                 "native/ScreenCapture.swift",
                 "native/ScreenUnlock.swift",
+                "native/VirtualDesktopCapture.swift",
                 "-o",
             ])
             .arg(&output)
@@ -33,6 +36,19 @@ fn main() {
             status.success(),
             "failed to compile macOS screen capture library"
         );
+        let object = output.with_file_name("VirtualDisplay.o");
+        let compiled = std::process::Command::new("xcrun")
+            .args(["clang", "-O2", "-fobjc-arc", "-fblocks", "-mmacosx-version-min=13.0", "-arch", arch,
+                   "-c", "native/VirtualDisplay.m", "-o"])
+            .arg(&object).status().expect("cannot compile virtual display support");
+        assert!(compiled.success(), "failed to compile virtual display support");
+        let archived = std::process::Command::new("xcrun")
+            .args(["ar", "-q"]).arg(&output).arg(&object).status()
+            .expect("cannot archive virtual display support");
+        assert!(archived.success(), "failed to archive virtual display support");
+        let indexed = std::process::Command::new("xcrun")
+            .arg("ranlib").arg(&output).status().expect("cannot index capture library");
+        assert!(indexed.success(), "failed to index capture library");
         println!(
             "cargo:rustc-link-search=native={}",
             output.parent().unwrap().display()

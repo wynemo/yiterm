@@ -3,7 +3,7 @@ use portable_pty::{Child, CommandBuilder, native_pty_system};
 use std::os::fd::RawFd;
 use tokio::io::unix::AsyncFd;
 
-fn capture_command(o: &Options) -> Result<CommandBuilder> {
+fn capture_command(o: &Options, virtual_display: Option<u32>) -> Result<CommandBuilder> {
     let mut command = CommandBuilder::new(std::env::current_exe()?);
     command.arg("--share-screen");
     for (flag, value) in [
@@ -15,6 +15,10 @@ fn capture_command(o: &Options) -> Result<CommandBuilder> {
         if let Some(value) = value {
             command.args([flag, &value.to_string()]);
         }
+    }
+    if let Some(id) = virtual_display {
+        command.args(["--share-display", &id.to_string()]);
+        command.env("YITERM_VIRTUAL_DISPLAY_ID", id.to_string());
     }
     if let Some(quality) = &o.share_quality {
         command.args(["--share-quality", quality]);
@@ -111,21 +115,35 @@ pub(super) async fn session(
     size: PtySize,
     options: &Options,
     mut stop: Stop<'_, impl std::future::Future<Output = ()>>,
+    mut desktop: Option<&mut VirtualDesktop>,
 ) -> Result<()> {
     let pair = native_pty_system().openpty(size)?;
     let fd = pair.master.as_raw_fd().context("Cannot open capture PTY")?;
     configure_pty(fd)?;
     let fd = AsyncFd::new(fd)?;
-    let child = pair.slave.spawn_command(capture_command(options)?)?;
+    let child = pair.slave.spawn_command(capture_command(options, desktop.as_ref().map(|d| d.id()).transpose()?)?)?;
     drop(pair.slave);
     eprintln!("YiTerm viewer connected.");
     let (mut reader, mut writer) = tokio::io::split(stream);
     let result = {
-        let receive = receive(
+        let (sizes, mut requested_sizes) = mpsc::channel::<[u16; 3]>(8);
+        let receive = receive_with_desktop(
             &mut reader,
             async |bytes: &[u8]| Ok(write_pty(&fd, bytes).await?),
             |size| pair.master.resize(size),
+            |requested| {
+                let owner = desktop.as_mut().context("This session has no virtual display")?;
+                owner.resize(requested)?;
+                sizes.try_send(requested).context("Virtual display resize queue full or capture ended")
+            },
         );
+        let update_capture = async {
+            while let Some([w, h, scale]) = requested_sizes.recv().await {
+                let report = format!("\x1b[?9004;{w};{h};{scale}t");
+                write_pty(&fd, report.as_bytes()).await?;
+            }
+            Ok::<_, anyhow::Error>(())
+        };
         let send = async {
             let mut buffer = [0; MAX_INPUT];
             loop {
@@ -147,6 +165,7 @@ pub(super) async fn session(
             _ = stop.as_mut() => Ok(()),
             result = receive => result,
             result = send => result,
+            result = update_capture => result,
         }
     };
     drop(fd);
