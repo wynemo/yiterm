@@ -632,6 +632,8 @@ Start-Process -Wait -NoNewWindow -FilePath .\yiterm.exe -ArgumentList '--share-s
 
 使用 Windows 共享端的中文输入法时，在观看端切到英文输入，在远程 Windows 目标窗口选中中文输入模式，然后输入拼音并选词。普通字母、数字和标点按远程窗口的键盘布局转成按键，由 Windows 输入法组合。观看端已提交的中文和通过 bracketed paste 传输的文本以 Unicode 发送给远端应用。
 
+Mac 观看端控制 Windows 时，**Command 对应远端 Win**，直接按 **⌘⇧S** 即发送 **Win+Shift+S**。屏幕控制期间，通过现有直连或 SSH 输入通道转发 Win／Command 加可打印 ASCII 字符组合，并保留 Shift、Alt、Ctrl。两端均需更新；新增输入使用私有 CSI `ESC[?9005;字符码;修饰位u`（Shift=1、Alt=2、Ctrl=4、Win/Command=8），旧共享端会丢弃该序列。YiTerm 原有本地标签页、分栏及复制粘贴快捷键优先。只读共享仍禁止输入；单窗口共享仍要求目标窗口处于前台，完整截图界面建议共享整个显示器。
+
 macOS 可用以下命令启动监听。三个平台均支持通过 `--share-width`、`--share-fps` 和 `--share-quality` 调整采集宽度、帧率和画质。
 
 ```sh

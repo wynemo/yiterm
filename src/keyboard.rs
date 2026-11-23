@@ -1,4 +1,16 @@
 //! Preserve xterm modifiers for navigation/function keys and Alt+Control chords.
+
+/// YiTerm screen-control extension: preserve Win/Command on printable keys.
+/// A private CSI keeps older sharing peers from interpreting it as typed text.
+pub fn platform_key(key: &str, shift: bool, alt: bool, control: bool) -> Option<Vec<u8>> {
+    let key = if key == "space" { " " } else { key };
+    if key.len() != 1 || !(b' '..=b'~').contains(&key.as_bytes()[0]) {
+        return None;
+    }
+    let modifiers = 8 + u8::from(shift) + 2 * u8::from(alt) + 4 * u8::from(control);
+    Some(format!("\x1b[?9005;{};{modifiers}u", key.as_bytes()[0]).into_bytes())
+}
+
 pub fn modified(sequence: Vec<u8>, shift: bool, alt: bool, control: bool) -> Vec<u8> {
     let modifier = 1 + u8::from(shift) + 2 * u8::from(alt) + 4 * u8::from(control);
     if modifier == 1 {

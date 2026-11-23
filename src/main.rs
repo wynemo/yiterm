@@ -401,6 +401,12 @@ impl TerminalSession {
         matches!(self.transport, TerminalTransport::Direct(_))
     }
 
+    fn screen_input_active(&self) -> bool {
+        self.is_direct_share()
+            || (self.mouse_modes.protocol(*self.term.mode()).pixel
+                && self.term.mode().intersects(TermMode::MOUSE_MODE))
+    }
+
     fn process_id(&self) -> Option<u32> {
         match &self.transport {
             TerminalTransport::Pty { child, .. } => child.process_id(),

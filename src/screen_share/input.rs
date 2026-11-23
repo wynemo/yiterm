@@ -30,7 +30,7 @@ pub enum Event {
     DisplayScale(u32),
     Text(String),
     Paste(String),
-    Key(u32, u32), // Shift=1, Option=2, Control=4, Command=8.
+    Key(u32, u32), // Shift=1, Alt/Option=2, Control=4, Win/Command=8.
     Focus(bool),
     #[cfg(target_os = "macos")]
     Size(usize, usize, usize),
@@ -194,6 +194,14 @@ impl Decoder {
                     continue;
                 }
                 if text == "201" && final_byte == b'~' {
+                    continue;
+                }
+                if final_byte == b'u' && text.starts_with("?9005;") {
+                    if let Some([code, modifiers]) = numbers::<2>(&text[6..]) {
+                        if (32..=126).contains(&code) && (8..=15).contains(&modifiers) {
+                            return Some(Event::Key(code as u32, modifiers as u32));
+                        }
+                    }
                     continue;
                 }
                 if let Some(key) = special(text, final_byte) {

@@ -1225,11 +1225,18 @@ impl TerminalUi {
             cx.notify();
             return;
         }
-        if let Some(bytes) = key_bytes(
-            key,
-            m,
-            self.session().term.mode().contains(TermMode::APP_CURSOR),
-        ) {
+        let platform_bytes = if m.platform && self.session().screen_input_active() {
+            yiterm::keyboard::platform_key(key, m.shift, m.alt, m.control)
+        } else {
+            None
+        };
+        if let Some(bytes) = platform_bytes.or_else(|| {
+            key_bytes(
+                key,
+                m,
+                self.session().term.mode().contains(TermMode::APP_CURSOR),
+            )
+        }) {
             let session = self.session();
             session.term.scroll_display(Scroll::Bottom);
             session.write(&bytes);
