@@ -80,7 +80,7 @@ final class Capture: NSObject, SCStreamOutput, SCStreamDelegate {
                 guard !Task.isCancelled else { return }
                 content = try await SCShareableContent.excludingDesktopWindows(true, onScreenWindowsOnly: true)
             }
-            guard CGDisplayVendorNumber(virtualID) == 0x594954,
+            guard CGDisplayVendorNumber(virtualID) == 0x5949,
                   content.displays.contains(where: { $0.displayID == virtualID }),
                   value("--display").flatMap(UInt32.init) == virtualID else {
                 throw CaptureFailure(message: "The iPad virtual display is unavailable; physical display capture was not started")

@@ -9,20 +9,12 @@ pub(super) async fn session(
     size: PtySize,
     options: &Options,
     mut stop: Stop<'_, impl std::future::Future<Output = ()>>,
-    tenimon_windows: bool,
 ) -> Result<()> {
     let (sizes, size_updates) = watch::channel(size);
     let (input, events) = mpsc::channel(16);
     let (output, mut frames) = mpsc::channel(1);
     let options = options.clone();
     let worker = tokio::task::spawn_blocking(move || {
-        #[cfg(windows)]
-        if tenimon_windows {
-            // Keep the user's physical display/DPI unchanged. Capture and input
-            // still follow Default/Winlogon through the existing SYSTEM worker.
-            return platform::stream_preserving_display(&options, size_updates, events, &output);
-        }
-        let _ = tenimon_windows;
         platform::stream(&options, size_updates, events, &output)
     });
     let (mut reader, mut writer) = tokio::io::split(stream);

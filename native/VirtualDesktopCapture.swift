@@ -20,7 +20,7 @@ final class VirtualDesktopCapture {
             do { try await Task.sleep(nanoseconds: 200_000_000) } catch { return }
             guard !stopping, sessionLockState() == 0,
                   let capture = activeCapture as? Capture, capture.isVirtualDisplay,
-                  let id = capture.displayID, CGDisplayVendorNumber(id) == 0x594954,
+                  let id = capture.displayID, CGDisplayVendorNumber(id) == 0x5949,
                   let configuration = capture.configuration, let stream = capture.stream else { return }
             releasePointer(capture)
             do {

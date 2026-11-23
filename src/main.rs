@@ -1624,6 +1624,15 @@ fn browser_url(value: &str) -> Option<String> {
 }
 
 fn main() -> Result<()> {
+    #[cfg(target_os = "macos")]
+    if std::env::args_os().len() == 2
+        && std::env::args_os().nth(1).as_deref() == Some(std::ffi::OsStr::new("--internal-virtual-display")) {
+        unsafe extern "C" { fn yiterm_virtual_display_run() -> i32; }
+        let code = unsafe { yiterm_virtual_display_run() };
+        anyhow::ensure!(code == 0, "Virtual display owner exited with code {code}");
+        return Ok(());
+    }
+
     if let Some(result) = yiterm::update::run_helper_if_requested() {
         return result;
     }
