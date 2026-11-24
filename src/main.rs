@@ -63,9 +63,11 @@ struct Args {
     /// Listen for YiTerm screen sharing on this IP:PORT (macOS, Windows or Linux X11).
     #[arg(long, requires = "share_screen", conflicts_with_all = ["share_list", "share_stats"])]
     share_listen: Option<std::net::SocketAddr>,
-    /// View a YiTerm host sharing its screen at this IP:PORT.
+    /// View a YiTerm host sharing its screen at HOST:PORT.
     #[arg(long, conflicts_with_all = ["ssh", "mosh", "shell", "share_screen"])]
-    share_connect: Option<std::net::SocketAddr>,
+    share_connect: Option<String>,
+    #[command(flatten)]
+    share_proxy: direct_share::ProxyOptions,
     /// Connect directly to this OpenSSH host (remote shell must be POSIX).
     #[arg(long, conflicts_with = "mosh")]
     ssh: Option<String>,
@@ -222,8 +224,12 @@ impl TerminalSession {
         let mut shell_title = None;
         #[cfg(unix)]
         let mut session_shell = settings::default_shell();
-        let (transport, mut reader) = if let Some(address) = args.share_connect {
-            let (client, reader) = direct_share::Client::start(address, initial_size)?;
+        let (transport, mut reader) = if let Some(address) = &args.share_connect {
+            let (client, reader) = direct_share::Client::start(
+                address.trim().to_owned(),
+                args.share_proxy.clone(),
+                initial_size,
+            )?;
             (
                 TerminalTransport::Direct(client),
                 TerminalReader::Direct(reader),
@@ -328,7 +334,7 @@ impl TerminalSession {
         let (paste_sender, paste_result) = mpsc::channel();
         let default_title = args
             .share_connect
-            .map(|address| address.to_string())
+            .clone()
             .or_else(|| args.ssh.clone())
             .or_else(|| args.mosh.clone())
             .or(shell_title)
@@ -384,6 +390,17 @@ impl TerminalSession {
             TerminalTransport::Pty { master, .. } => master.resize(size),
             TerminalTransport::Direct(client) => {
                 client.resize(size);
+                tracing::info!(
+                    session_id = %self.log_id,
+                    address = %client.address,
+                    pixel_width = size.pixel_width,
+                    pixel_height = size.pixel_height,
+                    cols = size.cols,
+                    rows = size.rows,
+                    scale_factor = self.graphics.pixel_scale(),
+                    scale_percent = (self.graphics.pixel_scale() * 100.).round().clamp(100., 500.) as u32,
+                    "Direct share viewer display requested"
+                );
                 Ok(())
             }
         }
@@ -1038,7 +1055,8 @@ struct TerminalApp {
     settings_open: bool,
     rename_tab: Option<(u64, String)>,
     share_address: Option<String>,
-    share_recent: Vec<std::net::SocketAddr>,
+    share_recent: Vec<String>,
+    share_proxy: direct_share::ProxyOptions,
     #[cfg(target_os = "linux")]
     share_host_dialog: bool,
     #[cfg(target_os = "linux")]
@@ -1128,6 +1146,7 @@ impl TerminalApp {
             rename_workspace: None,
             tabs: vec![TerminalTab::new(session)],
             active: 0,
+            share_proxy: args.share_proxy.clone(),
             args,
             log_directory: logging.directory.clone(),
             warning: logging.warning.clone(),
@@ -1286,19 +1305,24 @@ impl TerminalApp {
         );
     }
 
-    fn forget_share_address(&mut self, address: std::net::SocketAddr) {
+    fn forget_share_address(&mut self, address: &str) {
         match direct_share::forget_address(address) {
-            Ok(()) => self.share_recent.retain(|saved| *saved != address),
+            Ok(()) => self.share_recent.retain(|saved| saved != address),
             Err(error) => self.error = Some(format!("Cannot remove YiTerm connection: {error:#}")),
         }
     }
 
-    fn new_share_session(&self, address: std::net::SocketAddr) -> Result<TerminalSession> {
+    fn new_share_session(
+        &self,
+        address: String,
+        proxy: direct_share::ProxyOptions,
+    ) -> Result<TerminalSession> {
         let mut args = self.args.clone();
         args.ssh = None;
         args.mosh = None;
         args.shell = None;
         args.share_connect = Some(address);
+        args.share_proxy = proxy;
         TerminalSession::new(&args, None, None, &self.shell_settings)
     }
 
@@ -1307,7 +1331,7 @@ impl TerminalApp {
         let TerminalTransport::Direct(client) = &pane.transport else {
             return;
         };
-        match self.new_share_session(client.address) {
+        match self.new_share_session(client.address.clone(), client.proxy.clone()) {
             Ok(mut session) => {
                 session.parser.advance(
                     &mut session.term,
@@ -1321,16 +1345,13 @@ impl TerminalApp {
     }
 
     fn connect_share(&mut self) {
-        let Some(address) = self.share_address.take() else {
+        let Some(address) = self.share_address.clone() else {
             return;
         };
-        let result = address
-            .trim()
-            .parse()
-            .context("Enter an IP address and port, for example 192.168.1.20:9443")
-            .and_then(|address| self.new_share_session(address));
+        let result = self.new_share_session(address.trim().to_owned(), self.share_proxy.clone());
         match result {
             Ok(session) => {
+                self.share_address = None;
                 let workspace = self.tabs.get(self.active).map_or(1, |tab| tab.workspace);
                 let mut tab = TerminalTab::new(session);
                 tab.workspace = workspace;
@@ -1632,8 +1653,12 @@ fn browser_url(value: &str) -> Option<String> {
 fn main() -> Result<()> {
     #[cfg(target_os = "macos")]
     if std::env::args_os().len() == 2
-        && std::env::args_os().nth(1).as_deref() == Some(std::ffi::OsStr::new("--internal-virtual-display")) {
-        unsafe extern "C" { fn yiterm_virtual_display_run() -> i32; }
+        && std::env::args_os().nth(1).as_deref()
+            == Some(std::ffi::OsStr::new("--internal-virtual-display"))
+    {
+        unsafe extern "C" {
+            fn yiterm_virtual_display_run() -> i32;
+        }
         let code = unsafe { yiterm_virtual_display_run() };
         anyhow::ensure!(code == 0, "Virtual display owner exited with code {code}");
         return Ok(());

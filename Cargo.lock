@@ -10927,6 +10927,7 @@ dependencies = [
  "time",
  "tokio",
  "tokio-rustls",
+ "tokio-socks",
  "toml 0.8.23",
  "tracing",
  "tracing-appender",

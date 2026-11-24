@@ -38,6 +38,96 @@ const PING: u8 = 3;
 const RECENT_LIMIT: usize = 5;
 const INPUT_QUEUE_FULL: &str = "YiTerm input queue full; disconnected";
 
+/// Proxy credentials are kept in memory and never included in connection history.
+#[derive(Clone, Default, clap::Args)]
+pub struct ProxyOptions {
+    /// SOCKS5 proxy HOST:PORT or socks5://HOST:PORT for YiTerm screen viewing.
+    #[arg(long = "share-socks5", default_value = "", requires = "share_connect")]
+    pub address: String,
+    /// Optional SOCKS5 username (must be supplied together with the password).
+    #[arg(
+        long = "share-socks5-user",
+        env = "YITERM_SOCKS5_USER",
+        default_value = "",
+        hide_env_values = true
+    )]
+    pub username: String,
+    /// Optional SOCKS5 password; prefer the YITERM_SOCKS5_PASSWORD environment variable.
+    #[arg(
+        long = "share-socks5-password",
+        env = "YITERM_SOCKS5_PASSWORD",
+        default_value = "",
+        hide_env_values = true
+    )]
+    pub password: String,
+}
+
+impl ProxyOptions {
+    fn endpoint(&self) -> &str {
+        self.address
+            .trim()
+            .strip_prefix("socks5://")
+            .unwrap_or(self.address.trim())
+    }
+
+    pub fn validate(&self) -> Result<()> {
+        ensure!(
+            self.username.is_empty() == self.password.is_empty(),
+            "Supply both SOCKS5 username and password, or leave both empty"
+        );
+        if self.address.trim().is_empty() {
+            ensure!(
+                self.username.is_empty(),
+                "SOCKS5 credentials require a proxy address"
+            );
+        } else {
+            parse_endpoint(self.endpoint()).context("Enter a SOCKS5 proxy HOST:PORT")?;
+            ensure!(
+                self.username.len() <= 255 && self.password.len() <= 255,
+                "SOCKS5 username and password must each be at most 255 bytes"
+            );
+        }
+        Ok(())
+    }
+
+    async fn open(&self, target: &str) -> Result<TcpStream> {
+        if self.address.trim().is_empty() {
+            return TcpStream::connect(target)
+                .await
+                .context("Direct connection failed");
+        }
+        use tokio_socks::tcp::Socks5Stream;
+        let stream = if self.username.is_empty() {
+            Socks5Stream::connect(self.endpoint(), target).await
+        } else {
+            Socks5Stream::connect_with_password(
+                self.endpoint(),
+                target,
+                &self.username,
+                &self.password,
+            )
+            .await
+        }
+        .context("SOCKS5 authentication or CONNECT failed")?;
+        Ok(stream.into_inner())
+    }
+}
+
+fn parse_endpoint(address: &str) -> Result<ServerName<'static>> {
+    if let Ok(address) = address.parse::<SocketAddr>() {
+        ensure!(address.port() != 0, "Enter a port between 1 and 65535");
+        return Ok(ServerName::IpAddress(address.ip().into()));
+    }
+    let (host, port) = address.rsplit_once(':').context("Enter HOST:PORT")?;
+    ensure!(
+        !host.contains(':'),
+        "Enclose IPv6 addresses in brackets, for example [::1]:9443"
+    );
+    let port: u16 = port.parse().context("Invalid port")?;
+    ensure!(port != 0, "Enter a port between 1 and 65535");
+    Ok(ServerName::try_from(host.to_owned()).context("Invalid hostname or IP address")?)
+}
+
 fn data_dir() -> Result<PathBuf> {
     #[cfg(windows)]
     let path = std::env::var_os("YITERM_SHARE_IDENTITY_DIR")
@@ -49,11 +139,11 @@ fn data_dir() -> Result<PathBuf> {
     Ok(path)
 }
 
-pub fn recent_addresses() -> Result<Vec<SocketAddr>> {
+pub fn recent_addresses() -> Result<Vec<String>> {
     load_recent(&data_dir()?.join("recent.json"))
 }
 
-fn load_recent(path: &Path) -> Result<Vec<SocketAddr>> {
+fn load_recent(path: &Path) -> Result<Vec<String>> {
     match fs::read(path) {
         Ok(bytes) => {
             serde_json::from_slice(&bytes).context("Cannot decode YiTerm connection history")
@@ -63,15 +153,15 @@ fn load_recent(path: &Path) -> Result<Vec<SocketAddr>> {
     }
 }
 
-fn remember_address(directory: &Path, address: SocketAddr) -> Result<()> {
+fn remember_address(directory: &Path, address: &str) -> Result<()> {
     update_recent(directory, address, true)
 }
 
-pub fn forget_address(address: SocketAddr) -> Result<()> {
+pub fn forget_address(address: &str) -> Result<()> {
     update_recent(&data_dir()?, address, false)
 }
 
-fn update_recent(directory: &Path, address: SocketAddr, remember: bool) -> Result<()> {
+fn update_recent(directory: &Path, address: &str, remember: bool) -> Result<()> {
     // Keep the lock on a separate file so it survives atomic history replacement.
     let lock = fs::OpenOptions::new()
         .write(true)
@@ -81,12 +171,12 @@ fn update_recent(directory: &Path, address: SocketAddr, remember: bool) -> Resul
     lock.lock()?;
     let path = directory.join("recent.json");
     let mut addresses = load_recent(&path)?;
-    if remember && addresses.first() == Some(&address) {
+    if remember && addresses.first().is_some_and(|saved| saved == address) {
         return Ok(());
     }
-    addresses.retain(|saved| *saved != address);
+    addresses.retain(|saved| saved != address);
     if remember {
-        addresses.insert(0, address);
+        addresses.insert(0, address.to_owned());
     }
     addresses.truncate(RECENT_LIMIT);
     let mut file = tempfile::NamedTempFile::new_in(directory)?;
@@ -166,7 +256,8 @@ impl ServerCertVerifier for ServerIdentity {
 }
 
 pub struct Client {
-    pub address: SocketAddr,
+    pub address: String,
+    pub proxy: ProxyOptions,
     input: mpsc::Sender<Zeroizing<Vec<u8>>>,
     size: watch::Sender<PtySize>,
     stop: Option<oneshot::Sender<StopReason>>,
@@ -180,8 +271,11 @@ enum StopReason {
 type Output = mpsc::Receiver<Vec<u8>>;
 
 impl Client {
-    pub fn start(address: SocketAddr, size: PtySize) -> Result<(Self, Output)> {
-        ensure!(address.port() != 0, "Enter a port between 1 and 65535");
+    pub fn start(address: String, proxy: ProxyOptions, size: PtySize) -> Result<(Self, Output)> {
+        parse_endpoint(&address).context("Enter a host and port, for example 192.168.1.20:9443")?;
+        proxy.validate()?;
+        let worker_address = address.clone();
+        let worker_proxy = proxy.clone();
         let (input, rx) = mpsc::channel(64);
         let (size, sizes) = watch::channel(size);
         let (output, reader) = mpsc::channel(16);
@@ -190,6 +284,7 @@ impl Client {
             .enable_all()
             .build()?;
         std::thread::Builder::new().name("yiterm-direct-share".into()).spawn(move || {
+            let address = worker_address;
             runtime.block_on(async {
                 let result = tokio::select! {
                     biased;
@@ -197,7 +292,7 @@ impl Client {
                         Ok(StopReason::InputQueueFull) => Err(anyhow::anyhow!(INPUT_QUEUE_FULL)),
                         _ => return,
                     },
-                    result = connect(address, rx, sizes, &output) => result,
+                    result = connect(&address, &worker_proxy, rx, sizes, &output) => result,
                 };
                 let message = match result {
                     Ok(()) => "YiTerm sharing ended".to_owned(),
@@ -214,6 +309,7 @@ impl Client {
         Ok((
             Self {
                 address,
+                proxy,
                 input,
                 size,
                 stop: Some(stop),
@@ -274,7 +370,8 @@ impl Drop for Client {
 }
 
 async fn connect(
-    address: SocketAddr,
+    address: &str,
+    proxy: &ProxyOptions,
     mut input: mpsc::Receiver<Zeroizing<Vec<u8>>>,
     mut sizes: watch::Receiver<PtySize>,
     output: &mpsc::Sender<Vec<u8>>,
@@ -290,14 +387,17 @@ async fn connect(
         .with_custom_certificate_verifier(Arc::new(verifier))
         .with_no_client_auth();
     config.alpn_protocols = vec![ALPN.to_vec()];
-    let socket = timeout(IO_TIMEOUT, TcpStream::connect(address)).await??;
-    socket.set_nodelay(true)?;
-    let tls = timeout(
-        IO_TIMEOUT,
+    // One deadline covers proxy DNS, TCP, SOCKS negotiation and TLS.
+    let tls = timeout(IO_TIMEOUT, async {
+        let socket = proxy.open(address).await?;
+        socket.set_nodelay(true)?;
         tokio_rustls::TlsConnector::from(Arc::new(config))
-            .connect(ServerName::IpAddress(address.ip().into()), socket),
-    )
-    .await??;
+            .connect(parse_endpoint(address)?, socket)
+            .await
+            .context("TLS handshake failed")
+    })
+    .await
+    .context("YiTerm connection timed out")??;
     let connection = tls.get_ref().1;
     ensure!(
         connection.alpn_protocol() == Some(ALPN),

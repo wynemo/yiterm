@@ -464,6 +464,9 @@ pub(super) struct TerminalUi {
     tab_context: Option<u64>,
     rename_input: gpui::Entity<InputState>,
     share_input: gpui::Entity<InputState>,
+    share_proxy_input: gpui::Entity<InputState>,
+    share_proxy_user: gpui::Entity<InputState>,
+    share_proxy_password: gpui::Entity<InputState>,
     share_host_dialog: bool,
     share_host: Option<direct_share::host::Host>,
     font_select: gpui::Entity<SelectState<SearchableVec<String>>>,
@@ -661,6 +664,61 @@ impl TerminalUi {
                 }
             },
         ));
+        let share_proxy_input = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder("SOCKS5 proxy (optional): 127.0.0.1:1080")
+                .default_value(app.share_proxy.address.clone())
+        });
+        settings_subscriptions.push(cx.subscribe_in(
+            &share_proxy_input,
+            window,
+            |this, input, event, window, cx| {
+                if matches!(event, InputEvent::Change) {
+                    this.app.share_proxy.address = input.read(cx).value().to_string();
+                }
+                if matches!(event, InputEvent::PressEnter { .. }) {
+                    this.submit_share(false, window);
+                }
+                cx.notify();
+            },
+        ));
+        let share_proxy_user = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder("Proxy username (optional)")
+                .default_value(app.share_proxy.username.clone())
+        });
+        settings_subscriptions.push(cx.subscribe_in(
+            &share_proxy_user,
+            window,
+            |this, input, event, window, cx| {
+                if matches!(event, InputEvent::Change) {
+                    this.app.share_proxy.username = input.read(cx).value().to_string();
+                }
+                if matches!(event, InputEvent::PressEnter { .. }) {
+                    this.submit_share(false, window);
+                }
+                cx.notify();
+            },
+        ));
+        let share_proxy_password = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder("Proxy password (optional)")
+                .default_value(app.share_proxy.password.clone())
+                .masked(true)
+        });
+        settings_subscriptions.push(cx.subscribe_in(
+            &share_proxy_password,
+            window,
+            |this, input, event, window, cx| {
+                if matches!(event, InputEvent::Change) {
+                    this.app.share_proxy.password = input.read(cx).value().to_string();
+                }
+                if matches!(event, InputEvent::PressEnter { .. }) {
+                    this.submit_share(false, window);
+                }
+                cx.notify();
+            },
+        ));
         let files_focus = cx.focus_handle();
         let files_split = cx.new(|_| gpui_component::resizable::ResizableState::default());
         Self {
@@ -694,6 +752,9 @@ impl TerminalUi {
             tab_context: None,
             rename_input,
             share_input,
+            share_proxy_input,
+            share_proxy_user,
+            share_proxy_password,
             share_host_dialog: false,
             share_host: None,
             font_select,
@@ -3315,6 +3376,16 @@ impl Render for TerminalUi {
                     "Connect to YiTerm"
                 })
                 .child(Input::new(&self.share_input))
+                .when(!hosting, |panel| {
+                    panel
+                        .child("SOCKS5 proxy (leave empty for direct)")
+                        .child(Input::new(&self.share_proxy_input))
+                        .child(Input::new(&self.share_proxy_user))
+                        .child(Input::new(&self.share_proxy_password))
+                })
+                .when_some(self.app.error.as_ref(), |panel, error| {
+                    panel.child(div().text_color(theme.palette(1)).child(error.clone()))
+                })
                 .when(hosting, |panel| {
                     panel.child("Devices that can reach this port can connect.")
                 })
@@ -3326,7 +3397,7 @@ impl Render for TerminalUi {
                             .child(div().text_size(px(12.)).child("Recent connections"))
                             .children(self.app.share_recent.iter().enumerate().map(
                                 |(index, address)| {
-                                    let saved_address = *address;
+                                    let saved_address = address.clone();
                                     let address = address.to_string();
                                     div()
                                         .flex()
@@ -3360,7 +3431,7 @@ impl Render for TerminalUi {
                                                         .build(window, cx)
                                                 })
                                                 .on_click(cx.listener(move |this, _, _, cx| {
-                                                    this.app.forget_share_address(saved_address);
+                                                    this.app.forget_share_address(&saved_address);
                                                     cx.stop_propagation();
                                                     cx.notify();
                                                 })),

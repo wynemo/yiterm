@@ -1357,6 +1357,25 @@ impl eframe::App for TerminalApp {
                     input.request_focus();
                 }
                 let enter = input.lost_focus() && ui.input(|input| input.key_pressed(Key::Enter));
+                if !hosting {
+                    ui.label("SOCKS5 proxy (leave empty for direct)");
+                    ui.add(
+                        egui::TextEdit::singleline(&mut self.share_proxy.address)
+                            .hint_text("127.0.0.1:1080")
+                            .desired_width(f32::INFINITY),
+                    );
+                    ui.add(
+                        egui::TextEdit::singleline(&mut self.share_proxy.username)
+                            .hint_text("Proxy username (optional)")
+                            .desired_width(f32::INFINITY),
+                    );
+                    ui.add(
+                        egui::TextEdit::singleline(&mut self.share_proxy.password)
+                            .password(true)
+                            .hint_text("Proxy password (optional)")
+                            .desired_width(f32::INFINITY),
+                    );
+                }
                 if !hosting && !self.share_recent.is_empty() {
                     ui.label("Recent connections");
                     for recent in &self.share_recent {
@@ -1371,12 +1390,12 @@ impl eframe::App for TerminalApp {
                                 .on_hover_text("Remove connection")
                                 .clicked()
                             {
-                                forget_share = Some(*recent);
+                                forget_share = Some(recent.clone());
                             }
                         });
                     }
                 }
-                if hosting && let Some(error) = &self.error {
+                if let Some(error) = &self.error {
                     ui.colored_label(self.theme.palette(1), error);
                 }
                 ui.horizontal(|ui| {
@@ -1422,7 +1441,7 @@ impl eframe::App for TerminalApp {
             }
         }
         if let Some(address) = forget_share {
-            self.forget_share_address(address);
+            self.forget_share_address(&address);
         }
         if let Some((id, draft)) = &mut self.rename_tab {
             let modal = egui::Modal::new(egui::Id::new(("rename-tab", *id))).show(ctx, |ui| {

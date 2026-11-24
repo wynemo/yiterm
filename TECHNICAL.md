@@ -596,6 +596,27 @@ fallbacks = [] # 按顺序填写已安装的字体名称
 
 共享端支持 Windows 10 / 11、macOS 13+ 和 Linux X11。在共享端的 YiTerm 中打开 **Tools → Start YiTerm Sharing…**，填写监听地址和端口，再选择 **Allow Control** 或 **View Only**。例如 `0.0.0.0:9443` 监听所有 IPv4 网卡。观看端打开 **Tools → Connect to YiTerm…**，填写共享端实际可达的地址（例如 `192.168.1.20:9443`），画面会在新标签页打开。IPv6 地址用方括号包住，例如 `[fd00::20]:9443`。每次允许一个观看者，关闭观看分栏或按 **Ctrl+]** 结束连接。通过 **Tools → Stop YiTerm Sharing** 或在监听终端按 **Ctrl+C** 停止共享。
 
+### 通过 SOCKS5 连接
+
+观看端在 **Tools → Connect to YiTerm…** 的 SOCKS5 proxy 中填写 `127.0.0.1:1080` 或 `socks5://127.0.0.1:1080`；留空为直连。需要认证时同时填写 Proxy username 和 Proxy password；不需要认证则两项都留空。代理配置只用于观看端连接 YiTerm 共享服务，不影响 SSH、Mosh 或共享端监听。
+
+目标和代理均支持 IPv4、IPv6（加方括号）及域名，例如 `desktop.example.com:9443`、`[fd00::20]:9443`。通过代理连接时，目标域名由代理解析，代理自身的域名在本机解析。代理认证或 CONNECT 失败会显示错误，不回退直连；TCP 连接、代理协商和 TLS 握手共用 10 秒连接期限。画面、键鼠输入及心跳沿同一 TLS 通道传输。
+
+命令行示例：
+
+```sh
+yiterm --share-connect desktop.example.com:9443 --share-socks5 127.0.0.1:1080
+
+# 需要代理认证时（macOS / Linux）
+export YITERM_SOCKS5_USER='username'
+export YITERM_SOCKS5_PASSWORD='password'
+yiterm --share-connect desktop.example.com:9443 --share-socks5 127.0.0.1:1080
+```
+
+Windows PowerShell 使用 `$env:YITERM_SOCKS5_USER = "username"` 和 `$env:YITERM_SOCKS5_PASSWORD = "password"` 设置认证信息，再运行同样的命令。也支持 `--share-socks5-user` 和 `--share-socks5-password`，推荐使用环境变量以避免密码出现在进程参数中。SOCKS5 的用户名/密码认证本身不加密，TLS 从 CONNECT 成功后开始。
+
+代理配置和认证信息只保留在当前进程内存中，不写入配置文件、最近连接记录或日志。**Pane → Reconnect** 沿用该连接建立时的代理及认证信息；最近连接列表只保存目标地址，选择记录时使用对话框当前填写的代理设置。
+
 ### Linux 共享给 Windows
 
 在 Linux 上登录 X11 桌面，然后在 YiTerm 中选择 **Tools → Start YiTerm Sharing…**。用默认端口时，Windows 在 **Tools → Connect to YiTerm…** 填写 Linux 的实际局域网 IP 和端口，例如 `192.168.1.20:9443`。Linux 的防火墙需允许 Windows 访问所选 TCP 端口。也可以在 Linux 桌面终端运行以下命令：
@@ -620,6 +641,8 @@ fallbacks = [] # 按顺序填写已安装的字体名称
 Windows 需要当前用户的已登录桌面。默认共享主显示器。Windows 防火墙需要允许观看端访问所选 TCP 端口。锁屏或切换到安全桌面会结束本次连接，桌面恢复后可重新连接。键鼠控制受 Windows 的输入权限限制，普通权限的 YiTerm 无法向以管理员权限运行的应用注入输入。
 
 Windows 单显示器的主屏控制连接默认根据观看分栏的像素尺寸自动调整桌面分辨率，无需额外参数；窗口大小稳定 500 毫秒后生效，范围 640×480 至 3840×3840。优先向驱动请求精确尺寸，不支持时选取最接近的可用显示模式。仅在已解锁桌面调整；多屏、单窗口、只读连接或驱动拒绝切换时继续等比例缩放。观看端默认采用类似 RDP 的 Default for display / Fit session to window 行为：使用分栏的物理像素尺寸，并同步窗口所在本地显示器的 DPI 比例（如 Retina 200%）；窗口跨显示器后自动更新。Windows 选择最接近且驱动支持的 DPI 档位，系统不支持 DPI 协商时记录日志并保留原缩放。断开时在恢复分辨率后尝试恢复原 DPI，保留期间用户手动修改的缩放。一个共享进程同时仅允许一个连接调整分辨率和 DPI。断开时尝试恢复连接前的显示模式；若期间用户手动修改了分辨率，则保留该修改。不会将临时显示模式写入注册表。DPI 元数据通过既有输入通道的私有 CSI `ESC[?9003;<percent>t` 传递，旧版本会忽略该序列，直连 ALPN 和尺寸帧保持兼容；macOS/Linux 共享端忽略该元数据。Windows DPI 使用运行时检查的 DisplayConfig 私有查询／设置包（-3/-4），不是所有系统或驱动都支持。
+
+观看端连接、调整分栏大小或屏幕缩放变化时，以 INFO 级别记录 `Direct share viewer display requested`。在 Mac 的 **Tools → Open Log File** 中搜索该消息，可按 `session_id` 和 `address` 区分会话；`pixel_width`／`pixel_height` 为请求的分辨率，`scale_factor` 为本地界面缩放系数，`scale_percent` 为向远端请求的 DPI 缩放百分比（如 `200` 表示 200%）。这些值表示观看端请求，不代表远端驱动已经应用；日志不记录键鼠输入或画面内容。
 
 Windows 可在 PowerShell 中列出采集源、启动服务，监听时可用 `--share-read-only` 禁用键鼠控制：
 
