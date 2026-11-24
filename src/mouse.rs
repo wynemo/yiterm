@@ -14,6 +14,7 @@ pub fn mode_name(mode: u16) -> &'static str {
         1015 => "urxvt_encoding",
         1016 => "sgr_pixel_encoding",
         9001 => "win32_input",
+        9006 => "framebuffer_cursor",
         _ => "other",
     }
 }
@@ -29,6 +30,7 @@ struct Requests {
     changes: Vec<(u16, bool)>,
     urxvt: bool,
     pixel: bool,
+    framebuffer_cursor: bool,
 }
 
 impl Requests {
@@ -40,7 +42,10 @@ impl Requests {
         if mode == 1016 {
             self.pixel = enabled;
         }
-        if matches!(mode, 1000..=1007 | 1015 | 1016 | 9001) {
+        if mode == 9006 {
+            self.framebuffer_cursor = enabled;
+        }
+        if matches!(mode, 1000..=1007 | 1015 | 1016 | 9001 | 9006) {
             self.changes.push((mode, enabled));
         }
     }
@@ -58,6 +63,7 @@ impl Handler for Requests {
     fn reset_state(&mut self) {
         self.urxvt = false;
         self.pixel = false;
+        self.framebuffer_cursor = false;
     }
 }
 
@@ -79,6 +85,11 @@ impl From<TermMode> for Protocol {
 }
 
 impl MouseModes {
+    /// YiTerm capture hosts set DEC mode 9006 when frames include the system pointer.
+    pub fn framebuffer_cursor(&self) -> bool {
+        self.requests.framebuffer_cursor
+    }
+
     pub fn observe(&mut self, bytes: &[u8]) -> Vec<(u16, bool)> {
         self.parser.advance(&mut self.requests, bytes);
         std::mem::take(&mut self.requests.changes)

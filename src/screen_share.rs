@@ -133,7 +133,8 @@ mod macos {
                 })
                 .collect();
             let terminal = Self { saved, signals };
-            std::io::stdout().write_all(b"\x1b[?1049h\x1b[?25l\x1b[?1004h\x1b[2J\x1b[H")?;
+            // ScreenCaptureKit includes the host system pointer in each frame.
+            std::io::stdout().write_all(b"\x1b[?1049h\x1b[?25l\x1b[?9006h\x1b[?1004h\x1b[2J\x1b[H")?;
             Ok(terminal)
         }
     }
@@ -141,7 +142,7 @@ mod macos {
         fn drop(&mut self) {
             let mut out = std::io::stdout();
             let _ = out.write_all(
-                b"\x1b[?2026l\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l\x1b[?1016l\x1b[?1004l\x1b[?2004l\x1b[?25h\x1b[?1049l",
+                b"\x1b[?2026l\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l\x1b[?1016l\x1b[?1004l\x1b[?2004l\x1b[?9006l\x1b[?25h\x1b[?1049l",
             );
             let _ = out.flush();
             unsafe {

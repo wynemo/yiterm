@@ -302,7 +302,7 @@ impl Client {
                     }
                 };
                 let message: String = message.chars().filter(|c| !c.is_control()).collect();
-                let bytes = format!("\x18\x18\x1b_Ga=d,d=A,q=2;\x1b\\\x1b[?2026l\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l\x1b[?1016l\x1b[?1004l\x1b[?2004l\x1b[?25h\x1b[?1049l\r\n{message}\r\nUse Pane > Reconnect to try again.\r\n").into_bytes();
+                let bytes = format!("\x18\x18\x1b_Ga=d,d=A,q=2;\x1b\\\x1b[?2026l\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l\x1b[?1016l\x1b[?1004l\x1b[?2004l\x1b[?9006l\x1b[?25h\x1b[?1049l\r\n{message}\r\nUse Pane > Reconnect to try again.\r\n").into_bytes();
                 let _ = output.send(bytes).await;
             });
         })?;

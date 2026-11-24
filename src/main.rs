@@ -424,6 +424,12 @@ impl TerminalSession {
                 && self.term.mode().intersects(TermMode::MOUSE_MODE))
     }
 
+    fn hide_local_pointer(&self) -> bool {
+        self.mouse_modes.framebuffer_cursor()
+            && self.term.mode().contains(TermMode::ALT_SCREEN)
+            && self.term.grid().display_offset() == 0
+    }
+
     fn process_id(&self) -> Option<u32> {
         match &self.transport {
             TerminalTransport::Pty { child, .. } => child.process_id(),
@@ -752,7 +758,7 @@ impl TerminalSession {
                 while self.output.try_recv().is_ok() {}
                 self.graphics.end_stream();
                 self.parser.stop_sync(&mut self.term);
-                let reset=b"\x18\x1b[?2026l\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1004l\x1b[?1006l\x1b[?1016l\x1b[?2004l\x1b[?25h\x1b[?1049l";
+                let reset=b"\x18\x1b[?2026l\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1004l\x1b[?1006l\x1b[?1016l\x1b[?2004l\x1b[?9006l\x1b[?25h\x1b[?1049l";
                 self.mouse_modes.observe(reset);
                 self.parser.advance(&mut self.term, reset);
                 if let Some(enabled) = self.direct_ssh_graphics.take() {

@@ -2700,7 +2700,9 @@ impl Render for TerminalUi {
                                 .iter()
                                 .map(|geo| {
                                     let pane = &this.app.tabs[this.app.active].panes[geo.index];
-                                    let cursor = if this
+                                    let cursor = if !blocked && pane.hide_local_pointer() {
+                                        gpui::CursorStyle::None
+                                    } else if this
                                         .hover
                                         .as_ref()
                                         .is_some_and(|(index, _)| *index == geo.index)

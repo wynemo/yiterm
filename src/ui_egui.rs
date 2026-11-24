@@ -296,7 +296,9 @@ impl TerminalSession {
                     })
                     .flatten()
             });
-        if let Some(link) = &hovered_link {
+        if response.hovered() && !popup_blocks_input && self.hide_local_pointer() {
+            ctx.set_cursor_icon(egui::CursorIcon::None);
+        } else if let Some(link) = &hovered_link {
             ctx.set_cursor_icon(egui::CursorIcon::PointingHand);
             let hint = if cfg!(target_os = "macos") {
                 "Cmd"
