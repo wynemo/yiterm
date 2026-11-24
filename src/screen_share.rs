@@ -133,8 +133,13 @@ mod macos {
                 })
                 .collect();
             let terminal = Self { saved, signals };
-            // ScreenCaptureKit includes the host system pointer in each frame.
-            std::io::stdout().write_all(b"\x1b[?1049h\x1b[?25l\x1b[?9006h\x1b[?1004h\x1b[2J\x1b[H")?;
+            let mut out = std::io::stdout();
+            out.write_all(b"\x1b[?1049h\x1b[?25l")?;
+            // Match ScreenCaptureKit's showsCursor setting: control uses the
+            // viewer's immediate local pointer; read-only frames include the
+            // host pointer and ask the viewer to hide its local one.
+            out.write_all(if read_only { b"\x1b[?9006h" } else { b"\x1b[?9006l" })?;
+            out.write_all(b"\x1b[?1004h\x1b[2J\x1b[H")?;
             Ok(terminal)
         }
     }

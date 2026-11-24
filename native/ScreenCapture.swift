@@ -138,7 +138,10 @@ final class Capture: NSObject, SCStreamOutput, SCStreamDelegate {
         config.pixelFormat = kCVPixelFormatType_32BGRA
         config.colorSpaceName = CGColorSpace.sRGB
         config.minimumFrameInterval = CMTime(value: 1, timescale: Int32(value("--fps") ?? "15") ?? 15)
-        config.queueDepth = 3; config.showsCursor = true; config.capturesAudio = false
+        // Interactive viewers draw their local pointer immediately. Baking the
+        // host pointer into frames adds a full input/capture/network round trip
+        // to every move and dirties tiles even when desktop content is static.
+        config.queueDepth = 3; config.showsCursor = !control; config.capturesAudio = false
         if #available(macOS 14.0, *) { config.scalesToFit = true; config.preservesAspectRatio = true; config.ignoreShadowsSingleWindow = true }
         let capture = Capture()
         capture.displayID = selectedDisplay; capture.windowID = selectedWindow; capture.windowPID = selectedPID; capture.controlEnabled = control
