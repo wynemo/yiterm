@@ -23,8 +23,8 @@ use cocoa::{
     },
     base::{BOOL, NO, YES, id, nil, selector},
     foundation::{
-        NSArray, NSAutoreleasePool, NSBundle, NSData, NSInteger, NSProcessInfo, NSRange, NSString,
-        NSUInteger, NSURL,
+        NSArray, NSAutoreleasePool, NSBundle, NSData, NSInteger, NSPoint, NSProcessInfo, NSRange,
+        NSSize, NSString, NSUInteger, NSURL,
     },
 };
 use core_foundation::{
@@ -42,6 +42,7 @@ use objc::{
     class,
     declare::ClassDecl,
     msg_send,
+    rc::StrongPtr,
     runtime::{Class, Object, Sel},
     sel, sel_impl,
 };
@@ -177,6 +178,7 @@ pub(crate) struct MacPlatformState {
     dock_menu: Option<id>,
     menus: Option<Vec<OwnedMenu>>,
     keyboard_mapper: Rc<MacKeyboardMapper>,
+    invisible_cursor: Option<StrongPtr>,
 }
 
 impl Default for MacPlatform {
@@ -219,6 +221,7 @@ impl MacPlatform {
             on_keyboard_layout_change: None,
             menus: None,
             keyboard_mapper,
+            invisible_cursor: None,
         }))
     }
 
@@ -965,11 +968,6 @@ impl Platform for MacPlatform {
     /// in macOS's [NSCursor](https://developer.apple.com/documentation/appkit/nscursor).
     fn set_cursor_style(&self, style: CursorStyle) {
         unsafe {
-            if style == CursorStyle::None {
-                let _: () = msg_send![class!(NSCursor), setHiddenUntilMouseMoves:YES];
-                return;
-            }
-
             let new_cursor: id = match style {
                 CursorStyle::Arrow => msg_send![class!(NSCursor), arrowCursor],
                 CursorStyle::IBeam => msg_send![class!(NSCursor), IBeamCursor],
@@ -1004,7 +1002,27 @@ impl Platform for MacPlatform {
                 CursorStyle::DragLink => msg_send![class!(NSCursor), dragLinkCursor],
                 CursorStyle::DragCopy => msg_send![class!(NSCursor), dragCopyCursor],
                 CursorStyle::ContextualMenu => msg_send![class!(NSCursor), contextualMenuCursor],
-                CursorStyle::None => unreachable!(),
+                CursorStyle::None => {
+                    // setHiddenUntilMouseMoves restores the local pointer on
+                    // every move, exposing two pointers over a remote desktop.
+                    // Use a transparent cursor so normal hitbox cursor changes
+                    // also restore visibility when leaving the shared pane.
+                    let mut state = self.0.lock();
+                    let cursor = state.invisible_cursor.get_or_insert_with(|| {
+                        let image: id = msg_send![class!(NSImage), alloc];
+                        let image = StrongPtr::new(msg_send![image,
+                            initWithSize: NSSize::new(1., 1.)
+                        ]);
+                        let _: () = msg_send![*image, lockFocus];
+                        let _: () = msg_send![*image, unlockFocus];
+                        let cursor: id = msg_send![class!(NSCursor), alloc];
+                        StrongPtr::new(msg_send![cursor,
+                            initWithImage: *image
+                            hotSpot: NSPoint::new(0., 0.)
+                        ])
+                    });
+                    **cursor
+                }
             };
 
             let old_cursor: id = msg_send![class!(NSCursor), currentCursor];
