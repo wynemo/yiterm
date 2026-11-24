@@ -158,7 +158,6 @@ pub(super) async fn session(
                 })
                 .await??;
             }
-            let _ = timeout(IO_TIMEOUT, writer.shutdown()).await;
             Ok(())
         };
         tokio::select! {
@@ -168,6 +167,9 @@ pub(super) async fn session(
             result = update_capture => result,
         }
     };
+    // All exit paths must close TLS, including PTY input/resize failures.
+    // Otherwise the viewer sees rustls UnexpectedEof instead of a clean end.
+    let _ = timeout(IO_TIMEOUT, writer.shutdown()).await;
     drop(fd);
     drop(pair.master);
     reap(child).await;

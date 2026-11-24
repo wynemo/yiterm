@@ -4,6 +4,7 @@ use anyhow::{Result, bail, ensure};
 use std::{
     io::{IsTerminal, Read, Write},
     sync::atomic::Ordering,
+    time::{Duration, Instant},
 };
 use zeroize::{Zeroize, Zeroizing};
 unsafe extern "C" {
@@ -90,14 +91,27 @@ pub fn submit_once(read_only: bool) -> Result<()> {
     std::io::stderr().write_all(b"Mac locked. Login password (hidden; Ctrl+] cancels): ")?;
     std::io::stderr().flush()?;
     let mut password = Zeroizing::new(Vec::new());
+    // Display metadata, focus reports and terminal replies can arrive after
+    // tcflush, including across multiple reads. Never treat their ESC prefix
+    // as cancellation or their remaining bytes as part of the password.
+    // Track only framing here: the general input decoder copies text into
+    // ordinary strings that are unsuitable for password input.
+    let mut escape: Option<(Instant, usize)> = None;
     loop {
         ensure!(cancelled() == 0, "Unlock cancelled");
+        if let Some((started, length)) = escape {
+            let deadline = if length == 0 { 80 } else { 250 };
+            ensure!(
+                started.elapsed() < Duration::from_millis(deadline),
+                "Unlock cancelled"
+            );
+        }
         let mut poll = libc::pollfd {
             fd: 0,
             events: libc::POLLIN,
             revents: 0,
         };
-        if unsafe { libc::poll(&mut poll, 1, 100) } < 0 {
+        if unsafe { libc::poll(&mut poll, 1, if escape.is_some() { 20 } else { 100 }) } < 0 {
             continue;
         }
         ensure!(
@@ -111,8 +125,26 @@ pub fn submit_once(read_only: bool) -> Result<()> {
         if std::io::stdin().read(&mut byte)? == 0 {
             continue;
         }
+        if matches!(byte[0], 3 | 29) {
+            bail!("Unlock cancelled");
+        }
+        if let Some((started, length)) = escape {
+            if length == 0 {
+                ensure!(matches!(byte[0], b'[' | b'O'), "Unlock cancelled");
+                escape = Some((started, 1));
+            } else if (0x40..=0x7e).contains(&byte[0]) {
+                escape = None;
+            } else {
+                ensure!(
+                    length < 128 && (0x20..=0x3f).contains(&byte[0]),
+                    "Invalid terminal response during unlock"
+                );
+                escape = Some((started, length + 1));
+            }
+            continue;
+        }
         match byte[0] {
-            3 | 29 | 27 => bail!("Unlock cancelled"),
+            27 => escape = Some((Instant::now(), 0)),
             b'\r' | b'\n' => break,
             8 | 127 => {
                 if let Some(start) = password.iter().rposition(|b| b & 0xc0 != 0x80) {
