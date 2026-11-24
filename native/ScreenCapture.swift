@@ -138,7 +138,7 @@ final class Capture: NSObject, SCStreamOutput, SCStreamDelegate {
         config.pixelFormat = kCVPixelFormatType_32BGRA
         config.colorSpaceName = CGColorSpace.sRGB
         config.minimumFrameInterval = CMTime(value: 1, timescale: Int32(value("--fps") ?? "15") ?? 15)
-        config.queueDepth = 3; config.showsCursor = !control; config.capturesAudio = false
+        config.queueDepth = 3; config.showsCursor = true; config.capturesAudio = false
         if #available(macOS 14.0, *) { config.scalesToFit = true; config.preservesAspectRatio = true; config.ignoreShadowsSingleWindow = true }
         let capture = Capture()
         capture.displayID = selectedDisplay; capture.windowID = selectedWindow; capture.windowPID = selectedPID; capture.controlEnabled = control
@@ -375,6 +375,14 @@ private func applyPointer(_ x:Double,_ y:Double,_ button:Int32,_ phase:Int32,_ m
             type=phase==1 ? (actual==0 ? .leftMouseDown : (actual==2 ? .rightMouseDown : .otherMouseDown)) : (actual==0 ? .leftMouseUp : (actual==2 ? .rightMouseUp : .otherMouseUp))
         }
         let mouse:CGMouseButton=actual==0 ? .left : (actual==2 ? .right : .center)
+        // Touch clients do not send hover events. Update WindowServer/AppKit's
+        // pointer target before a click, just as a physical mouse move does.
+        if phase == 1, capture.heldButtons.count == 1,
+           let move = CGEvent(mouseEventSource: nil, mouseType: .mouseMoved,
+                              mouseCursorPosition: point, mouseButton: mouse) {
+            move.flags = flags
+            move.post(tap: .cghidEventTap)
+        }
         if let event=CGEvent(mouseEventSource:nil,mouseType:type,mouseCursorPosition:point,mouseButton:mouse) {
             event.flags=flags
             if phase != 0 { event.setIntegerValueField(.mouseEventClickState,value:capture.lastClick?.3 ?? 1) }
