@@ -35,11 +35,11 @@ const HEARTBEAT: Duration = Duration::from_secs(5);
 const INPUT: u8 = 1;
 const RESIZE: u8 = 2;
 const PING: u8 = 3;
-const RECENT_LIMIT: usize = 5;
 const INPUT_QUEUE_FULL: &str = "YiTerm input queue full; disconnected";
 
-/// Proxy credentials are kept in memory and never included in connection history.
-#[derive(Clone, Default, clap::Args)]
+/// Proxy passwords are kept in memory and never included in saved connections.
+#[derive(Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize, clap::Args)]
+#[serde(default)]
 pub struct ProxyOptions {
     /// SOCKS5 proxy HOST:PORT or socks5://HOST:PORT for YiTerm screen viewing.
     #[arg(long = "share-socks5", default_value = "", requires = "share_connect")]
@@ -59,6 +59,7 @@ pub struct ProxyOptions {
         default_value = "",
         hide_env_values = true
     )]
+    #[serde(skip)]
     pub password: String,
 }
 
@@ -71,8 +72,13 @@ impl ProxyOptions {
     }
 
     pub fn validate(&self) -> Result<()> {
+        self.validate_settings(true)
+    }
+
+    fn validate_settings(&self, connecting: bool) -> Result<()> {
         ensure!(
-            self.username.is_empty() == self.password.is_empty(),
+            (!connecting && self.password.is_empty())
+                || self.username.is_empty() == self.password.is_empty(),
             "Supply both SOCKS5 username and password, or leave both empty"
         );
         if self.address.trim().is_empty() {
@@ -139,29 +145,98 @@ fn data_dir() -> Result<PathBuf> {
     Ok(path)
 }
 
-pub fn recent_addresses() -> Result<Vec<String>> {
-    load_recent(&data_dir()?.join("recent.json"))
+/// A saved destination has its own proxy settings; passwords are session-only.
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+pub struct ConnectionProfile {
+    pub id: String,
+    pub name: String,
+    pub address: String,
+    #[serde(default)]
+    pub proxy: ProxyOptions,
 }
 
-fn load_recent(path: &Path) -> Result<Vec<String>> {
+pub fn connection_profiles() -> Result<Vec<ConnectionProfile>> {
+    load_profiles(&data_dir()?.join("recent.json"))
+}
+
+fn load_profiles(path: &Path) -> Result<Vec<ConnectionProfile>> {
+    #[derive(serde::Deserialize)]
+    #[serde(untagged)]
+    enum SavedConnection {
+        Profile(ConnectionProfile),
+        Address(String),
+    }
     match fs::read(path) {
         Ok(bytes) => {
-            serde_json::from_slice(&bytes).context("Cannot decode YiTerm connection history")
+            let entries: Vec<SavedConnection> =
+                serde_json::from_slice(&bytes).context("Cannot decode YiTerm saved connections")?;
+            Ok(entries
+                .into_iter()
+                .map(|entry| match entry {
+                    SavedConnection::Profile(profile) => profile,
+                    SavedConnection::Address(address) => ConnectionProfile {
+                        id: format!("legacy:{address}"),
+                        name: address.clone(),
+                        address,
+                        proxy: ProxyOptions::default(),
+                    },
+                })
+                .collect())
         }
         Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(Vec::new()),
-        Err(error) => Err(error).context("Cannot read YiTerm connection history"),
+        Err(error) => Err(error).context("Cannot read YiTerm saved connections"),
     }
 }
 
-fn remember_address(directory: &Path, address: &str) -> Result<()> {
-    update_recent(directory, address, true)
+pub fn save_connection(profile: &ConnectionProfile) -> Result<()> {
+    parse_endpoint(&profile.address)?;
+    profile.proxy.validate_settings(false)?;
+    update_profiles(&data_dir()?, |profiles| {
+        if let Some(saved) = profiles.iter_mut().find(|saved| saved.id == profile.id) {
+            *saved = profile.clone();
+        } else {
+            profiles.insert(0, profile.clone());
+        }
+    })
 }
 
-pub fn forget_address(address: &str) -> Result<()> {
-    update_recent(&data_dir()?, address, false)
+pub fn forget_connection(id: &str) -> Result<()> {
+    update_profiles(&data_dir()?, |profiles| {
+        profiles.retain(|saved| saved.id != id)
+    })
 }
 
-fn update_recent(directory: &Path, address: &str, remember: bool) -> Result<()> {
+fn remember_address(directory: &Path, address: &str, proxy: &ProxyOptions) -> Result<()> {
+    update_profiles(directory, |profiles| {
+        // Explicitly saved profiles keep their names and independent proxy settings.
+        if let Some(index) = profiles.iter().position(|saved| {
+            saved.address == address
+                && saved.proxy.address == proxy.address.trim()
+                && saved.proxy.username == proxy.username
+        }) {
+            let profile = profiles.remove(index);
+            profiles.insert(0, profile);
+        } else {
+            profiles.insert(
+                0,
+                ConnectionProfile {
+                    id: uuid::Uuid::new_v4().to_string(),
+                    name: address.to_owned(),
+                    address: address.to_owned(),
+                    proxy: ProxyOptions {
+                        address: proxy.address.trim().to_owned(),
+                        ..proxy.clone()
+                    },
+                },
+            );
+        }
+    })
+}
+
+fn update_profiles(
+    directory: &Path,
+    update: impl FnOnce(&mut Vec<ConnectionProfile>),
+) -> Result<()> {
     // Keep the lock on a separate file so it survives atomic history replacement.
     let lock = fs::OpenOptions::new()
         .write(true)
@@ -170,17 +245,10 @@ fn update_recent(directory: &Path, address: &str, remember: bool) -> Result<()> 
         .open(directory.join("recent.lock"))?;
     lock.lock()?;
     let path = directory.join("recent.json");
-    let mut addresses = load_recent(&path)?;
-    if remember && addresses.first().is_some_and(|saved| saved == address) {
-        return Ok(());
-    }
-    addresses.retain(|saved| saved != address);
-    if remember {
-        addresses.insert(0, address.to_owned());
-    }
-    addresses.truncate(RECENT_LIMIT);
+    let mut profiles = load_profiles(&path)?;
+    update(&mut profiles);
     let mut file = tempfile::NamedTempFile::new_in(directory)?;
-    serde_json::to_writer(&mut file, &addresses)?;
+    serde_json::to_writer_pretty(&mut file, &profiles)?;
     file.as_file().sync_all()?;
     file.persist(path).map_err(|error| error.error)?;
     Ok(())
@@ -403,7 +471,7 @@ async fn connect(
         connection.alpn_protocol() == Some(ALPN),
         "Incompatible YiTerm sharing protocol"
     );
-    if let Err(error) = remember_address(&directory, address) {
+    if let Err(error) = remember_address(&directory, address, proxy) {
         tracing::warn!(%error, "Cannot save YiTerm connection history");
     }
 

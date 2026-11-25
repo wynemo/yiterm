@@ -1061,7 +1061,9 @@ struct TerminalApp {
     settings_open: bool,
     rename_tab: Option<(u64, String)>,
     share_address: Option<String>,
-    share_recent: Vec<String>,
+    share_recent: Vec<direct_share::ConnectionProfile>,
+    share_selected: Option<String>,
+    share_name: String,
     share_proxy: direct_share::ProxyOptions,
     #[cfg(target_os = "linux")]
     share_host_dialog: bool,
@@ -1164,6 +1166,8 @@ impl TerminalApp {
             rename_tab: None,
             share_address: None,
             share_recent: Vec::new(),
+            share_selected: None,
+            share_name: String::new(),
             #[cfg(target_os = "linux")]
             share_host_dialog: false,
             #[cfg(target_os = "linux")]
@@ -1299,21 +1303,105 @@ impl TerminalApp {
     }
 
     fn begin_connect_share(&mut self) {
-        self.share_recent = direct_share::recent_addresses().unwrap_or_else(|error| {
-            tracing::warn!(%error, "Cannot load YiTerm connection history");
-            Vec::new()
-        });
-        self.share_address = Some(
-            self.share_recent
-                .first()
-                .map(ToString::to_string)
-                .unwrap_or_default(),
-        );
+        let mut load_error = None;
+        match direct_share::connection_profiles() {
+            Ok(mut profiles) => {
+                for profile in &mut profiles {
+                    if let Some(previous) = self.share_recent.iter().find(|p| p.id == profile.id) {
+                        profile.proxy.password = previous.proxy.password.clone();
+                    }
+                }
+                self.share_recent = profiles;
+                self.error = None;
+            }
+            Err(error) => load_error = Some(format!("Cannot load connections: {error:#}")),
+        }
+        let selected = self
+            .share_selected
+            .as_ref()
+            .and_then(|id| self.share_recent.iter().position(|p| &p.id == id))
+            .or_else(|| (!self.share_recent.is_empty()).then_some(0));
+        if let Some(index) = selected {
+            self.select_share_connection(index);
+        } else {
+            self.new_share_connection();
+            self.share_proxy = self.args.share_proxy.clone();
+        }
+        self.error = load_error;
     }
 
-    fn forget_share_address(&mut self, address: &str) {
-        match direct_share::forget_address(address) {
-            Ok(()) => self.share_recent.retain(|saved| saved != address),
+    fn new_share_connection(&mut self) {
+        self.share_selected = None;
+        self.share_name.clear();
+        self.share_address = Some(String::new());
+        self.share_proxy = direct_share::ProxyOptions::default();
+        self.error = None;
+    }
+
+    fn select_share_connection(&mut self, index: usize) {
+        let profile = &self.share_recent[index];
+        self.share_selected = Some(profile.id.clone());
+        self.share_name = profile.name.clone();
+        self.share_address = Some(profile.address.clone());
+        self.share_proxy = profile.proxy.clone();
+        self.error = None;
+    }
+
+    fn save_share_connection(&mut self) -> bool {
+        let address = self
+            .share_address
+            .as_deref()
+            .unwrap_or_default()
+            .trim()
+            .to_owned();
+        let profile = direct_share::ConnectionProfile {
+            id: self
+                .share_selected
+                .clone()
+                .unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
+            name: if self.share_name.trim().is_empty() {
+                address.clone()
+            } else {
+                self.share_name.trim().to_owned()
+            },
+            address,
+            proxy: direct_share::ProxyOptions {
+                address: self.share_proxy.address.trim().to_owned(),
+                ..self.share_proxy.clone()
+            },
+        };
+        match direct_share::save_connection(&profile) {
+            Ok(()) => {
+                self.share_selected = Some(profile.id.clone());
+                self.share_name = profile.name.clone();
+                if let Some(saved) = self.share_recent.iter_mut().find(|p| p.id == profile.id) {
+                    *saved = profile;
+                } else {
+                    self.share_recent.insert(0, profile);
+                }
+                self.error = None;
+                true
+            }
+            Err(error) => {
+                self.error = Some(format!("Cannot save connection: {error:#}"));
+                false
+            }
+        }
+    }
+
+    fn forget_share_connection(&mut self) {
+        let Some(id) = self.share_selected.clone() else {
+            return;
+        };
+        match direct_share::forget_connection(&id) {
+            Ok(()) => {
+                self.share_recent.retain(|saved| saved.id != id);
+                if self.share_recent.is_empty() {
+                    self.new_share_connection();
+                } else {
+                    self.select_share_connection(0);
+                }
+            }
             Err(error) => self.error = Some(format!("Cannot remove YiTerm connection: {error:#}")),
         }
     }
@@ -1351,6 +1439,16 @@ impl TerminalApp {
     }
 
     fn connect_share(&mut self) {
+        if self.share_address.is_none() {
+            return;
+        }
+        if let Err(error) = self.share_proxy.validate() {
+            self.error = Some(format!("{error:#}"));
+            return;
+        }
+        if !self.save_share_connection() {
+            return;
+        }
         let Some(address) = self.share_address.clone() else {
             return;
         };

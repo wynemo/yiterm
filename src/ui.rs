@@ -464,6 +464,7 @@ pub(super) struct TerminalUi {
     tab_context: Option<u64>,
     rename_input: gpui::Entity<InputState>,
     share_input: gpui::Entity<InputState>,
+    share_name_input: gpui::Entity<InputState>,
     share_proxy_input: gpui::Entity<InputState>,
     share_proxy_user: gpui::Entity<InputState>,
     share_proxy_password: gpui::Entity<InputState>,
@@ -650,6 +651,21 @@ impl TerminalUi {
                 }
             },
         ));
+        let share_name_input =
+            cx.new(|cx| InputState::new(window, cx).placeholder("e.g. Office desktop"));
+        settings_subscriptions.push(cx.subscribe_in(
+            &share_name_input,
+            window,
+            |this, input, event, window, cx| {
+                if matches!(event, InputEvent::Change) {
+                    this.app.share_name = input.read(cx).value().to_string();
+                }
+                if matches!(event, InputEvent::PressEnter { .. }) {
+                    this.submit_share(false, window);
+                }
+                cx.notify();
+            },
+        ));
         let share_input = cx.new(|cx| InputState::new(window, cx).placeholder("192.168.1.20:9443"));
         settings_subscriptions.push(cx.subscribe_in(
             &share_input,
@@ -666,7 +682,7 @@ impl TerminalUi {
         ));
         let share_proxy_input = cx.new(|cx| {
             InputState::new(window, cx)
-                .placeholder("SOCKS5 proxy (optional): 127.0.0.1:1080")
+                .placeholder("127.0.0.1:1080 or socks5://host:port")
                 .default_value(app.share_proxy.address.clone())
         });
         settings_subscriptions.push(cx.subscribe_in(
@@ -752,6 +768,7 @@ impl TerminalUi {
             tab_context: None,
             rename_input,
             share_input,
+            share_name_input,
             share_proxy_input,
             share_proxy_user,
             share_proxy_password,
@@ -905,11 +922,34 @@ impl TerminalUi {
         } else {
             self.app.begin_connect_share();
         }
-        let address = self.app.share_address.clone().unwrap_or_default();
-        self.share_input.update(cx, |input, cx| {
-            input.set_value(address, window, cx);
-            input.focus(window, cx);
-        });
+        self.sync_share_inputs(window, cx);
+        self.share_input
+            .update(cx, |input, cx| input.focus(window, cx));
+    }
+
+    fn sync_share_inputs(&mut self, window: &mut Window, cx: &mut ViewContext<Self>) {
+        let values = [
+            (
+                self.share_input.clone(),
+                self.app.share_address.clone().unwrap_or_default(),
+            ),
+            (self.share_name_input.clone(), self.app.share_name.clone()),
+            (
+                self.share_proxy_input.clone(),
+                self.app.share_proxy.address.clone(),
+            ),
+            (
+                self.share_proxy_user.clone(),
+                self.app.share_proxy.username.clone(),
+            ),
+            (
+                self.share_proxy_password.clone(),
+                self.app.share_proxy.password.clone(),
+            ),
+        ];
+        for (entity, value) in values {
+            entity.update(cx, |input, cx| input.set_value(value, window, cx));
+        }
     }
 
     fn submit_share(&mut self, read_only: bool, window: &mut Window) {
@@ -3340,109 +3380,292 @@ impl Render for TerminalUi {
         }
         if self.app.share_address.is_some() {
             let hosting = self.share_host_dialog;
-            let mut actions = div().flex().gap(px(8.)).child(self.button(
-                "connect-share",
-                if hosting { "Allow Control" } else { "Connect" },
-                cx,
-                |this, window, _| this.submit_share(false, window),
-            ));
+            let compact = window.viewport_size().width < px(660.);
+            let label = |text: &'static str| {
+                div()
+                    .text_size(px(12.))
+                    .text_color(theme.tab_icon())
+                    .child(text)
+            };
+            let mut actions =
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(8.))
+                    .when(!hosting && self.app.share_selected.is_some(), |row| {
+                        row.child(Button::new("delete-share").label("Delete").on_click(
+                            cx.listener(|this, _, window, cx| {
+                                this.app.forget_share_connection();
+                                this.sync_share_inputs(window, cx);
+                                cx.notify();
+                            }),
+                        ))
+                    })
+                    .child(div().flex_1())
+                    .child(
+                        Button::new("cancel-share")
+                            .label("Cancel")
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.app.share_address = None;
+                                this.focus.focus(window);
+                                cx.notify();
+                            })),
+                    )
+                    .when(!hosting, |row| {
+                        row.child(
+                            Button::new("save-share")
+                                .label("Save")
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    this.app.save_share_connection();
+                                    this.sync_share_inputs(window, cx);
+                                    cx.notify();
+                                })),
+                        )
+                    });
             if hosting {
-                actions = actions.child(self.button(
-                    "view-only-share",
-                    "View Only",
-                    cx,
-                    |this, window, _| this.submit_share(true, window),
-                ));
+                actions =
+                    actions.child(Button::new("view-only-share").label("View Only").on_click(
+                        cx.listener(|this, _, window, cx| {
+                            this.submit_share(true, window);
+                            cx.notify();
+                        }),
+                    ));
             }
-            actions =
-                actions.child(
-                    self.button("cancel-share", "Cancel", cx, |this, window, _| {
-                        this.app.share_address = None;
-                        this.focus.focus(window);
-                    }),
-                );
-            let panel = div()
-                .w(px(360.))
-                .max_w_full()
-                .p(px(16.))
+            actions = actions.child(
+                Button::new("connect-share")
+                    .label(if hosting { "Allow Control" } else { "Connect" })
+                    .primary()
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        this.submit_share(false, window);
+                        cx.notify();
+                    })),
+            );
+            let editor = div()
                 .flex()
                 .flex_col()
-                .gap(px(12.))
-                .bg(theme.surface())
-                .border_1()
-                .border_color(theme.border())
-                .rounded(px(6.))
-                .child(if hosting {
-                    "Listen for YiTerm connections"
-                } else {
-                    "Connect to YiTerm"
-                })
-                .child(Input::new(&self.share_input))
-                .when(!hosting, |panel| {
-                    panel
-                        .child("SOCKS5 proxy (leave empty for direct)")
-                        .child(Input::new(&self.share_proxy_input))
-                        .child(Input::new(&self.share_proxy_user))
-                        .child(Input::new(&self.share_proxy_password))
-                })
-                .when_some(self.app.error.as_ref(), |panel, error| {
-                    panel.child(div().text_color(theme.palette(1)).child(error.clone()))
-                })
-                .when(hosting, |panel| {
-                    panel.child("Devices that can reach this port can connect.")
-                })
-                .when(!hosting && !self.app.share_recent.is_empty(), |panel| {
-                    panel.child(
+                .flex_1()
+                .min_w_0()
+                .gap(px(14.))
+                .when(!hosting, |form| {
+                    form.child(
                         div()
                             .flex()
                             .flex_col()
-                            .child(div().text_size(px(12.)).child("Recent connections"))
-                            .children(self.app.share_recent.iter().enumerate().map(
-                                |(index, address)| {
-                                    let saved_address = address.clone();
-                                    let address = address.to_string();
-                                    div()
-                                        .flex()
-                                        .items_center()
-                                        .child(div().flex_1().min_w_0().child(self.menu_button(
-                                            ("recent-share", index),
-                                            address.clone(),
-                                            cx,
-                                            move |this, window, cx| {
-                                                this.app.share_address = Some(address.clone());
-                                                this.share_input.update(cx, |input, cx| {
-                                                    input.set_value(address.clone(), window, cx);
-                                                    input.focus(window, cx);
-                                                });
-                                            },
-                                        )))
-                                        .child(
-                                            div()
-                                                .id(("forget-share", index))
-                                                .size(px(20.))
-                                                .flex_shrink_0()
-                                                .flex()
-                                                .items_center()
-                                                .justify_center()
-                                                .rounded(px(2.))
-                                                .cursor_pointer()
-                                                .hover(|d| d.bg(theme.border()))
-                                                .child(Icon::new(IconName::Close).size(px(14.)))
-                                                .tooltip(|window, cx| {
-                                                    Tooltip::new("Remove connection")
-                                                        .build(window, cx)
-                                                })
-                                                .on_click(cx.listener(move |this, _, _, cx| {
-                                                    this.app.forget_share_address(&saved_address);
-                                                    cx.stop_propagation();
-                                                    cx.notify();
-                                                })),
-                                        )
-                                },
-                            )),
+                            .gap(px(6.))
+                            .child(label("Connection name"))
+                            .child(Input::new(&self.share_name_input)),
                     )
                 })
-                .child(actions);
+                .child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap(px(6.))
+                        .child(label(if hosting {
+                            "Listen address"
+                        } else {
+                            "Server address"
+                        }))
+                        .child(Input::new(&self.share_input)),
+                )
+                .when(!hosting, |form| {
+                    form.child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap(px(10.))
+                            .p(px(14.))
+                            .bg(theme.surface())
+                            .border_1()
+                            .border_color(theme.border())
+                            .rounded(px(8.))
+                            .child(div().text_size(px(13.)).child("SOCKS5 proxy"))
+                            .child(label(
+                                "Leave the proxy address empty for a direct connection.",
+                            ))
+                            .child(Input::new(&self.share_proxy_input))
+                            .child(
+                                div()
+                                    .flex()
+                                    .gap(px(10.))
+                                    .child(
+                                        div()
+                                            .flex_1()
+                                            .min_w_0()
+                                            .flex()
+                                            .flex_col()
+                                            .gap(px(6.))
+                                            .child(label("Username"))
+                                            .child(Input::new(&self.share_proxy_user)),
+                                    )
+                                    .child(
+                                        div()
+                                            .flex_1()
+                                            .min_w_0()
+                                            .flex()
+                                            .flex_col()
+                                            .gap(px(6.))
+                                            .child(label("Password"))
+                                            .child(Input::new(&self.share_proxy_password)),
+                                    ),
+                            )
+                            .child(label("Password is kept for this app session only.")),
+                    )
+                })
+                .when(hosting, |form| {
+                    form.child(label("Devices that can reach this port can connect."))
+                });
+            let sidebar =
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(10.))
+                    .when(!compact, |sidebar| sidebar.w(px(200.)).flex_shrink_0())
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .justify_between()
+                            .child(label("SAVED CONNECTIONS"))
+                            .child(Button::new("new-share").label("New").small().on_click(
+                                cx.listener(|this, _, window, cx| {
+                                    this.app.new_share_connection();
+                                    this.sync_share_inputs(window, cx);
+                                    this.share_name_input
+                                        .update(cx, |input, cx| input.focus(window, cx));
+                                    cx.notify();
+                                }),
+                            )),
+                    )
+                    .child(
+                        div()
+                            .id("share-connections")
+                            .max_h(px(if compact { 128. } else { 320. }))
+                            .overflow_y_scroll()
+                            .flex()
+                            .flex_col()
+                            .gap(px(6.))
+                            .when(self.app.share_recent.is_empty(), |list| {
+                                list.child(
+                        div().p(px(12.)).text_size(px(12.)).text_color(theme.tab_icon())
+                            .child("Save a connection to keep its address and proxy together.")
+                    )
+                            })
+                            .children(self.app.share_recent.iter().enumerate().map(
+                                |(index, profile)| {
+                                    let selected =
+                                        self.app.share_selected.as_ref() == Some(&profile.id);
+                                    div()
+                                        .id(("saved-share", index))
+                                        .p(px(10.))
+                                        .rounded(px(7.))
+                                        .border_1()
+                                        .border_color(if selected {
+                                            theme.accent()
+                                        } else {
+                                            theme.border()
+                                        })
+                                        .bg(if selected {
+                                            theme.selection()
+                                        } else {
+                                            theme.surface()
+                                        })
+                                        .cursor_pointer()
+                                        .hover(|d| d.bg(theme.tab_hover()))
+                                        .flex()
+                                        .flex_col()
+                                        .gap(px(4.))
+                                        .child(
+                                            div()
+                                                .text_size(px(13.))
+                                                .truncate()
+                                                .child(profile.name.clone()),
+                                        )
+                                        .child(
+                                            div()
+                                                .text_size(px(11.))
+                                                .text_color(theme.tab_icon())
+                                                .truncate()
+                                                .child(profile.address.clone()),
+                                        )
+                                        .child(
+                                            div()
+                                                .text_size(px(11.))
+                                                .text_color(theme.tab_icon())
+                                                .truncate()
+                                                .child(if profile.proxy.address.is_empty() {
+                                                    "Direct connection".to_owned()
+                                                } else {
+                                                    format!("SOCKS5 · {}", profile.proxy.address)
+                                                }),
+                                        )
+                                        .on_click(cx.listener(move |this, _, window, cx| {
+                                            this.app.select_share_connection(index);
+                                            this.sync_share_inputs(window, cx);
+                                            cx.notify();
+                                        }))
+                                },
+                            )),
+                    );
+            let panel = div()
+                .id("share-dialog")
+                .w(px(if hosting { 440. } else { 720. }))
+                .max_w_full()
+                .max_h((window.viewport_size().height - px(32.)).max(px(1.)))
+                .overflow_y_scroll()
+                .p(px(24.))
+                .flex()
+                .flex_col()
+                .gap(px(20.))
+                .bg(theme.background())
+                .text_color(theme.foreground())
+                .border_1()
+                .border_color(theme.border())
+                .rounded(px(12.))
+                .shadow_lg()
+                .child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap(px(6.))
+                        .child(div().text_size(px(20.)).child(if hosting {
+                            "Start YiTerm Sharing"
+                        } else {
+                            "Connect to YiTerm"
+                        }))
+                        .child(label(if hosting {
+                            "Share your desktop with another device."
+                        } else {
+                            "Choose a saved connection or create a new one."
+                        })),
+                )
+                .child(
+                    div()
+                        .flex()
+                        .gap(px(22.))
+                        .when(compact, |body| body.flex_col())
+                        .when(!hosting, |body| body.child(sidebar))
+                        .child(editor),
+                )
+                .when_some(self.app.error.as_ref(), |panel, error| {
+                    panel.child(
+                        div()
+                            .p(px(10.))
+                            .rounded(px(6.))
+                            .border_1()
+                            .border_color(theme.palette(1))
+                            .text_size(px(12.))
+                            .text_color(theme.palette(1))
+                            .child(error.clone()),
+                    )
+                })
+                .child(
+                    div()
+                        .pt(px(16.))
+                        .border_t_1()
+                        .border_color(theme.border())
+                        .child(actions),
+                );
             root = root.child(
                 div()
                     .absolute()

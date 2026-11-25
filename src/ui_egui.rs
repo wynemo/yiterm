@@ -1335,7 +1335,10 @@ impl eframe::App for TerminalApp {
             }
         }
         let modal_open = self.rename_tab.is_some() || self.share_address.is_some();
-        let mut forget_share = None;
+        let mut select_share = None;
+        let mut new_share = false;
+        let mut save_share = false;
+        let mut delete_share = false;
         if let Some(address) = &mut self.share_address {
             let hosting = self.share_host_dialog;
             let title = if hosting {
@@ -1344,63 +1347,79 @@ impl eframe::App for TerminalApp {
                 "Connect to YiTerm"
             };
             let modal = egui::Modal::new(egui::Id::new(title)).show(ctx, |ui| {
-                ui.set_width(320.0);
+                ui.set_width(if hosting { 400.0 } else { 650.0 });
+                ui.spacing_mut().item_spacing = egui::vec2(10.0, 10.0);
                 ui.heading(title);
-                let input = ui.add(
-                    egui::TextEdit::singleline(address)
-                        .hint_text(if hosting {
-                            "0.0.0.0:9443"
-                        } else {
-                            "192.168.1.20:9443"
-                        })
-                        .desired_width(f32::INFINITY),
-                );
-                if share_started {
-                    input.request_focus();
-                }
-                let enter = input.lost_focus() && ui.input(|input| input.key_pressed(Key::Enter));
-                if !hosting {
-                    ui.label("SOCKS5 proxy (leave empty for direct)");
-                    ui.add(
-                        egui::TextEdit::singleline(&mut self.share_proxy.address)
-                            .hint_text("127.0.0.1:1080")
-                            .desired_width(f32::INFINITY),
-                    );
-                    ui.add(
-                        egui::TextEdit::singleline(&mut self.share_proxy.username)
-                            .hint_text("Proxy username (optional)")
-                            .desired_width(f32::INFINITY),
-                    );
-                    ui.add(
-                        egui::TextEdit::singleline(&mut self.share_proxy.password)
-                            .password(true)
-                            .hint_text("Proxy password (optional)")
-                            .desired_width(f32::INFINITY),
-                    );
-                }
-                if !hosting && !self.share_recent.is_empty() {
-                    ui.label("Recent connections");
-                    for recent in &self.share_recent {
-                        ui.horizontal(|ui| {
-                            let label = recent.to_string();
-                            if ui.selectable_label(*address == label, &label).clicked() {
-                                *address = label;
-                                input.request_focus();
-                            }
-                            if ui
-                                .small_button("×")
-                                .on_hover_text("Remove connection")
-                                .clicked()
-                            {
-                                forget_share = Some(recent.clone());
-                            }
+                ui.label(if hosting { "Share your desktop with another device." }
+                    else { "Choose a saved connection or create a new one." });
+                ui.separator();
+                let mut enter = false;
+                ui.horizontal_top(|ui| {
+                    if !hosting {
+                        ui.vertical(|ui| {
+                            ui.set_width(190.0);
+                            ui.horizontal(|ui| {
+                                ui.strong("Saved connections");
+                                new_share = ui.small_button("New").clicked();
+                            });
+                            egui::ScrollArea::vertical().id_salt("saved-share-connections")
+                                .max_height(320.0).show(ui, |ui| {
+                                    if self.share_recent.is_empty() {
+                                        ui.weak("Save a connection to keep its address and proxy together.");
+                                    }
+                                    for (index, profile) in self.share_recent.iter().enumerate() {
+                                        let route = if profile.proxy.address.is_empty() { "Direct connection".to_owned() }
+                                            else { format!("SOCKS5 · {}", profile.proxy.address) };
+                                        let text = format!("{}\n{}\n{}", profile.name, profile.address, route);
+                                        if ui.add_sized([190.0, 70.0], egui::Button::new(text)
+                                            .selected(self.share_selected.as_ref() == Some(&profile.id))).clicked() {
+                                            select_share = Some(index);
+                                        }
+                                    }
+                                });
                         });
+                        ui.separator();
                     }
-                }
+                    ui.vertical(|ui| {
+                        ui.set_width(if hosting { 400.0 } else { 430.0 });
+                        if !hosting {
+                            ui.label("Connection name");
+                            ui.add(egui::TextEdit::singleline(&mut self.share_name)
+                                .hint_text("e.g. Office desktop").desired_width(f32::INFINITY));
+                        }
+                        ui.label(if hosting { "Listen address" } else { "Server address" });
+                        let input = ui.add(egui::TextEdit::singleline(address)
+                            .hint_text(if hosting { "0.0.0.0:9443" } else { "192.168.1.20:9443" })
+                            .desired_width(f32::INFINITY));
+                        if share_started { input.request_focus(); }
+                        enter = input.lost_focus() && ui.input(|input| input.key_pressed(Key::Enter));
+                        if !hosting {
+                            ui.add_space(4.0);
+                            egui::Frame::group(ui.style()).inner_margin(14.0).show(ui, |ui| {
+                                ui.strong("SOCKS5 proxy");
+                                ui.weak("Leave the proxy address empty for a direct connection.");
+                                ui.add(egui::TextEdit::singleline(&mut self.share_proxy.address)
+                                    .hint_text("127.0.0.1:1080 or socks5://host:port").desired_width(f32::INFINITY));
+                                ui.label("Username");
+                                ui.add(egui::TextEdit::singleline(&mut self.share_proxy.username)
+                                    .hint_text("Optional").desired_width(f32::INFINITY));
+                                ui.label("Password");
+                                ui.add(egui::TextEdit::singleline(&mut self.share_proxy.password)
+                                    .password(true).hint_text("Optional").desired_width(f32::INFINITY));
+                                ui.weak("Password is kept for this app session only.");
+                            });
+                        }
+                    });
+                });
                 if let Some(error) = &self.error {
                     ui.colored_label(self.theme.palette(1), error);
                 }
+                ui.separator();
                 ui.horizontal(|ui| {
+                    if !hosting {
+                        delete_share = ui.add_enabled(self.share_selected.is_some(), egui::Button::new("Delete")).clicked();
+                        save_share = ui.button("Save").clicked();
+                    }
                     let submit = if hosting {
                         let control = ui.button("Allow Control").clicked();
                         let view_only = ui.button("View Only").clicked() || enter;
@@ -1442,8 +1461,14 @@ impl eframe::App for TerminalApp {
                 }
             }
         }
-        if let Some(address) = forget_share {
-            self.forget_share_address(&address);
+        if new_share {
+            self.new_share_connection();
+        } else if let Some(index) = select_share {
+            self.select_share_connection(index);
+        } else if delete_share {
+            self.forget_share_connection();
+        } else if save_share {
+            self.save_share_connection();
         }
         if let Some((id, draft)) = &mut self.rename_tab {
             let modal = egui::Modal::new(egui::Id::new(("rename-tab", *id))).show(ctx, |ui| {
