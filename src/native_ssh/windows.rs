@@ -825,6 +825,8 @@ fn run_inner(real_ssh: &Path, directory: &Path, args: Vec<OsString>, mosh: bool)
         });
         let handle = Arc::new(if config.proxy_jump.is_some() {
             super::connect_via_proxyjump(config, prompt, real_ssh).await?
+        } else if config.proxy_command.is_some() {
+            super::connect_via_proxycommand(config, prompt).await?
         } else {
             super::connect(config, prompt).await?
         });

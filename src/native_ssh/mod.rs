@@ -48,6 +48,49 @@ pub async fn connect_via_proxyjump(
     connect_proxyjump(config, prompt, real_ssh, false).await
 }
 
+/// OpenSSH model: run the user's ProxyCommand locally and tunnel the SSH
+/// session through its stdin/stdout. The configured command runs unmodified,
+/// through the same shell OpenSSH would use, so user habits carry over.
+pub async fn connect_via_proxycommand(
+    config: Config,
+    prompt: Arc<dyn Prompt>,
+) -> Result<client::Handle<Handler>> {
+    let proxy_command = config
+        .proxy_command
+        .as_deref()
+        .context("Missing ProxyCommand configuration")?;
+    let mut command = if cfg!(windows) {
+        let shell = std::env::var_os("COMSPEC")
+            .unwrap_or_else(|| OsString::from("cmd.exe"));
+        let mut command = tokio::process::Command::new(shell);
+        command.arg("/c").arg(proxy_command);
+        command
+    } else {
+        let mut command = tokio::process::Command::new("/bin/sh");
+        command.arg("-c").arg(proxy_command);
+        command
+    };
+    command
+        // A nested `ssh -W` in the ProxyCommand may resolve to this app's own
+        // ssh shim; YITERM_* env is inherited, so that call simply defers to
+        // the real OpenSSH instead of recursing into the frontend.
+        .env_remove("YITERM_REAL_SSH")
+        .env_remove("YITERM_SSH_DIRECTORY")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::inherit())
+        .kill_on_drop(true);
+    let mut child = command
+        .spawn()
+        .with_context(|| format!("Could not start ProxyCommand: {proxy_command}"))?;
+    let stdin = child.stdin.take().context("ProxyCommand stdin was not piped")?;
+    let stdout = child
+        .stdout
+        .take()
+        .context("ProxyCommand stdout was not piped")?;
+    connect_stream(config, prompt, OpenSshStream { stdout, stdin }, Some(child)).await
+}
+
 pub(crate) async fn connect_proxyjump(
     config: Config,
     prompt: Arc<dyn Prompt>,

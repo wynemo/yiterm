@@ -16,6 +16,7 @@ pub struct Config {
     pub user: String,
     pub port: u16,
     pub proxy_jump: Option<String>,
+    pub proxy_command: Option<String>,
     pub host_key_name: String,
     pub known_hosts: Vec<PathBuf>,
     pub save_host_key: PathBuf,
@@ -149,7 +150,12 @@ pub fn resolve(ssh: &Path, args: &[OsString]) -> Result<Config> {
         String::from_utf8_lossy(&output.stderr).trim()
     );
     let resolved = String::from_utf8(output.stdout)?;
-    let mut config = Config::parse(&resolved)?;
+    // %n refers to the host name exactly as typed on the command line;
+    // ssh -G cannot report it, so carry the destination argument in.
+    let original_host = args
+        .get(command_start.saturating_sub(1))
+        .map(|arg| arg.to_str().expect("validated UTF-8"));
+    let mut config = Config::parse(original_host, &resolved)?;
     if command_start < args.len() {
         // Match OpenSSH: concatenate arguments with spaces, then let the remote
         // login shell interpret the command string. Do not quote it a second time.
@@ -178,7 +184,7 @@ pub fn resolve(ssh: &Path, args: &[OsString]) -> Result<Config> {
 }
 
 impl Config {
-    pub fn parse(text: &str) -> Result<Self> {
+    pub fn parse(original_host: Option<&str>, text: &str) -> Result<Self> {
         let mut values: HashMap<String, Vec<String>> = HashMap::new();
         for line in text.lines() {
             if let Some((key, value)) = line.split_once(char::is_whitespace) {
@@ -196,7 +202,6 @@ impl Config {
                 .unwrap_or_else(|| default.into())
         };
         for key in [
-            "proxycommand",
             "localforward",
             "remoteforward",
             "dynamicforward",
@@ -291,12 +296,29 @@ impl Config {
                 || proxy_jump.split(',').all(|hop| !hop.trim().is_empty()),
             "Invalid ProxyJump configuration"
         );
+        // ProxyJump resolves into a ProxyCommand line, so keep ProxyJump's
+        // dedicated transport (real OpenSSH -W) when it is configured.
+        let proxy_command = if proxy_jump == "none" || proxy_jump.is_empty() {
+            let command = get("proxycommand", "none");
+            (command != "none" && !command.is_empty()).then(|| {
+                expand_proxy_tokens(
+                    &command,
+                    &host,
+                    &get("port", "22"),
+                    &user,
+                    original_host,
+                )
+            })
+        } else {
+            None
+        };
         Ok(Self {
             host,
             remote_command: None,
             request_pty: true,
             user,
             proxy_jump: (proxy_jump != "none" && !proxy_jump.is_empty()).then_some(proxy_jump),
+            proxy_command,
             host_key_name,
             known_hosts,
             save_host_key,
@@ -324,6 +346,40 @@ impl Config {
             agent: (agent != "none").then_some(agent),
         })
     }
+}
+
+/// ssh -G leaves %h/%p and friends unexpanded; expand them the way OpenSSH
+/// itself does before running the ProxyCommand. Unknown %-sequences pass
+/// through untouched for the shell to interpret (e.g. Windows cmd %VAR%).
+fn expand_proxy_tokens(
+    command: &str,
+    host: &str,
+    port: &str,
+    user: &str,
+    original_host: Option<&str>,
+) -> String {
+    let original_host = original_host.unwrap_or(host);
+    let mut expanded = String::with_capacity(command.len());
+    let mut chars = command.chars();
+    while let Some(c) = chars.next() {
+        if c != '%' {
+            expanded.push(c);
+            continue;
+        }
+        match chars.next() {
+            Some('%') => expanded.push('%'),
+            Some('h') => expanded.push_str(host),
+            Some('n') => expanded.push_str(original_host),
+            Some('p') => expanded.push_str(port),
+            Some('r') => expanded.push_str(user),
+            Some(other) => {
+                expanded.push('%');
+                expanded.push(other);
+            }
+            None => expanded.push('%'),
+        }
+    }
+    expanded
 }
 
 fn path_words(text: &str) -> Result<Vec<String>> {

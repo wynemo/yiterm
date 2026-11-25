@@ -49,6 +49,8 @@ impl Connection {
         let result = tokio::time::timeout(Duration::from_secs(12), async {
             if config.proxy_jump.is_some() {
                 super::connect_proxyjump(config.clone(), prompt.clone(), ssh, true).await
+            } else if config.proxy_command.is_some() {
+                super::connect_via_proxycommand(config.clone(), prompt.clone()).await
             } else {
                 super::connect(config.clone(), prompt.clone()).await
             }
