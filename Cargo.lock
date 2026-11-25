@@ -10882,7 +10882,7 @@ dependencies = [
 
 [[package]]
 name = "yiterm"
-version = "0.0.28"
+version = "0.0.29"
 dependencies = [
  "aes 0.8.4",
  "alacritty_terminal",
