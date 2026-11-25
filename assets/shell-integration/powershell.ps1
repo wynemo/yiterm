@@ -35,9 +35,21 @@ function global:prompt {
         }
     } catch { }
     try {
+        # A shell prompt does not consume VT mouse reports. ConPTY or a child
+        # application can leave tracking enabled, even when PSReadLine clears
+        # ENABLE_MOUSE_INPUT without changing the native console mode. Reset
+        # tracking explicitly on every return to the prompt, before ReadLine.
+        # Applications launched by the user can enable it again as needed.
+        $yitermMouseReset = ([string][char]27 + '[?1000l') +
+            ([string][char]27 + '[?1002l') +
+            ([string][char]27 + '[?1003l') +
+            ([string][char]27 + '[?1005l') +
+            ([string][char]27 + '[?1006l') +
+            ([string][char]27 + '[?1015l') +
+            ([string][char]27 + '[?1016l')
         # The fragment is session-local metadata, never part of the file path.
         # Do not export the token to child programs (in particular ssh).
-        [Console]::Write(('{0}]7;{1}#yiterm-cwd={2}{3}{4}' -f [char]27, $yitermUri, $global:YiTermDirectoryToken, $yitermSuffix, [char]7))
+        [Console]::Write($yitermMouseReset + ('{0}]7;{1}#yiterm-cwd={2}{3}{4}' -f [char]27, $yitermUri, $global:YiTermDirectoryToken, $yitermSuffix, [char]7))
     } catch { }
     $yitermPromptText
 }

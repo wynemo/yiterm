@@ -504,6 +504,8 @@ Cargo 按目标平台声明依赖：Linux 不编译 GPUI；Windows / macOS 不�
 
 包装调用原有 prompt 并保留其输出，不写入 `$PROFILE`，不重复加载 profiles，也不修改执行策略。脚本位于 `assets/shell-integration/powershell.ps1`，只内嵌到新建 Windows PowerShell/pwsh 的启动命令；macOS/Linux 启动方式保持原样。升级后需要新建或重建 PowerShell 标签页/分栏，已有进程不会自动安装目录报告。
 
+每次返回 PowerShell 提示符时，会显式关闭鼠标点击、拖动和移动上报（DEC 1000/1002/1003），并清理 UTF-8、SGR、URXVT 和像素坐标编码（1005/1006/1015/1016），防止 ConPTY 或子程序遗留的鼠标模式让鼠标移动变成命令行中的连续字符。随后启动的终端程序仍可按需重新开启鼠标上报。该处理只在默认启动初始化启用时生效；填写自定义 Arguments 的会话不注入脚本。Windows PowerShell 下的实际修复效果仍需 Windows 环境确认。
+
 新建 Windows PowerShell/pwsh 会话时，若 PSReadLine 的默认文字颜色仍为标准 ANSI 灰色或亮白色（仅设置前景色），会将其替换为 `SGR 39;49`，同时恢复终端默认前景和背景。旧版 PSReadLine 会在命令和参数之间恢复 Windows 控制台的显式底色；只设置参数前景色会让普通输入的 `status` 继承黑底。该适配让普通参数使用终端默认颜色，随主题显示，并保留其他语法颜色和自定义的默认文字颜色。不写入用户配置文件；升级后需新建 PowerShell 标签页或分栏，已有历史输出不会重新着色。Windows 编译及实际输入行为仍需 Windows CI runner 和 Windows 环境验证。
 
 `src/shell_directory.rs` 在 PTY 读取线程解析报告，支持跨读取边界的 BEL/ST 终止序列，只缓存 OSC 7，单条报告最多 16 KiB；原始输出仍交给终端解析器。每个会话使用独立标记放在 URI fragment 中，标记不导出到子进程环境。只接受匹配该会话标记的 file URI；解码、校验后去掉 fragment，再转换为 Windows 盘符或 UNC 路径，其他程序和 SSH 子会话的普通 OSC 7 不会覆盖本地目录。注册表等非 FileSystem provider 暂停目录更新并保留最后一个文件目录，不回退到过期的 Win32 进程目录。
