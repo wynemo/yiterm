@@ -345,6 +345,7 @@ async fn read_desktop_size(reader: &mut (impl AsyncReadExt + Unpin)) -> Result<[
     Ok(request)
 }
 
+#[cfg(any(target_os = "linux", windows))]
 async fn receive(
     reader: &mut (impl AsyncReadExt + Unpin),
     input: impl AsyncFnMut(&[u8]) -> Result<()>,
