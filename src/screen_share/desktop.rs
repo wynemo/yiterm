@@ -108,6 +108,7 @@ struct Renderer {
     previous: Option<Frame>,
     previous_view: Option<View>,
     previous_grid: (usize, usize),
+    last_patches: std::collections::HashMap<usize, [usize; 4]>,
 }
 
 impl Renderer {
@@ -117,6 +118,7 @@ impl Renderer {
             previous: None,
             previous_view: None,
             previous_grid: (0, 0),
+            last_patches: Default::default(),
         }
     }
 
@@ -144,6 +146,7 @@ impl Renderer {
         if reset {
             delete(&mut out, self.previous_grid.0 * self.previous_grid.1)?;
             self.previous = None;
+            self.last_patches.clear();
         }
         let dirty = dirty_tiles(&frame, self.previous.as_ref(), grid);
         let mut batch = Vec::with_capacity(4);
@@ -160,13 +163,14 @@ impl Renderer {
                 view.canvas,
             );
             if needs_encoding {
-                let (x, y) = (ix * w / nx, iy * h / ny);
-                tile.rgb = frame.tile_rgb(x, y, (ix + 1) * w / nx - x, (iy + 1) * h / ny - y);
+                if !tile.capture_patch(&frame, self.previous.as_ref()) { continue; }
+                if let Some(patch) = tile.patch_position() { self.last_patches.insert(index + 1, patch); }
                 batch.push(tile);
                 if batch.len() == 4 {
                     self.flush(&mut batch, quality, &mut out, output)?;
                 }
             } else if moved {
+                tile.restore_patch(self.last_patches.get(&(index + 1)).copied());
                 place(&mut out, &tile)?;
             }
         }
@@ -223,12 +227,19 @@ pub(super) fn stream(
     let mut quality = fixed.unwrap_or(0);
     let mut divisor = 1;
     let mut fps = options.share_fps;
+    let mut fps_limit = options.share_fps;
+    let mut stream_width = options.share_width;
+    let mut minimum_quality = 0;
+    let mut frame_sequence = 0usize;
+    let mut acknowledged_frame = 0usize;
+    let mut acknowledgment_baseline = 0usize;
+    let mut acknowledge_pictures = false;
     let period = Duration::from_secs_f64(1.0 / f64::from(fps));
     let started = Instant::now();
     let mut last_change = started;
     let mut next_frame = started;
     output
-        .blocking_send(b"\x1b[?1049h\x1b[?25l\x1b[?1004h\x1b[2J\x1b[H\x1b[?9002$p".to_vec())
+        .blocking_send(b"\x1b]777;yiterm;quality=2\x1b\\\x1b[?1049h\x1b[?25l\x1b[?1004h\x1b[2J\x1b[H\x1b[?9002$p".to_vec())
         .map_err(|_| io::Error::from(io::ErrorKind::BrokenPipe))?;
     if !options.share_read_only {
         output
@@ -286,6 +297,17 @@ pub(super) fn stream(
                     }
                 }
                 Event::Canvas(value) => canvas = Some(value),
+                Event::FrameAcknowledged(sequence) => acknowledged_frame = acknowledged_frame.max(sequence),
+                Event::StreamQuality([width, rate, quantization, acknowledgments]) => {
+                    acknowledge_pictures = acknowledgments != 0;
+                    acknowledgment_baseline = frame_sequence;
+                    stream_width = if width == 0 { options.share_width } else if options.share_width == 0 { width as u32 } else { (width as u32).min(options.share_width) };
+                    fps_limit = if rate == 0 { options.share_fps } else { (rate as u32).min(options.share_fps) };
+                    fps = fps_limit;
+                    minimum_quality = quantization;
+                    quality = if quantization == 0 { fixed.unwrap_or(0) } else { quantization };
+                    renderer.previous = None;
+                }
                 #[cfg(windows)]
                 Event::DisplayScale(scale) if !options.share_read_only => {
                     desktop.display_scale(scale)
@@ -309,6 +331,10 @@ pub(super) fn stream(
         if (resized || Instant::now() >= next_frame)
             && (canvas.is_some() || started.elapsed() >= Duration::from_millis(300))
         {
+            if acknowledge_pictures && frame_sequence.saturating_sub(acknowledged_frame.max(acknowledgment_baseline)) >= 2 {
+                std::thread::sleep(Duration::from_millis(4));
+                continue;
+            }
             let size = *sizes.borrow_and_update();
             let tick = Instant::now();
             if !options.share_read_only && desktop.viewport(size) {
@@ -319,7 +345,7 @@ pub(super) fn stream(
                 renderer.previous_view = None;
             }
             let captured = desktop
-                .frame(options.share_width, divisor)
+                .frame(stream_width, divisor)
                 .and_then(|frame| {
                     desktop.check()?;
                     anyhow::ensure!(!desktop.changed(), "Windows desktop changed during capture");
@@ -357,10 +383,15 @@ pub(super) fn stream(
             };
             let view = View::new(size, canvas.unwrap_or(false), (frame.w, frame.h));
             renderer.frame(frame, view, quality, output)?;
+            frame_sequence = frame_sequence.wrapping_add(1);
+            if acknowledge_pictures {
+                output.blocking_send(format!("\x1b]777;yiterm;frame={frame_sequence}\x1b\\").into_bytes())
+                    .map_err(|_| io::Error::from(io::ErrorKind::BrokenPipe))?;
+            }
             shown = Some(view);
             let elapsed = tick.elapsed();
             if elapsed > period * 2 && last_change.elapsed() >= Duration::from_secs(2) {
-                if fixed.is_none() && quality < 3 {
+                if (fixed.is_none() || stream_width != options.share_width) && quality < 3 {
                     quality += 1;
                     renderer.previous = None;
                 } else if fps > 3 {
@@ -372,9 +403,9 @@ pub(super) fn stream(
             } else if elapsed < period && last_change.elapsed() >= Duration::from_secs(15) {
                 if divisor > 1 {
                     divisor -= 1;
-                } else if fps < options.share_fps {
+                } else if fps < fps_limit {
                     fps += 1;
-                } else if fixed.is_none() && quality > 0 {
+                } else if (fixed.is_none() || stream_width != options.share_width) && quality > minimum_quality {
                     quality -= 1;
                     renderer.previous = None;
                 }

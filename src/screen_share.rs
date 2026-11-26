@@ -361,6 +361,8 @@ mod macos {
         focused: bool,
         ready: bool,
         canvas: Option<bool>,
+        stream_quality: Option<[usize; 4]>,
+        acknowledged_frame: usize,
         source: (usize, usize),
         geo: (usize, usize),
         origin: (usize, usize),
@@ -445,6 +447,13 @@ mod macos {
                                 Event::DesktopSize(w, h, scale) => unsafe {
                                     yiterm_capture_resize_desktop(w as i32, h as i32, scale as i32);
                                 },
+                                Event::FrameAcknowledged(sequence) => {
+                                    let mut view = v.lock().unwrap();
+                                    view.acknowledged_frame = view.acknowledged_frame.max(sequence);
+                                }
+                                Event::StreamQuality(requested) => {
+                                    v.lock().unwrap().stream_quality = Some(requested);
+                                }
                                 Event::Canvas(supported) => {
                                     v.lock().unwrap().canvas = Some(supported)
                                 }
@@ -583,7 +592,7 @@ mod macos {
         let _terminal = Terminal::enter(o.share_read_only)?;
         let mut out = std::io::stdout();
         let encoders = EncoderPool::new();
-        out.write_all(b"\x1b[14t\x1b[16t\x1b[18t\x1b[?9002$p")?;
+        out.write_all(b"\x1b]777;yiterm;quality=2\x1b\\\x1b[14t\x1b[16t\x1b[18t\x1b[?9002$p")?;
         if !o.share_read_only {
             out.write_all(b"\x1b[?1003h\x1b[?1006h\x1b[?1016h\x1b[?2004h")?;
         }
@@ -598,6 +607,7 @@ mod macos {
         let mut count = 0;
         let mut old_grid = (0, 0);
         let mut old_canvas = false;
+        let mut last_patches = std::collections::HashMap::new();
         let fixed = match o.share_quality.as_deref().unwrap_or("lossless") {
             "auto" => None,
             "565" => Some(1),
@@ -613,7 +623,10 @@ mod macos {
         let mut total_tiles = 0usize;
         let mut fps = o.share_fps;
         let mut scale_div = 1;
-        let mut applied_scale = 1;
+        let mut applied_width = 0;
+        let mut applied_quality = None;
+        let mut frame_sequence = 0usize;
+        let mut acknowledgment_baseline = 0usize;
         let input_pump = InputPump::new(o.share_read_only);
         let mut source: Option<Arc<Frame>> = None;
         let mut unlock_wait: Option<Instant> = None;
@@ -623,6 +636,19 @@ mod macos {
                 std::thread::sleep(Duration::from_millis(2));
                 let input = input_pump.view.lock().unwrap().clone();
                 let focused = input.focused;
+                let [requested_width, requested_fps, requested_quality, acknowledgments] = input.stream_quality.unwrap_or([0, 0, 0, 0]);
+                let fps_limit = if requested_fps == 0 { o.share_fps } else { (requested_fps as u32).min(o.share_fps) };
+                if applied_quality != input.stream_quality {
+                    applied_quality = input.stream_quality;
+                    acknowledgment_baseline = frame_sequence;
+                    fps = fps_limit;
+                    quality = if requested_quality == 0 { fixed.unwrap_or(0) } else { requested_quality };
+                    previous = None;
+                }
+                // ACK flow control already bounds frames in flight. Slow writes must not
+                // ratchet the capture rate down for minutes after the link recovers.
+                fps = if acknowledgments != 0 { fps_limit } else { fps.min(fps_limit) };
+                let minimum_quality = requested_quality;
                 let measured_cell = input.cell;
                 let measured_area = input.area;
                 let locked = latest.lock().unwrap().2;
@@ -685,6 +711,9 @@ mod macos {
                 {
                     continue;
                 }
+                if acknowledgments != 0 && frame_sequence.saturating_sub(input.acknowledged_frame.max(acknowledgment_baseline)) >= 2 {
+                    continue; // Keep native capture's latest slot fresh; do not queue more old pictures.
+                }
                 let (frame, error) = {
                     let mut slot = latest.lock().unwrap();
                     (slot.0.take(), slot.1.take())
@@ -696,13 +725,15 @@ mod macos {
                 if let Some(frame) = frame {
                     source = Some(Arc::new(frame));
                 }
-                if new_frame || applied_scale != scale_div {
+                let desired_width = source.as_ref().map_or(1, |s|
+                    (s.w / scale_div).min(if requested_width == 0 { usize::MAX } else { requested_width }).max(1));
+                if new_frame || applied_width != desired_width {
                     if let Some(source) = source.as_ref() {
-                        current = Some(if scale_div == 1 {
+                        current = Some(if source.w == desired_width {
                             source.clone()
                         } else {
-                            let w = (source.w / scale_div).max(1);
-                            let h = (source.h / scale_div).max(1);
+                            let w = desired_width;
+                            let h = (source.h * w / source.w).max(1);
                             let mut pixels = vec![0; w * h * 4];
                             for y in 0..h {
                                 for x in 0..w {
@@ -715,7 +746,7 @@ mod macos {
                             }
                             Arc::new(Frame { w, h, pixels })
                         });
-                        applied_scale = scale_div;
+                        applied_width = desired_width;
                     }
                 }
                 let Some(frame) = current.as_ref() else {
@@ -767,6 +798,7 @@ mod macos {
                 if reset {
                     delete(&mut out, count)?;
                     previous = None;
+                    last_patches.clear();
                 }
                 old_geometry = geo;
                 old_origin = origin;
@@ -779,8 +811,9 @@ mod macos {
                     placements.extend_from_slice(b"\x1b[?2026h");
                     for iy in 0..ny {
                         for ix in 0..nx {
-                            let tile = tile_layout(
-                                iy * nx + ix + 1,
+                            let patch_id = iy * nx + ix + 1;
+                            let mut tile = tile_layout(
+                                patch_id,
                                 ix,
                                 iy,
                                 grid,
@@ -789,6 +822,7 @@ mod macos {
                                 (frame.w, frame.h),
                                 canvas,
                             );
+                            tile.restore_patch(last_patches.get(&patch_id).copied());
                             place(&mut placements, &tile)?;
                         }
                     }
@@ -818,7 +852,7 @@ mod macos {
                         let dirty = dirty_tiles[iy * nx + ix];
                         if !dirty {
                             if layout_changed {
-                                let tile = tile_layout(
+                                let mut tile = tile_layout(
                                     id,
                                     ix,
                                     iy,
@@ -828,13 +862,15 @@ mod macos {
                                     (frame.w, frame.h),
                                     canvas,
                                 );
+                                tile.restore_patch(last_patches.get(&id).copied());
                                 place(&mut out, &tile)?;
                             }
                             continue;
                         }
                         let mut tile =
                             tile_layout(id, ix, iy, grid, geo, origin, (frame.w, frame.h), canvas);
-                        tile.rgb = frame.tile_rgb(x, y, w, h);
+                        if !tile.capture_patch(frame, previous.as_deref()) { continue; }
+                        if let Some(patch) = tile.patch_position() { last_patches.insert(id, patch); }
                         tiles.push(tile);
                     }
                 }
@@ -855,6 +891,8 @@ mod macos {
                     }
                 }
                 out.write_all(b"\x1b[?2026l")?;
+                frame_sequence = frame_sequence.wrapping_add(1);
+                if acknowledgments != 0 { write!(out, "\x1b]777;yiterm;frame={frame_sequence}\x1b\\")?; }
                 out.flush()?;
                 // Commit only after every dirty tile was written successfully.
                 previous = current.clone();
@@ -868,10 +906,10 @@ mod macos {
                 let elapsed = started.elapsed();
                 let budget = Duration::from_secs_f64(1.0 / f64::from(o.share_fps));
                 if elapsed > budget * 2 && last_adjust.elapsed() > Duration::from_secs(2) {
-                    if fixed.is_none() && quality < 3 {
+                    if (fixed.is_none() || requested_width > 0) && quality < 3 {
                         quality += 1;
                         previous = None;
-                    } else if fps > 3 {
+                    } else if acknowledgments == 0 && fps > 3 {
                         fps = (fps * 3 / 4).max(1);
                     } else if o.share_adaptive_resolution && scale_div < 4 {
                         scale_div += 1;
@@ -880,20 +918,26 @@ mod macos {
                 } else if elapsed < budget && last_adjust.elapsed() > Duration::from_secs(15) {
                     if scale_div > 1 {
                         scale_div -= 1;
-                    } else if fps < o.share_fps {
-                        fps = (fps + 1).min(o.share_fps);
-                    } else if fixed.is_none() && quality > 0 {
+                    } else if fps < fps_limit {
+                        fps = (fps + 1).min(fps_limit);
+                    } else if (fixed.is_none() || requested_width > 0) && quality > minimum_quality {
                         quality -= 1;
                         previous = None;
                     }
                     last_adjust = Instant::now();
                 }
-                if o.share_stats && last_stats.elapsed() >= Duration::from_secs(5) {
-                    eprintln!(
+                if last_stats.elapsed() >= Duration::from_secs(5) {
+                    tracing::info!(width=frame.w, height=frame.h, canvas,
+                        total_image_bytes=total_bytes, total_tiles,
+                        last_dirty_tiles=tiles.len(), reset, layout_changed, fps,
+                        encode_write_ms=elapsed.as_millis() as u64,
+                        unacknowledged=frame_sequence.saturating_sub(input.acknowledged_frame.max(acknowledgment_baseline)),
+                        "Screen stream image counters");
+                    if o.share_stats { eprintln!(
                         "share: base64_bytes={total_bytes} tiles={total_tiles} encode_write_ms={} fps={fps} quality={quality} scale_div={scale_div} frame_bytes={} latest_queue<=1",
                         elapsed.as_millis(),
                         previous.as_ref().map_or(0, |p| p.pixels.len())
-                    );
+                    ); }
                     last_stats = Instant::now();
                 }
                 last_frame = Instant::now();

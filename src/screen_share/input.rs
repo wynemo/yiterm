@@ -26,6 +26,8 @@ const PASTE_CHUNK_BYTES: usize = 4096;
 
 pub enum Event {
     Canvas(bool),
+    StreamQuality([usize; 4]),
+    FrameAcknowledged(usize),
     #[cfg(windows)]
     DisplayScale(u32),
     Text(String),
@@ -154,6 +156,19 @@ impl Decoder {
                 }
                 if final_byte == b'y' && text.starts_with("?9002;") {
                     return Some(Event::Canvas(matches!(text, "?9002;1$" | "?9002;2$")));
+                }
+                if final_byte == b't' && text.starts_with("?9009;") {
+                    if let Ok(sequence) = text[6..].parse::<usize>() { return Some(Event::FrameAcknowledged(sequence)); }
+                    continue;
+                }
+                if final_byte == b't' && text.starts_with("?9008;") {
+                    if let Some([width, fps, quality, acknowledgments]) = numbers::<4>(&text[6..]) {
+                        if (width == 0 || (320..=1920).contains(&width))
+                            && (fps == 0 || (3..=30).contains(&fps)) && quality <= 3 && acknowledgments <= 1 {
+                            return Some(Event::StreamQuality([width, fps, quality, acknowledgments]));
+                        }
+                    }
+                    continue;
                 }
                 #[cfg(target_os = "macos")]
                 if final_byte == b't' && text.starts_with("?9004;") {

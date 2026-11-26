@@ -61,7 +61,7 @@ func main() {
 				return
 			}
 			defer release(local)
-			tailcat.ProxyConns(incoming, local)
+			proxyScreen(incoming, local)
 		}
 	}
 	startup, cancel := context.WithTimeout(ctx, 25*time.Second)
@@ -103,4 +103,15 @@ func main() {
 		c.Close()
 	}
 	mu.Unlock()
+}
+
+// Screen sessions do not use TCP half-close semantics.
+func proxyScreen(a, b net.Conn) {
+	done := make(chan struct{}, 2)
+	go func() { io.Copy(a, b); done <- struct{}{} }()
+	go func() { io.Copy(b, a); done <- struct{}{} }()
+	<-done
+	a.Close()
+	b.Close()
+	<-done
 }
