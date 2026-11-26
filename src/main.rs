@@ -1795,7 +1795,12 @@ fn main() -> Result<()> {
         );
     }
     if args.screen_share.share_screen {
-        return yiterm::screen_share::run(&args.screen_share);
+        let _logging = logging::init(args.config.as_deref(), args.log_filter.as_deref())?;
+        let result = yiterm::screen_share::run(&args.screen_share);
+        if let Err(error) = &result {
+            tracing::error!(error = %format!("{error:#}"), "Screen sharing capture failed");
+        }
+        return result;
     }
     let logging = logging::init(args.config.as_deref(), args.log_filter.as_deref())?;
     let result = run(args, &logging);

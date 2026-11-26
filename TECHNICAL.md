@@ -929,4 +929,40 @@ Mac 虚拟屏是 Tenimon 中显式开启的可选扩展，使用 TLS ALPN `tenim
 
 创建／注册／布局失败日志会指出阶段、系统错误码、虚拟屏 ID 和实际尺寸；辅助进程错误返回到客户端，不修改实体屏作为兜底。失败的尺寸请求不会留在成功缓存中，后续可重新请求。
 
+调整模式失败但自有虚拟屏仍有有效桌面时，保留当前模式并报告实际尺寸。辅助进程超过 16 秒不回复时终止该进程，丢弃失效的请求通道，避免迟到的回复被误配给下一次尺寸请求；后续请求可重新创建辅助进程。准备失败时发送完整错误并关闭 TLS。更新辅助进程后，当前卡住的旧进程需要通过 Tools → Stop YiTerm Sharing，再 Start YiTerm Sharing… 重新建立；停止共享会释放其虚拟屏。
+
 本机完成 macOS Release 构建；最终修复后用户已确认 iPad 连接远端 Mac 的问题解决。没有新增或运行 YiTerm 测试套件，没有 Windows 构建；本次确认不等于 Windows／Linux 或所有 macOS 配置均已验证。
+
+### Tenimon 扫码共享（Tailcat）
+
+桌面端 **Start YiTerm Sharing…** 启动共享后自动显示二维码；Tenimon 使用
+**扫描 YiTerm 二维码** 连接。默认监听 `127.0.0.1:9443`，由 Tailcat 只转发
+该共享端口，无需开放公网入站端口或登录 Tailscale。原有 TLS 1.3、
+`yiterm-screen/1`、屏幕数据和输入协议保持端到端。中继路径可能受共享 DERP
+带宽限制，直连、跨网络恢复和实际画面性能需在相应设备上验收。
+
+二维码编码 `tenimon://yiterm/connect?v=1&address=…&port=…&name=…&mode=standard`，
+参数按 URL 规则编码，Tailcat 地址区分大小写且含秘密，不能公开或写入日志。
+**Copy connection link** 可用于无法扫码的设备；**Done** 隐藏二维码，菜单
+**Show connection QR code…** 可重新打开；**New code** 更换临时密钥并停止旧 helper，
+旧码随旧 helper 退出失效；**Stop sharing** 同时停止本地服务和穿透 helper。
+应用退出或崩溃关闭 helper stdin 后也会停止共享，不保存长期隧道密钥。
+
+源码构建先安装 Go，然后运行：
+
+```sh
+python3 scripts/build_tailcat.py
+cargo build --release --bin yiterm
+./target/release/yiterm
+```
+
+Go 1.27.4 自动下载，Tailcat 固定
+`b9491c13c63925af4119aca70bd21b1691ff3d5b`。不传目标时 helper 输出到
+`target/release/yiterm-tailcat`，与默认 Cargo Release 二进制相邻；CI 传入
+Rust target 时输出到 `target/<target>/release/`。`scripts/package.py` 必须同时
+打包 helper，Mac app 放入 `Contents/MacOS` 并一同签名，Windows／Linux 与主程序
+相邻。Windows helper 只在 Windows CI runner 构建，本机不交叉编译 Windows。
+第三方许可随包位于 `licenses/tailcat-NOTICES.txt`。
+
+本轮桌面端只执行 macOS Release 构建，不新增或运行桌面测试。Windows 和 Linux
+的构建／运行及物理手机扫码仍需在对应环境验收。

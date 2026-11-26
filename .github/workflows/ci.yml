@@ -113,6 +113,14 @@ jobs:
           print("Restored unchanged crates:", ", ".join(restored) or "none")
           print("Crates with changed or uncached sources:", ", ".join(changed) or "none")
 
+      - uses: actions/setup-go@v6
+        with:
+          go-version: '1.27.4'
+          cache-dependency-path: tools/tailcat/go.sum
+
+      - name: Build sharing helper
+        run: python scripts/build_tailcat.py ${{ matrix.target }}
+
       - name: Build release
         env:
           YITERM_BUILD_REV: ${{ github.sha }}
@@ -170,6 +178,14 @@ jobs:
             target/release
           key: linux-centos7-rust-1.99.1-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'scripts/build_linux.sh') }}
           restore-keys: linux-centos7-rust-1.99.1-
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version: '1.27.4'
+          cache-dependency-path: tools/tailcat/go.sum
+
+      - name: Build Linux sharing helper
+        run: python3 scripts/build_tailcat.py x86_64-unknown-linux-gnu
 
       # Run Docker explicitly: GitHub's Node actions cannot run on glibc 2.17.
       - name: Build and package in CentOS 7 userspace

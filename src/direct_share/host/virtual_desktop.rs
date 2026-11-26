@@ -38,6 +38,9 @@ impl VirtualDesktop {
         ensure!(self.id != 0, "The iPad virtual display is unavailable");
         Ok(self.id)
     }
+    pub(super) fn is_running(&mut self) -> bool {
+        matches!(self.child.try_wait(), Ok(None))
+    }
     pub(super) fn resize(&mut self, size: [u16; 3]) -> Result<()> {
         ensure!(self.child.try_wait()?.is_none(), "The virtual display owner exited; restart sharing");
         if self.size == Some(size) { return Ok(()); }
@@ -46,8 +49,17 @@ impl VirtualDesktop {
         let input = self.input.as_mut().context("Virtual display owner input closed")?;
         writeln!(input, "{{\"width\":{w},\"height\":{h},\"scale\":{scale}}}")?;
         input.flush()?;
-        let line = self.replies.recv_timeout(Duration::from_secs(16))
-            .context("Virtual display owner did not respond")?;
+        let line = match self.replies.recv_timeout(Duration::from_secs(16)) {
+            Ok(line) => line,
+            Err(error) => {
+                // A late reply cannot be paired with a later resize. Retire only
+                // this owned helper rather than reuse its stuck request stream.
+                self.input.take();
+                let _ = self.child.kill();
+                let _ = self.child.wait();
+                return Err(error).context("Virtual display owner did not respond; helper stopped");
+            }
+        };
         let reply: serde_json::Value = serde_json::from_str(&line)
             .context("Invalid virtual display owner reply")?;
         if let Some(error) = reply.get("error").and_then(|value| value.as_str()) {

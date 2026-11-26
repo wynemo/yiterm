@@ -1,6 +1,7 @@
 //! TLS transport for YiTerm screen sharing, with raw VT output and framed input.
 #[cfg(any(target_os = "macos", target_os = "linux", windows))]
 pub mod host;
+pub mod pairing;
 
 use anyhow::{Context, Result, ensure};
 use portable_pty::PtySize;

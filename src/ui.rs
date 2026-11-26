@@ -4,6 +4,7 @@ pub(crate) mod browser;
 mod files;
 mod git;
 mod viewer;
+mod pairing;
 
 use super::*;
 #[cfg(windows)]
@@ -922,7 +923,7 @@ impl TerminalUi {
         self.menu = None;
         self.share_host_dialog = hosting;
         if hosting {
-            self.app.share_address = Some("0.0.0.0:9443".into());
+            self.app.share_address = Some("127.0.0.1:9443".into());
         } else {
             self.app.begin_connect_share();
         }
@@ -3165,6 +3166,10 @@ impl Render for TerminalUi {
                     },
                 ));
                 {
+                    if self.share_host.is_some() {
+                        items = items.child(self.menu_button("show-yiterm-code", "Show connection QR code…", cx,
+                            |this, _, _| { if let Some(host) = &mut this.share_host { host.pairing_visible = true; } this.menu = None; }));
+                    }
                     items = if let Some(host) = &self.share_host {
                         items.child(self.menu_button(
                             "stop-yiterm-sharing",
@@ -3382,6 +3387,7 @@ impl Render for TerminalUi {
         if self.viewer_open() && !self.app.settings_open && !self.app.about_open {
             root = root.child(self.code_viewer(window, cx));
         }
+        if let Some(panel) = self.pairing_panel(cx) { root = root.child(panel); }
         if self.app.share_address.is_some() {
             let hosting = self.share_host_dialog;
             let compact = window.viewport_size().width < px(660.);

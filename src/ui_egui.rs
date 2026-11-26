@@ -1061,6 +1061,10 @@ impl eframe::App for TerminalApp {
                         share_started = true;
                         ui.close();
                     }
+                    if self.share_host.is_some() && ui.button("Show connection QR code…").clicked() {
+                        if let Some(host) = &mut self.share_host { host.pairing_visible = true; }
+                        ui.close();
+                    }
                     if let Some(host) = &self.share_host {
                         if ui
                             .button(format!("Stop YiTerm Sharing ({})", host.address))
@@ -1072,7 +1076,7 @@ impl eframe::App for TerminalApp {
                     } else if ui.button("Start YiTerm Sharing…").clicked() {
                         self.share_host_dialog = true;
                         self.error = None;
-                        self.share_address = Some("0.0.0.0:9443".into());
+                        self.share_address = Some("127.0.0.1:9443".into());
                         share_started = true;
                         ui.close();
                     }
@@ -1469,6 +1473,28 @@ impl eframe::App for TerminalApp {
             self.forget_share_connection();
         } else if save_share {
             self.save_share_connection();
+        }
+        if let Some(host) = &mut self.share_host {
+            if host.pairing_visible {
+                let mut stop = false;
+                egui::Window::new("Connect with Tenimon").collapsible(false).resizable(false).show(ctx, |ui| {
+                    match host.pairing.status() {
+                        direct_share::pairing::Status::Starting => { ui.label("Preparing encrypted connection…"); }
+                        direct_share::pairing::Status::Failed => { ui.label("Code unavailable. Check your network and install yiterm-tailcat beside YiTerm."); }
+                        direct_share::pairing::Status::Ready(code) => {
+                            ui.image((code.texture(ctx), egui::vec2(code.pixels.width() as f32, code.pixels.height() as f32)));
+                            ui.label("Scan with Tenimon to connect. Keep this code private.");
+                            if ui.button("Copy connection link").clicked() { ctx.copy_text(code.url.clone()); }
+                        }
+                    }
+                    ui.horizontal(|ui| {
+                        if ui.button("New code").clicked() { host.pairing = direct_share::pairing::Pairing::start(host.address.port()); }
+                        stop = ui.button("Stop sharing").clicked();
+                        if ui.button("Done").clicked() { host.pairing_visible = false; }
+                    });
+                });
+                if stop { self.share_host = None; }
+            }
         }
         if let Some((id, draft)) = &mut self.rename_tab {
             let modal = egui::Modal::new(egui::Id::new(("rename-tab", *id))).show(ctx, |ui| {

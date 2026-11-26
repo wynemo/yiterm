@@ -100,8 +100,11 @@ def prepare_macos_bundle(binary: Path, version: str, directory: Path) -> Path:
     (contents / "MacOS").mkdir(parents=True)
     (contents / "Resources").mkdir()
     shutil.copy2(binary, contents / "MacOS/yiterm")
+    shutil.copy2(binary.parent / "yiterm-tailcat", contents / "MacOS/yiterm-tailcat")
+    (contents / "MacOS/yiterm-tailcat").chmod(0o755)
     (contents / "MacOS/yiterm").chmod(0o755)
     shutil.copy2(ROOT / "assets/icons/yiterm.icns", contents / "Resources/yiterm.icns")
+    shutil.copy2(ROOT / "licenses/tailcat-NOTICES.txt", contents / "Resources/tailcat-NOTICES.txt")
     with (contents / "Info.plist").open("wb") as output:
         plistlib.dump({
             "CFBundleName": "YiTerm",
@@ -134,14 +137,18 @@ def main() -> None:
                    if package["name"] == "yiterm" and package["id"] in metadata["workspace_members"])
     binary = ROOT / "target" / args.target / "release" / executable
     verify_binary(binary.read_bytes(), args.target)
+    helper = binary.parent / ("yiterm-tailcat.exe" if args.target.endswith("windows-msvc") else "yiterm-tailcat")
+    verify_binary(helper.read_bytes(), args.target)
     if args.target == "x86_64-unknown-linux-gnu":
         binary = prepare_linux_binary(binary)
     name = f"yiterm-{version}-{platform}"
     files = [
+        (helper, f"{name}/{helper.name}"),
         (binary, f"{name}/{executable}"),
         (ROOT / "readme.md", f"{name}/readme.md"),
         (ROOT / "readme.zhcn.md", f"{name}/readme.zhcn.md"),
         (ROOT / "TECHNICAL.md", f"{name}/TECHNICAL.md"),
+        (ROOT / "licenses/tailcat-NOTICES.txt", f"{name}/licenses/tailcat-NOTICES.txt"),
         (ROOT / "THIRD_PARTY_NOTICES.md", f"{name}/THIRD_PARTY_NOTICES.md"),
         (ROOT / "vendor/alacritty_terminal/LICENSE-APACHE", f"{name}/licenses/alacritty-LICENSE-APACHE"),
         (ROOT / "assets/fonts/ibm-plex-sans/OFL.txt", f"{name}/licenses/IBMPlexSans-OFL.txt"),
@@ -187,8 +194,8 @@ def main() -> None:
             with tarfile.open(archive, "w:gz") as package:
                 for source, destination in files:
                     info = package.gettarinfo(str(source), destination)
-                    info.mode = 0o755 if (source == binary or destination.endswith(
-                        ("/Contents/MacOS/yiterm", "/install-desktop.sh")
+                    info.mode = 0o755 if (source in (binary, helper) or destination.endswith(
+                        ("/Contents/MacOS/yiterm", "/Contents/MacOS/yiterm-tailcat", "/install-desktop.sh")
                     )) else 0o644
                     with source.open("rb") as content:
                         package.addfile(info, content)

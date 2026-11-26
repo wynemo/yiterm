@@ -234,6 +234,7 @@ mod macos {
                     .into_owned(),
             );
         } else if w == -1 {
+            tracing::info!(locked = h == 1, "Mac capture lock state changed");
             slot.2 = h == 1;
             if slot.2 {
                 slot.0 = None;

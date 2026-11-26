@@ -17,3 +17,9 @@ YiTerm includes these components under their respective licenses:
 - PowerShell prompt integration adapted from ELYTerminal: MIT, see licenses/elyterminal-MIT.txt and https://github.com/ELY-Open-Source/ELYTerminal
 
 Other Rust dependencies retain the licenses declared in their Cargo manifests.
+
+## Tailcat sharing helper
+
+The bundled `yiterm-tailcat` helper uses Tailcat (BSD-3-Clause), Tailscale,
+WireGuard, gVisor, the Go runtime, and a QR encoder. The pinned revision and
+complete dependency license texts are distributed in `licenses/tailcat-NOTICES.txt`.

@@ -258,6 +258,13 @@ static void pollDisplay(void) {
                 dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 50 * NSEC_PER_MSEC), dispatch_get_main_queue(), ^{ pollDisplay(); });
                 return;
             }
+            // A mode switch can fail while this owned display still has a
+            // usable desktop. Keep that mode instead of destroying the session.
+            if (hasGeometry && display == [owner.display displayID] &&
+                bounds.size.width >= 640 && bounds.size.height >= 480 &&
+                bounds.size.width <= 1920 && bounds.size.height <= 1920 && arrange(display)) {
+                complete(display, YES); return;
+            }
             if (owner.initial && owner.density == 2 && !owner.fallback &&
                 (!hasGeometry || bounds.size.width < 640 || bounds.size.height < 480)) {
                 // A 1x screen retains readable logical dimensions on systems

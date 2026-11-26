@@ -70,6 +70,8 @@ pub fn run(address: SocketAddr, options: &Options) -> Result<()> {
 
 pub struct Host {
     pub address: SocketAddr,
+    pub pairing: super::pairing::Pairing,
+    pub pairing_visible: bool,
     stop: Option<oneshot::Sender<()>>,
     worker: Option<std::thread::JoinHandle<()>>,
     #[cfg(windows)]
@@ -121,6 +123,8 @@ impl Host {
                 let process = privilege::launch(args, data_dir()?)?;
                 return Ok(Self {
                     address,
+                    pairing: super::pairing::Pairing::start(address.port()),
+                    pairing_visible: true,
                     stop: None,
                     worker: None,
                     process: Some(process),
@@ -151,6 +155,8 @@ impl Host {
             })?;
         Ok(Self {
             address,
+            pairing: super::pairing::Pairing::start(address.port()),
+            pairing_visible: true,
             stop: Some(stop),
             worker: Some(worker),
             #[cfg(windows)]
@@ -322,8 +328,12 @@ async fn serve(
             Ok(())
         })();
         if let Err(error) = prepared {
+            if workspace.as_mut().is_some_and(|owner| !owner.is_running()) {
+                *workspace = None;
+            }
             let message = format!("\r\nYiTerm virtual desktop: {error:#}\r\n");
             let _ = timeout(IO_TIMEOUT, stream.write_all(message.as_bytes())).await;
+            let _ = timeout(IO_TIMEOUT, stream.shutdown()).await;
             return Err(error);
         }
         let desktop = if desktop_size.is_some() { workspace.as_mut() } else { None };
