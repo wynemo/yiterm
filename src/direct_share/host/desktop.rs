@@ -18,6 +18,8 @@ pub(super) async fn session(
         platform::stream(&options, size_updates, events, &output)
     });
     let (mut reader, mut writer) = tokio::io::split(stream);
+    timeout(IO_TIMEOUT, writer.write_all(telemetry::CAPABILITY)).await??;
+    let (probes, mut replies) = mpsc::channel(2);
     eprintln!("YiTerm viewer connected.");
     let result = {
         let receive = receive(
@@ -30,9 +32,15 @@ pub(super) async fn session(
                 sizes.send_replace(size);
                 Ok(())
             },
+            |token| { let _ = probes.try_send(token); },
         );
         let send = async {
-            while let Some(frame) = frames.recv().await {
+            loop {
+                let frame = tokio::select! {
+                    biased;
+                    Some(token) = replies.recv() => telemetry::pong(token),
+                    frame = frames.recv() => match frame { Some(frame) => frame, None => break },
+                };
                 timeout(IO_TIMEOUT, async {
                     writer.write_all(&frame).await?;
                     writer.flush().await

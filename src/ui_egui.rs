@@ -1076,7 +1076,7 @@ impl eframe::App for TerminalApp {
                     } else if ui.button("Start YiTerm Sharing…").clicked() {
                         self.share_host_dialog = true;
                         self.error = None;
-                        self.share_address = Some("127.0.0.1:9443".into());
+                        self.share_address = Some("0.0.0.0:9443".into());
                         share_started = true;
                         ui.close();
                     }

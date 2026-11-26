@@ -24,6 +24,8 @@ type HostWorkspace = Option<VirtualDesktop>;
 #[cfg(not(target_os = "macos"))]
 type HostWorkspace = ();
 
+mod telemetry;
+
 type ServerStream = tokio_rustls::server::TlsStream<TcpStream>;
 type Stop<'a, F> = std::pin::Pin<&'a mut F>;
 
@@ -295,6 +297,11 @@ async fn serve(
     workspace: &mut HostWorkspace,
 ) -> Result<()> {
     socket.set_nodelay(true)?;
+    // Keep TCP's queued old screen data bounded on a slow uplink. Backpressure
+    // must reach the existing latest-frame capture slot before seconds pile up.
+    if let Err(error) = socket2::SockRef::from(&socket).set_send_buffer_size(256 * 1024) {
+        tracing::debug!(%error, "Cannot bound sharing TCP send buffer");
+    }
     let setup = async {
         let mut stream = acceptor.accept(socket).await?;
         let desktop = stream.get_ref().1.alpn_protocol() == Some(DESKTOP_ALPN);
@@ -360,8 +367,9 @@ async fn receive(
     reader: &mut (impl AsyncReadExt + Unpin),
     input: impl AsyncFnMut(&[u8]) -> Result<()>,
     resize: impl FnMut(PtySize) -> Result<()>,
+    probe: impl FnMut(u64),
 ) -> Result<()> {
-    receive_with_desktop(reader, input, resize, |_| anyhow::bail!("This session has no virtual display")).await
+    receive_with_desktop(reader, input, resize, |_| anyhow::bail!("This session has no virtual display"), probe).await
 }
 
 async fn receive_with_desktop(
@@ -369,6 +377,7 @@ async fn receive_with_desktop(
     mut input: impl AsyncFnMut(&[u8]) -> Result<()>,
     mut resize: impl FnMut(PtySize) -> Result<()>,
     mut desktop: impl FnMut([u16; 3]) -> Result<()>,
+    mut probe: impl FnMut(u64),
 ) -> Result<()> {
     use zeroize::Zeroize;
 
@@ -388,6 +397,7 @@ async fn receive_with_desktop(
             }
             Ok(RESIZE) => resize(timeout(IO_TIMEOUT, read_size(reader)).await??)?,
             Ok(PING) => {}
+            Ok(5) => probe(timeout(IO_TIMEOUT, reader.read_u64()).await??),
             Ok(DESKTOP_SIZE) => desktop(timeout(IO_TIMEOUT, read_desktop_size(reader)).await??)?,
             Ok(_) => anyhow::bail!("Unknown YiTerm input frame"),
             Err(error) if error.kind() == io::ErrorKind::UnexpectedEof => return Ok(()),

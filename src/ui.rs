@@ -923,7 +923,7 @@ impl TerminalUi {
         self.menu = None;
         self.share_host_dialog = hosting;
         if hosting {
-            self.app.share_address = Some("127.0.0.1:9443".into());
+            self.app.share_address = Some("0.0.0.0:9443".into());
         } else {
             self.app.begin_connect_share();
         }

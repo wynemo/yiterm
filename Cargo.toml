@@ -38,6 +38,7 @@ russh-sftp = "3.0.1"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "process", "signal", "sync", "time"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
 tokio-socks = "0.5"
+socket2 = "0.6"
 tokio-rustls = { version = "0.26", default-features = false, features = ["ring"] }
 zeroize = "1"
 hmac = "0.13"

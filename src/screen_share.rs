@@ -839,20 +839,22 @@ mod macos {
                     }
                 }
                 count = id;
+                // Present a captured frame atomically. Intermediate worker batches
+                // must not force the viewer to snapshot the full canvas 32 times.
+                out.write_all(b"\x1b[?2026h")?;
                 // At most four workers and four compressed tiles resident at once.
                 for batch in tiles.chunks_mut(4) {
                     let encoded = encoders.batch(batch, quality)?;
-                    out.write_all(b"\x1b[?2026h")?;
                     for image in encoded {
                         total_bytes += send(&mut out, image)?;
                         total_tiles += 1;
                     }
-                    out.write_all(b"\x1b[?2026l")?;
                     out.flush()?;
                     if STOP.load(Ordering::Relaxed) {
                         return Ok(());
                     }
                 }
+                out.write_all(b"\x1b[?2026l")?;
                 out.flush()?;
                 // Commit only after every dirty tile was written successfully.
                 previous = current.clone();

@@ -125,6 +125,9 @@ pub(super) async fn session(
     drop(pair.slave);
     eprintln!("YiTerm viewer connected.");
     let (mut reader, mut writer) = tokio::io::split(stream);
+    timeout(IO_TIMEOUT, writer.write_all(telemetry::CAPABILITY)).await??;
+    timeout(IO_TIMEOUT, writer.flush()).await??;
+    let (probes, mut replies) = mpsc::channel(2);
     let result = {
         let (sizes, mut requested_sizes) = mpsc::channel::<[u16; 3]>(8);
         let receive = receive_with_desktop(
@@ -136,6 +139,7 @@ pub(super) async fn session(
                 owner.resize(requested)?;
                 sizes.try_send(requested).context("Virtual display resize queue full or capture ended")
             },
+            |token| { let _ = probes.try_send(token); },
         );
         let update_capture = async {
             while let Some([w, h, scale]) = requested_sizes.recv().await {
@@ -145,13 +149,26 @@ pub(super) async fn session(
             Ok::<_, anyhow::Error>(())
         };
         let send = async {
-            let mut buffer = [0; MAX_INPUT];
+            let mut buffer = [0; 64 * 1024];
+            let mut boundary = telemetry::Boundary::default();
             loop {
-                let n = match read_pty(&fd, &mut buffer).await {
+                let read = tokio::select! {
+                    biased;
+                    Some(token) = replies.recv(), if boundary.safe() => {
+                        timeout(IO_TIMEOUT, async {
+                            writer.write_all(&telemetry::pong(token)).await?;
+                            writer.flush().await
+                        }).await??;
+                        continue;
+                    }
+                    read = read_pty(&fd, &mut buffer) => read,
+                };
+                let n = match read {
                     Ok(0) => break,
                     Err(error) if error.raw_os_error() == Some(libc::EIO) => break,
                     result => result?,
                 };
+                boundary.consume(&buffer[..n]);
                 timeout(IO_TIMEOUT, async {
                     writer.write_all(&buffer[..n]).await?;
                     writer.flush().await

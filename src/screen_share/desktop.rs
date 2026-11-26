@@ -140,6 +140,7 @@ impl Renderer {
                 .is_none_or(|old| old.source != view.source || old.canvas != view.canvas);
         let moved = self.previous_view != Some(view);
         let mut out = Vec::new();
+        out.extend_from_slice(b"\x1b[?2026h");
         if reset {
             delete(&mut out, self.previous_grid.0 * self.previous_grid.1)?;
             self.previous = None;
@@ -170,6 +171,8 @@ impl Renderer {
             }
         }
         self.flush(&mut batch, quality, &mut out, output)?;
+        out.extend_from_slice(b"\x1b[?2026l");
+        self.flush(&mut batch, quality, &mut out, output)?;
         self.previous = Some(frame);
         self.previous_view = Some(view);
         self.previous_grid = grid;
@@ -184,11 +187,9 @@ impl Renderer {
         output: &mpsc::Sender<Vec<u8>>,
     ) -> Result<()> {
         if !batch.is_empty() {
-            out.extend_from_slice(b"\x1b[?2026h");
             for image in self.encoders.batch(batch, quality)? {
                 send(out, image)?;
             }
-            out.extend_from_slice(b"\x1b[?2026l");
             batch.clear();
         }
         if !out.is_empty() {
