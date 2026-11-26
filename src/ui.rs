@@ -490,6 +490,8 @@ pub(super) struct TerminalUi {
     clipboard_owner: std::result::Result<isize, String>,
     #[cfg(windows)]
     shutting_down: bool,
+    #[cfg(windows)]
+    browser_error_dismissal: Option<gpui::Task<()>>,
     _redraw: gpui::Subscription,
     _activation: gpui::Subscription,
     _poll: gpui::Task<()>,
@@ -794,6 +796,8 @@ impl TerminalUi {
             clipboard_owner: windows_clipboard_owner(window).map_err(|e| format!("{e:#}")),
             #[cfg(windows)]
             shutting_down: false,
+            #[cfg(windows)]
+            browser_error_dismissal: None,
             _redraw: redraw,
             _activation: activation,
             _poll: task,
@@ -3777,6 +3781,22 @@ impl TerminalUi {
     }
 
     #[cfg(windows)]
+    fn show_browser_error(&mut self, message: String, cx: &mut ViewContext<Self>) {
+        tracing::warn!(%message, "SSH browser could not open");
+        self.app.error = Some(message.clone());
+        self.browser_error_dismissal = Some(cx.spawn(async move |this, cx| {
+            gpui::Timer::after(Duration::from_secs(5)).await;
+            let _ = this.update(cx, |this, cx| {
+                if this.app.error.as_ref() == Some(&message) {
+                    this.app.error = None;
+                    cx.notify();
+                }
+            });
+        }));
+        cx.notify();
+    }
+
+    #[cfg(windows)]
     fn open_ssh_browser(
         &mut self,
         initial_url: String,
@@ -3878,8 +3898,7 @@ impl TerminalUi {
                         Err(error) => {
                             let message = format!("Cannot open SSH browser: {error:#}");
                             let _ = this.update(cx, |this, cx| {
-                                this.app.error = Some(message);
-                                cx.notify();
+                                this.show_browser_error(message, cx);
                             });
                             return;
                         }
@@ -3933,8 +3952,7 @@ impl TerminalUi {
                 Err(error) => {
                     let message = format!("Cannot open SSH browser: {error}");
                     let _ = this.update(cx, |this, cx| {
-                        this.app.error = Some(message);
-                        cx.notify();
+                        this.show_browser_error(message, cx);
                     });
                 }
             }
