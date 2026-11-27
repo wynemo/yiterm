@@ -31,8 +31,17 @@ impl TerminalUi {
                 panel = panel.child(gpui::img(invitation.render.clone())
                     .w(px(invitation.pixels.width() as f32)).h(px(invitation.pixels.height() as f32)))
                     .child("Scan with Tenimon to connect to this desktop.")
-                    .child(Button::new("copy-sharing-link").label("Copy connection link").on_click(
-                        cx.listener(move |_, _, _, cx| { cx.write_to_clipboard(gpui::ClipboardItem::new_string(link.clone())); })))
+                    .child(div().id("sharing-link-value").w_full().min_w(px(0.)).overflow_x_scroll()
+                        .p(px(8.)).rounded(px(6.)).border_1().border_color(theme.border())
+                        .text_size(px(12.)).child(invitation.url.clone()))
+                    .child(Button::new("copy-sharing-link")
+                        .label(if host.pairing.copied() { "Copied" } else { "Copy connection link" }).on_click(
+                        cx.listener(move |this, _, _, cx| {
+                            cx.write_to_clipboard(gpui::ClipboardItem::new_string(link.clone()));
+                            if let Some(host) = &mut this.share_host { host.pairing.mark_copied(); }
+                            cx.notify();
+                        })))
+                    .child(div().text_size(px(12.)).child("Command line: yiterm --share-link"))
                     .child(div().text_size(px(12.)).child("Keep this code private. Stopping sharing revokes it."));
             }
         }

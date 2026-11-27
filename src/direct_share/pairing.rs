@@ -1,4 +1,8 @@
 //! A native helper owns the Tailcat engine; closing its stdin revokes the code.
+mod links;
+
+pub fn current_link(port: Option<u16>) -> Result<String> { links::current(port) }
+
 use super::*;
 use std::{
     io::{BufRead, BufReader, Read},
@@ -81,16 +85,24 @@ pub enum Status {
     Ready(Arc<Invitation>),
     Failed,
 }
+#[derive(Default)]
+struct Export { closed: bool, link: Option<links::PublishedLink> }
+
 pub struct Pairing {
     child: Option<Child>,
     state: Arc<Mutex<Status>>,
+    export: Arc<Mutex<Export>>,
+    copied: bool,
 }
 impl Pairing {
     pub fn start(port: u16) -> Self {
         let state = Arc::new(Mutex::new(Status::Starting));
+        let export = Arc::new(Mutex::new(Export::default()));
         let mut result = Self {
             child: None,
             state: state.clone(),
+            export: export.clone(),
+            copied: false,
         };
         let start = || -> Result<Child> {
             let executable = std::env::current_exe()?;
@@ -130,12 +142,22 @@ impl Pairing {
                         .and_then(|_| serde_json::from_str::<Message>(&line).map_err(Into::into))
                         .and_then(Invitation::parse);
                     *state.lock().unwrap() = match parsed {
-                        Ok(invitation) => Status::Ready(Arc::new(invitation)),
+                        Ok(invitation) => {
+                            let mut published = export.lock().unwrap();
+                            if !published.closed {
+                                match links::PublishedLink::new(port, &invitation.url) {
+                                    Ok(link) => published.link = Some(link),
+                                    Err(_) => tracing::warn!("Cannot publish active sharing link for CLI access"),
+                                }
+                            }
+                            Status::Ready(Arc::new(invitation))
+                        },
                         Err(_) => Status::Failed,
                     };
                     super::super::wake_ui();
                     // Observe helper exit without holding the process lock.
                     let _ = std::io::copy(&mut reader, &mut std::io::sink());
+                    export.lock().unwrap().link = None;
                     *state.lock().unwrap() = Status::Failed;
                     super::super::wake_ui();
                 });
@@ -144,12 +166,19 @@ impl Pairing {
         }
         result
     }
+    pub fn copied(&self) -> bool { self.copied }
+    pub fn mark_copied(&mut self) { self.copied = true; }
     pub fn status(&self) -> Status {
         self.state.lock().unwrap().clone()
     }
 }
 impl Drop for Pairing {
     fn drop(&mut self) {
+        {
+            let mut export = self.export.lock().unwrap();
+            export.closed = true;
+            export.link = None;
+        }
         if let Some(mut child) = self.child.take() {
             // EOF triggers graceful engine shutdown. A watchdog also reaps a stuck helper.
             drop(child.stdin.take());

@@ -590,7 +590,9 @@ mod macos {
 
     fn render(o: &Options, latest: Arc<Latest>) -> Result<()> {
         let _terminal = Terminal::enter(o.share_read_only)?;
-        let mut out = std::io::stdout();
+        // Batch Kitty headers/chunks into bounded PTY writes. Explicit flushes
+        // below still deliver each encoded batch and control response promptly.
+        let mut out = std::io::BufWriter::with_capacity(16 * 1024, std::io::stdout());
         let encoders = EncoderPool::new();
         out.write_all(b"\x1b]777;yiterm;quality=2\x1b\\\x1b[14t\x1b[16t\x1b[18t\x1b[?9002$p")?;
         if !o.share_read_only {
@@ -627,6 +629,8 @@ mod macos {
         let mut applied_quality = None;
         let mut frame_sequence = 0usize;
         let mut acknowledgment_baseline = 0usize;
+        let mut stats_sequence = 0usize;
+        let mut stats_bytes = 0usize;
         let input_pump = InputPump::new(o.share_read_only);
         let mut source: Option<Arc<Frame>> = None;
         let mut unlock_wait: Option<Instant> = None;
@@ -927,9 +931,12 @@ mod macos {
                     last_adjust = Instant::now();
                 }
                 if last_stats.elapsed() >= Duration::from_secs(5) {
+                    let seconds = last_stats.elapsed().as_secs_f64();
+                    let sent_fps = frame_sequence.saturating_sub(stats_sequence) as f64 / seconds;
+                    let image_kib_per_second = total_bytes.saturating_sub(stats_bytes) as f64 / seconds / 1024.0;
                     tracing::info!(width=frame.w, height=frame.h, canvas,
                         total_image_bytes=total_bytes, total_tiles,
-                        last_dirty_tiles=tiles.len(), reset, layout_changed, fps,
+                        last_dirty_tiles=tiles.len(), reset, layout_changed, fps, sent_fps, image_kib_per_second,
                         encode_write_ms=elapsed.as_millis() as u64,
                         unacknowledged=frame_sequence.saturating_sub(input.acknowledged_frame.max(acknowledgment_baseline)),
                         "Screen stream image counters");
@@ -938,9 +945,13 @@ mod macos {
                         elapsed.as_millis(),
                         previous.as_ref().map_or(0, |p| p.pixels.len())
                     ); }
+                    stats_sequence = frame_sequence;
+                    stats_bytes = total_bytes;
                     last_stats = Instant::now();
                 }
-                last_frame = Instant::now();
+                // Encoding time belongs to the frame interval, rather than
+                // adding another full interval after each encoded picture.
+                last_frame = started;
             }
             Ok(())
         })();

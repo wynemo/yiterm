@@ -63,6 +63,12 @@ struct Args {
     /// Listen for YiTerm screen sharing on this IP:PORT (macOS, Windows or Linux X11).
     #[arg(long, requires = "share_screen", conflicts_with_all = ["share_list", "share_stats"])]
     share_listen: Option<std::net::SocketAddr>,
+    /// Print the active Tenimon QR connection link from a running YiTerm host.
+    #[arg(long, conflicts_with_all = ["share_screen", "share_connect", "ssh", "mosh", "shell"])]
+    share_link: bool,
+    /// Select the sharing port when multiple YiTerm hosts are running.
+    #[arg(long, requires = "share_link")]
+    share_link_port: Option<u16>,
     /// View a YiTerm host sharing its screen at HOST:PORT.
     #[arg(long, conflicts_with_all = ["ssh", "mosh", "shell", "share_screen"])]
     share_connect: Option<String>,
@@ -1774,7 +1780,7 @@ fn main() -> Result<()> {
     #[cfg(windows)]
     if std::env::args_os()
         .skip(1)
-        .any(|arg| arg == "--share-screen")
+        .any(|arg| arg == "--share-screen" || arg == "--share-link")
     {
         use windows_sys::Win32::System::Console::{
             ATTACH_PARENT_PROCESS, AttachConsole, SetConsoleCtrlHandler,
@@ -1786,6 +1792,10 @@ fn main() -> Result<()> {
         }
     }
     let args = Args::parse();
+    if args.share_link {
+        println!("{}", direct_share::pairing::current_link(args.share_link_port)?);
+        return Ok(());
+    }
     if let Some(address) = args.share_listen {
         #[cfg(any(target_os = "macos", target_os = "linux", windows))]
         return direct_share::host::run(address, &args.screen_share);

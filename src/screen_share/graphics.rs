@@ -163,7 +163,10 @@ fn encode(mut tile: Tile, quality: usize) -> Result<Encoded> {
             }
         }
     }
-    let mut encoder = ZlibEncoder::new(Vec::new(), Compression::fast());
+    // Keep tiny typing/cursor patches cheap; larger patches benefit from a
+    // stronger lossless compressor on bandwidth-limited screen links.
+    let compression = if tile.rgb.len() >= 12 * 1024 { Compression::new(3) } else { Compression::fast() };
+    let mut encoder = ZlibEncoder::new(Vec::new(), compression);
     encoder.write_all(&tile.rgb)?;
     let zipped = encoder.finish()?;
     let compressed = zipped.len() < tile.rgb.len();

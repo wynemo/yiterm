@@ -1484,7 +1484,12 @@ impl eframe::App for TerminalApp {
                         direct_share::pairing::Status::Ready(code) => {
                             ui.image((code.texture(ctx), egui::vec2(code.pixels.width() as f32, code.pixels.height() as f32)));
                             ui.label("Scan with Tenimon to connect. Keep this code private.");
-                            if ui.button("Copy connection link").clicked() { ctx.copy_text(code.url.clone()); }
+                            ui.add_sized([360.0, 80.0], egui::Label::new(egui::RichText::new(&code.url).monospace()).wrap().selectable(true));
+                            if ui.button(if host.pairing.copied() { "Copied" } else { "Copy connection link" }).clicked() {
+                                ctx.copy_text(code.url.clone());
+                                host.pairing.mark_copied();
+                            }
+                            ui.label("Command line: yiterm --share-link");
                         }
                     }
                     ui.horizontal(|ui| {
