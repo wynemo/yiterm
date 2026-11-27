@@ -609,7 +609,6 @@ mod macos {
         let mut count = 0;
         let mut old_grid = (0, 0);
         let mut old_canvas = false;
-        let mut last_patches = std::collections::HashMap::new();
         let fixed = match o.share_quality.as_deref().unwrap_or("lossless") {
             "auto" => None,
             "565" => Some(1),
@@ -802,7 +801,6 @@ mod macos {
                 if reset {
                     delete(&mut out, count)?;
                     previous = None;
-                    last_patches.clear();
                 }
                 old_geometry = geo;
                 old_origin = origin;
@@ -816,7 +814,7 @@ mod macos {
                     for iy in 0..ny {
                         for ix in 0..nx {
                             let patch_id = iy * nx + ix + 1;
-                            let mut tile = tile_layout(
+                            let tile = tile_layout(
                                 patch_id,
                                 ix,
                                 iy,
@@ -826,7 +824,6 @@ mod macos {
                                 (frame.w, frame.h),
                                 canvas,
                             );
-                            tile.restore_patch(last_patches.get(&patch_id).copied());
                             place(&mut placements, &tile)?;
                         }
                     }
@@ -856,7 +853,7 @@ mod macos {
                         let dirty = dirty_tiles[iy * nx + ix];
                         if !dirty {
                             if layout_changed {
-                                let mut tile = tile_layout(
+                                let tile = tile_layout(
                                     id,
                                     ix,
                                     iy,
@@ -866,15 +863,13 @@ mod macos {
                                     (frame.w, frame.h),
                                     canvas,
                                 );
-                                tile.restore_patch(last_patches.get(&id).copied());
                                 place(&mut out, &tile)?;
                             }
                             continue;
                         }
                         let mut tile =
                             tile_layout(id, ix, iy, grid, geo, origin, (frame.w, frame.h), canvas);
-                        if !tile.capture_patch(frame, previous.as_deref()) { continue; }
-                        if let Some(patch) = tile.patch_position() { last_patches.insert(id, patch); }
+                        tile.capture(frame);
                         tiles.push(tile);
                     }
                 }

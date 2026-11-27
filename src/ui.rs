@@ -485,6 +485,7 @@ pub(super) struct TerminalUi {
     shell_environment_error: Option<String>,
     _settings_subscriptions: Vec<gpui::Subscription>,
     menu: Option<Menu>,
+    menu_anchors: std::rc::Rc<std::cell::Cell<[gpui::Point<Pixels>; 2]>>,
     context_anchor: UiPoint<Pixels>,
     ime_selection: Range<usize>,
     #[cfg(windows)]
@@ -791,6 +792,7 @@ impl TerminalUi {
             shell_environment_error: None,
             _settings_subscriptions: settings_subscriptions,
             menu: None,
+            menu_anchors: Default::default(),
             context_anchor: point(px(0.), px(0.)),
             ime_selection: 0..0,
             #[cfg(windows)]
@@ -2409,12 +2411,20 @@ impl Render for TerminalUi {
             self.app.window_title = title;
         }
         let theme = self.app.theme;
+        let menu_anchors = self.menu_anchors.clone();
         let menu = div()
             .flex()
             .items_center()
             .h(px(28.))
             .gap(px(4.))
             .px(px(6.))
+            .on_children_prepainted(move |bounds, _, _| {
+                // Settings, Pane, and Tools are laid out inside the right panel.
+                // Use their window coordinates, including the resizable sidebar.
+                if let (Some(pane), Some(tools)) = (bounds.get(1), bounds.get(2)) {
+                    menu_anchors.set([pane.bottom_left(), tools.bottom_left()]);
+                }
+            })
             .when(!cfg!(target_os = "macos"), |menu| {
                 menu.child(self.menu_button("settings", "Settings", cx, |this, _, _| {
                     this.app.settings_open = true;
@@ -3102,12 +3112,13 @@ impl Render for TerminalUi {
             root = self.native_menu_actions(root, cx);
         }
         if let Some(menu) = self.menu {
+            let anchor = self.menu_anchors.get()[usize::from(menu != Menu::Pane)];
             let mut items = div()
                 .id("popup-menu")
                 .occlude()
                 .absolute()
-                .left(px(if menu == Menu::Pane { 60. } else { 100. }))
-                .top(px(23.))
+                .left(anchor.x)
+                .top(anchor.y)
                 .min_w(px(130.))
                 .p(px(4.))
                 .flex()

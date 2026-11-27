@@ -108,7 +108,6 @@ struct Renderer {
     previous: Option<Frame>,
     previous_view: Option<View>,
     previous_grid: (usize, usize),
-    last_patches: std::collections::HashMap<usize, [usize; 4]>,
 }
 
 impl Renderer {
@@ -118,7 +117,6 @@ impl Renderer {
             previous: None,
             previous_view: None,
             previous_grid: (0, 0),
-            last_patches: Default::default(),
         }
     }
 
@@ -146,7 +144,6 @@ impl Renderer {
         if reset {
             delete(&mut out, self.previous_grid.0 * self.previous_grid.1)?;
             self.previous = None;
-            self.last_patches.clear();
         }
         let dirty = dirty_tiles(&frame, self.previous.as_ref(), grid);
         let mut batch = Vec::with_capacity(4);
@@ -163,14 +160,12 @@ impl Renderer {
                 view.canvas,
             );
             if needs_encoding {
-                if !tile.capture_patch(&frame, self.previous.as_ref()) { continue; }
-                if let Some(patch) = tile.patch_position() { self.last_patches.insert(index + 1, patch); }
+                tile.capture(&frame);
                 batch.push(tile);
                 if batch.len() == 4 {
                     self.flush(&mut batch, quality, &mut out, output)?;
                 }
             } else if moved {
-                tile.restore_patch(self.last_patches.get(&(index + 1)).copied());
                 place(&mut out, &tile)?;
             }
         }

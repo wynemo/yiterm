@@ -98,38 +98,11 @@ pub(super) struct Tile {
     pub rgb: Vec<u8>,
 }
 impl Tile {
-    pub fn patch_position(&self) -> Option<[usize; 4]> {
-        self.canvas.map(|[_, _, x, y]| [x, y, self.w, self.h])
-    }
-    pub fn restore_patch(&mut self, patch: Option<[usize; 4]>) {
-        if let (Some(canvas), Some([x, y, w, h])) = (self.canvas.as_mut(), patch) {
-            canvas[2] = x; canvas[3] = y; self.w = w; self.h = h;
-        }
-    }
-    pub fn capture_patch(&mut self, frame: &Frame, previous: Option<&Frame>) -> bool {
+    pub fn capture(&mut self, frame: &Frame) {
+        // Uploads replace the image ID rather than compositing onto its old pixels.
+        // Keep the complete tile so unchanged pixels survive every replacement.
         let (x, y) = self.canvas.map_or((0, 0), |c| (c[2], c[3]));
-        if self.canvas.is_some() {
-            if let Some(previous) = previous {
-                let (mut left, mut top, mut right, mut bottom) = (self.w, self.h, 0, 0);
-                for row in 0..self.h {
-                    let start = ((y + row) * frame.w + x) * 4;
-                    let old = &previous.pixels[start..start + self.w * 4];
-                    let new = &frame.pixels[start..start + self.w * 4];
-                    if old == new { continue; }
-                    let changed = |column: usize| old[column*4..column*4+3] != new[column*4..column*4+3];
-                    if let Some(first) = (0..self.w).find(|&column| changed(column)) {
-                        let last = (first..self.w).rfind(|&column| changed(column)).unwrap();
-                        left = left.min(first); right = right.max(last + 1);
-                        top = top.min(row); bottom = bottom.max(row + 1);
-                    }
-                }
-                if right <= left || bottom <= top { return false; }
-                self.restore_patch(Some([x + left, y + top, right - left, bottom - top]));
-            }
-        }
-        let (x, y) = self.canvas.map_or((x, y), |c| (c[2], c[3]));
         self.rgb = frame.tile_rgb(x, y, self.w, self.h);
-        true
     }
 }
 
